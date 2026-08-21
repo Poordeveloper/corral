@@ -1,0 +1,11 @@
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# Ownership boundaries as lint law (Workflow Appendix A). This list grows as
+# owners appear: only the state module opens the database, only the runtime
+# spawns PTYs, only the platform modules touch OS-specific APIs. Adding an
+# owner without adding its boundary rule here leaves the rule to prose alone.
+disallowed-methods = [
+    { path = "std::env::set_var", reason = "process-global mutation; pass configuration explicitly (AGENTS.md §Rust)" },
+    { path = "std::env::remove_var", reason = "process-global mutation; pass configuration explicitly (AGENTS.md §Rust)" },
+]

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Release gate: a strict superset of ./scripts/verify. It answers "can we
+# release", never "can we merge" (AGENTS.md §Verification).
+#
+# INCOMPLETE BY DESIGN. The breadth checks below arrive with the work they
+# cover, so this script deliberately exits non-zero rather than reporting a
+# release-ready tree it has not actually verified.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+./scripts/verify
+
+echo "==> release-critical quarantines"
+./scripts/check-quarantines --release
+
+cat >&2 <<'MISSING'
+
+verify-release: INCOMPLETE — the following gates are not implemented yet:
+
+  supported provider/version matrix       (PR4-PR6)
+  packaging / install / uninstall         (M1 completion, after PR8)
+  multi-platform release checks           (macOS + Linux)
+  migration verification                  (PR2 onward)
+  dogfood release-gate evidence           (ROADMAP.md §5)
+
+Implement the gate with the work it covers; do not make this script pass by
+removing the check.
+MISSING
+exit 1

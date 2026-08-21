@@ -1,15 +1,15 @@
 # M1 UX Semantics Contract — Founder Decision Record
 
 > Status: founder-accepted decisions from the 2026-08-21 UX-semantics grill.
-> Newer than, and where in conflict superseding, older statements in
-> `Corral_Development_Plan_v2.0_EN.md` (notably §2/§6 takeover semantics),
-> pending reconciliation. Companion record:
-> `2026-08-21-m1-decision-grill.md`.
-> Routing: state model + terminology → `ARCHITECTURE.md`/`PRODUCT.md` at
-> PR0; notification rules → PR7 acceptance criteria; the AGENTS.md
-> first-response-lease amendment was founder-acked in this grill and is
-> applied in the same change that lands this record; S3 joins the spike
-> list.
+> Materialized into canon at PR0 — capability ladder → `PRODUCT.md` §3;
+> state model, actions, degradation, notifications, terminology →
+> `PRODUCT.md` §4–§9; attention and evidence architecture →
+> `ARCHITECTURE.md` §2; S3 → `ROADMAP.md` §3. The first-response-lease
+> amendment is law in `AGENTS.md` §Runtime truth. Notification rules become
+> PR7 acceptance criteria. The development plan whose takeover semantics it
+> supersedes is retired to `docs/history/`.
+> Companion records: `2026-08-21-m1-decision-grill.md`,
+> `2026-08-21-workflow-governance-grill.md`.
 
 ## 0. Control model: capability ladder (rewrites "Take control")
 

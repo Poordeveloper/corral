@@ -1,0 +1,48 @@
+# macOS coverage and scheduled evidence amplification.
+#
+# Per-PR CI runs on Linux; macOS runs after merge and on a schedule, and is
+# required by scripts/verify-release. Local development already verifies on
+# macOS, and a private repository bills macOS runners at ten times the rate.
+#
+# A failure here never retroactively invalidates merged history. It produces a
+# finding, may freeze the affected owner's autonomous merge pending triage, and
+# follows the P1 process if it is a real correctness defect
+# (docs/ENGINEERING_WORKFLOW.md §7).
+name: Scheduled
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  verify-macos:
+    name: verify (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Install cargo-deny
+        run: command -v cargo-deny || cargo install cargo-deny --locked
+
+      - run: ./scripts/verify
+
+  quarantine-leases:
+    name: quarantine leases
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-quarantines

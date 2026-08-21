@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Change-size advisory (docs/ENGINEERING_WORKFLOW.md §5).
+#
+# Review pressure, never a lint: it always exits 0. Splitting a coherent
+# invariant into unsafe partial behaviour to satisfy a number is worse than
+# the large diff (AGENTS.md §Change size).
+#
+#   loc-advisory [base-ref]     default base: origin/main
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+BASE="${1:-origin/main}"
+git rev-parse --verify --quiet "$BASE" >/dev/null || {
+    echo "loc-advisory: unknown base ref '$BASE'"; exit 0; }
+merge_base="$(git merge-base "$BASE" HEAD)" || exit 0
+
+prod=0
+test=0
+other=0
+
+while IFS="	" read -r added deleted path; do
+    [ -n "${path:-}" ] || continue
+    [ "$added" = "-" ] && continue              # binary
+    changed=$((added + deleted))
+    case "$path" in
+        */tests/*|*_tests.rs|*/benches/*|*/fixtures/*)
+            test=$((test + changed)) ;;
+        Cargo.lock|*.lock|*.md|*.toml|*.yml|*.yaml|LICENSE*|.gitignore)
+            other=$((other + changed)) ;;
+        *)
+            prod=$((prod + changed)) ;;
+    esac
+done <<EOF
+$(git diff --numstat "$merge_base"...HEAD)
+EOF
+
+total=$((prod + test))
+
+echo "change size: $prod production + $test test = $total changed lines"
+echo "             ($other lines in docs, config, and lockfiles, counted separately)"
+
+if [ "$prod" -gt 500 ]; then
+    echo ""
+    echo "Over ~500 production lines of complex logic. State in the PR why this"
+    echo "is one coherent change rather than a sequence of reviewable ones."
+fi
+if [ "$total" -gt 800 ]; then
+    echo ""
+    echo "Over ~800 changed lines: the PR must include an explicit staging check"
+    echo "under Risk / staging."
+fi

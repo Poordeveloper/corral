@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Quarantine registry check (docs/ENGINEERING_WORKFLOW.md §6.2).
+#
+# A quarantine is a human-approved, time-bounded lease, not a silent
+# #[ignore]. This script reads docs/quarantine.toml and reports leases that
+# have expired or that cover release-critical coverage.
+#
+#   check-quarantines             report expired leases (advisory, exit 0)
+#   check-quarantines --release   fail when any release-critical quarantine
+#                                 is outstanding
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+REGISTRY="docs/quarantine.toml"
+mode="${1:-report}"
+
+[ -f "$REGISTRY" ] || { echo "quarantines: no registry at $REGISTRY" >&2; exit 1; }
+
+# Entries are TOML tables named [[quarantine]]; an empty registry is normal.
+count="$(grep -c '^\[\[quarantine\]\]' "$REGISTRY" || true)"
+
+if [ "$count" = "0" ]; then
+    echo "quarantines: none"
+    exit 0
+fi
+
+echo "quarantines: $count registered"
+grep -n 'test\s*=\|owner\s*=\|deadline\s*=\|release_critical\s*=' "$REGISTRY" || true
+
+if [ "$mode" = "--release" ]; then
+    if grep -q 'release_critical *= *true' "$REGISTRY"; then
+        echo "" >&2
+        echo "A release-critical invariant is quarantined. Release is blocked" >&2
+        echo "until it is repaired or replaced by human-confirmed equivalent" >&2
+        echo "coverage (docs/ENGINEERING_WORKFLOW.md §6.2)." >&2
+        exit 1
+    fi
+fi
+
+today="$(date +%Y-%m-%d)"
+expired=0
+while IFS= read -r line; do
+    d="$(printf '%s' "$line" | sed -n 's/.*deadline *= *"\([0-9-]*\)".*/\1/p')"
+    [ -n "$d" ] || continue
+    if [ "$d" \< "$today" ]; then
+        echo "quarantines: lease expired on $d" >&2
+        expired=$((expired + 1))
+    fi
+done < "$REGISTRY"
+
+if [ "$expired" -ne 0 ]; then
+    echo "An expired lease costs its owner autonomous merge until it is" >&2
+    echo "repaired, replaced, or explicitly renewed." >&2
+fi

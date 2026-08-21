@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# Risk-surface detector (docs/ENGINEERING_WORKFLOW.md §8.2).
+#
+# Inspects a diff and reports whether it touches a surface that requires a
+# human to merge, regardless of the class the author claimed. The flag is not
+# a verdict on the change — it decides who presses merge.
+#
+# Agents cannot remove this flag. When the detector cannot determine the diff,
+# it fails closed: unknown is not "clean".
+#
+#   check-risk-surface [base-ref]     default base: origin/main
+#
+# Exit 0  no risk surface touched
+# Exit 10 HUMAN_REVIEW_REQUIRED
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+BASE="${1:-origin/main}"
+
+fail_closed() {
+    echo "HUMAN_REVIEW_REQUIRED"
+    echo ""
+    echo "reason: $1"
+    echo "The detector could not establish what changed, so it fails closed."
+    exit 10
+}
+
+git rev-parse --verify --quiet "$BASE" >/dev/null || fail_closed "unknown base ref '$BASE'"
+merge_base="$(git merge-base "$BASE" HEAD 2>/dev/null)" || fail_closed "no merge base with '$BASE'"
+files="$(git diff --name-only "$merge_base"...HEAD 2>/dev/null)" || fail_closed "could not diff against '$BASE'"
+
+[ -n "$files" ] && echo "$files" >/dev/null
+
+has_deletions() {
+    # 1 when the file's diff removes or rewrites lines, 0 when it is add-only.
+    local deleted
+    deleted="$(git diff --numstat "$merge_base"...HEAD -- "$1" | awk '{print $2}')"
+    [ -n "$deleted" ] && [ "$deleted" != "0" ]
+}
+
+matches=""
+note() { matches="$matches$1
+"; }
+
+for f in $files; do
+    case "$f" in
+        *migrations/*|*.sql|*/schema.rs|*/schema/*)
+            note "durable schema or migrations" ;;
+    esac
+    case "$f" in
+        */events.rs|*/event/*|*/session_events*)
+            note "durable event definitions" ;;
+    esac
+    case "$f" in
+        crates/corral-protocol/*|*/fixtures/protocol/*|*/protocol/*)
+            note "protocol schema or compatibility fixtures" ;;
+    esac
+    case "$f" in
+        */platform/*|*unsafe*)
+            note "unsafe or platform boundary" ;;
+    esac
+    case "$f" in
+        */identity/*|*/crypto/*|*/pairing/*|*/auth*)
+            note "security or trust boundary" ;;
+    esac
+    case "$f" in
+        clippy.toml|deny.toml|rust-toolchain.toml)
+            note "boundary lints, dependency hygiene, or toolchain" ;;
+    esac
+    case "$f" in
+        Cargo.toml|crates/*/Cargo.toml)
+            note "declared dependencies (new crate, upgrade, or feature)" ;;
+    esac
+    case "$f" in
+        scripts/verify|scripts/verify-fast|scripts/verify-release|scripts/check-*)
+            note "verification semantics" ;;
+    esac
+    case "$f" in
+        */hook*|*/provider_config*|*/settings_writer*)
+            note "provider configuration mutation" ;;
+    esac
+    case "$f" in
+        docs/adr/*)
+            note "accepted architecture decisions" ;;
+    esac
+    case "$f" in
+        AGENTS.md|docs/GOVERNANCE.md|docs/ENGINEERING_WORKFLOW.md)
+            note "canonical law" ;;
+    esac
+    case "$f" in
+        *detection-manifest*|*/manifests/*.toml)
+            note "detection-manifest schemas" ;;
+    esac
+    case "$f" in
+        docs/quarantine.toml)
+            note "quarantine state" ;;
+    esac
+    case "$f" in
+        STORAGE_EPOCH)
+            note "storage epoch" ;;
+    esac
+    # Canonical prose is flagged only when it removes or rewrites existing
+    # text. Add-only entries are not flagged: the author and reviewer still
+    # decide whether an addition names an existing concept or creates a new
+    # one, and fail closed to Class C when unsure (Workflow §11.1).
+    case "$f" in
+        ARCHITECTURE.md|PRODUCT.md|ROADMAP.md)
+            if has_deletions "$f"; then
+                note "canonical invariants or glossary rewritten"
+            fi ;;
+    esac
+done
+
+if [ -z "$matches" ]; then
+    echo "risk-surface: none"
+    exit 0
+fi
+
+echo "HUMAN_REVIEW_REQUIRED"
+echo ""
+echo "surfaces touched:"
+printf '%s' "$matches" | sort -u | sed 's/^/  - /'
+echo ""
+echo "This change is merged by a human (docs/ENGINEERING_WORKFLOW.md §8)."
+exit 10

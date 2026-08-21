@@ -1,0 +1,22 @@
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Corral ships Apache-2.0 OR MIT. The list holds what the tree actually
+# contains, not a pre-blessed set of licences nobody has looked at: a new
+# dependency already requires a human merge, and that is where its licence is
+# read and added. Permissive inbound only.
+allow = [
+    "Apache-2.0",
+    "MIT",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

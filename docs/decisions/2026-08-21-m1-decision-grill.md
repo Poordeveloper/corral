@@ -1,12 +1,14 @@
 # M1 Founder Decision Record — Strategy Grill
 
 > Status: founder-accepted decisions from the 2026-08-21 strategy grill.
-> Newer than, and where in conflict superseding, older statements in
-> `Corral_Development_Plan_v2.0_EN.md`, pending reconciliation.
-> Companion record: `2026-08-21-m1-ux-contract.md`.
-> Routing: hook integration policy requires an ADR at PR0/PR6 (canonical
-> AGENTS.md list item: mutation of the user's provider/agent configuration);
-> release/kill criteria → `ROADMAP.md`; non-goals → `PRODUCT.md`.
+> Materialized into canon at PR0 — hook integration policy →
+> `docs/adr/0006-provider-hook-integration-policy.md`; platform scope →
+> `docs/adr/0005-platform-scope.md`; release gate and kill criteria →
+> `ROADMAP.md` §5–§6; non-goals → `PRODUCT.md` §11; provider support →
+> `PRODUCT.md` §10. The development plan whose conflicting statements it
+> supersedes is retired to `docs/history/`.
+> Companion records: `2026-08-21-m1-ux-contract.md`,
+> `2026-08-21-workflow-governance-grill.md`.
 
 ## 1. Founder decisions
 

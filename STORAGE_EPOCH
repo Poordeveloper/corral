@@ -1,0 +1,11 @@
+dev
+
+# The first line is the storage epoch: dev | dogfood | released.
+#
+# dev       development databases are disposable; no migration obligation
+# dogfood   Corral-owned facts are real; they may not be silently
+#           reinterpreted or discarded, and release-gate evidence windows
+#           count from here
+# released  public wire and durable contracts are permanent
+#
+# Only a human maintainer advances this marker (AGENTS.md §Durable state).

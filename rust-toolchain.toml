@@ -1,0 +1,8 @@
+# Pinned so that "verify is green" means the same thing on every machine and
+# in CI. A moving channel would let a new compiler or clippy release redden
+# the tree with no code change, which is noise the merge gate cannot absorb.
+# Bump deliberately, in its own change.
+[toolchain]
+channel = "1.95.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
