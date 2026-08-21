@@ -843,7 +843,8 @@ Files
   docs/history/                          retired source documents
   STORAGE_EPOCH                          dev
 
-Enforcement (Appendix A implemented)
+Enforcement (Appendix A implemented, except rows marked "not yet
+implemented" there)
   scripts/verify-fast, scripts/verify, scripts/verify-release
   scripts/flake-probe
   workspace [workspace.lints]: clippy deny set incl. unwrap_used,
@@ -852,9 +853,10 @@ Enforcement (Appendix A implemented)
   deny.toml (cargo-deny); Cargo.lock committed; pinned rust-toolchain
   dependency-direction check script
   risk-surface detector
-  CI: one workflow calling ./scripts/verify + declared PR checks
+  CI: workflows calling the repository scripts — per-PR verify + declared
+    PR checks, plus scheduled evidence amplification (§7)
   PR template with Class/Evidence/Compatibility sections
-  commit lint; LOC advisory job; schema-gate guard
+  commit lint; LOC advisory job; schema-gate guard (scripts/check-schema-gate)
   branch protection on main: PRs only, required checks, no force-push
 
 Validation
@@ -881,14 +883,14 @@ permitted CI additions and are closed-listed here.
 | release breadth (provider matrix, packaging, migrations, no release-critical quarantine) | verify-release | release |
 | conventional commits | commit lint | CI PR check |
 | change-size thresholds | LOC advisory comment (production vs test split; flags >500 complex / >800 total) | CI PR check (advisory) |
-| schema/durable-event human gate | diff guard on schema/migration/durable-event paths requiring approval marker in PR body | CI PR check |
+| schema/durable-event human gate | diff guard (`scripts/check-schema-gate`) on schema/migration/durable-event paths requiring the `DURABLE-APPROVED-BY:` marker in the PR body | CI PR check |
 | risk-surface human gate (§8.2 list) | risk-surface detector setting `HUMAN_REVIEW_REQUIRED`; fails closed | CI PR check |
 | quarantine is human-approved and leased | quarantine registry check (owner, deadline, release-critical flag) | CI PR check |
 | flake evidence | `scripts/flake-probe` records | diagnostic tooling |
-| stale owner claims | claim staleness check over active plan frontmatter | scheduled |
-| canonical drift | reconciliation scan | scheduled |
-| audit debt / documentation debt fences | debt tracking over merged PRs and owners | scheduled + review |
-| verification budget | rolling p95 measurement | scheduled |
+| stale owner claims | claim staleness check over active plan frontmatter | scheduled (not yet implemented — lands with the first concurrent-claim usage) |
+| canonical drift | reconciliation scan | scheduled (not yet implemented — manual scan until then, §11.2) |
+| audit debt / documentation debt fences | debt tracking over merged PRs and owners | scheduled + review (tracking not yet implemented — review carries it) |
+| verification budget | rolling p95 measurement | scheduled (not yet implemented — measure when verify has real cost) |
 | verification evidence present | PR template + review | review |
 | integration-test MUST for behavior changes | review checklist | review |
 | glossary conformance | review checklist | review |

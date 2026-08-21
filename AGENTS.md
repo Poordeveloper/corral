@@ -30,7 +30,7 @@ Every logical Session has a Corral-owned globally unique identity.
 
 Never use `(node, provider_session_id)`, pane id, terminal id, cwd, path, or provider id as the Corral primary key.
 
-Heuristic bindings are never authoritative and must never enable control operations. Heuristic-assurance evidence may render, marked unverified, but never fires a notification.
+Heuristic bindings are never authoritative and must never enable control operations. Heuristic-assurance evidence may serve secondary metadata only — never a user-visible main state, never a notification.
 
 ## Runtime truth
 

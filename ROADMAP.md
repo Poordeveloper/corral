@@ -56,7 +56,8 @@ PR6  externally launched Claude/Codex discovery;
      unsafe binding degrades to read-only
 PR7  daemon-side Attention Engine; versioned screen-detection manifests
      + PTY-activity evidence;
-     CLI/TUI Needs You / Working / Ready / Recent;
+     CLI/TUI surfacing the five-state model (PRODUCT.md §4) plus the
+     recent-resumable list;
      the full See → Know → Control loop provable without Desktop
 PR8  GPUI Desktop — the first graphical session/attention/control surface
      (entity-per-terminal; custom Element; embedded/standalone modes;
@@ -127,11 +128,11 @@ send input; interrupt; provider-native resume; deterministic runtime binding
 for Corral-launched work; native terminal control; and the capability ladder
 of `PRODUCT.md` §3 for sessions Corral did not launch.
 
-**Surfaces** — Desktop session/attention view; tray with Needs You/Working,
-notifications, quick open and create; a minimal TUI (list / needs / new /
-attach / switch / control); CLI equivalents; one-command install delivering
-Desktop, CLI/TUI, and `corrald`; default Local Mode with no login service,
-no listener, no discovery broadcast.
+**Surfaces** — Desktop session/attention view; tray grouping "Needs You n ·
+Ready m" (PRODUCT.md §7), notifications, quick open and create; a minimal
+TUI (list / needs / new / attach / switch / control); CLI equivalents;
+one-command install delivering Desktop, CLI/TUI, and `corrald`; default
+Local Mode with no login service, no listener, no discovery broadcast.
 
 **Platform** — macOS and Linux; host-OS execution domain (`ARCHITECTURE.md`
 §9).
