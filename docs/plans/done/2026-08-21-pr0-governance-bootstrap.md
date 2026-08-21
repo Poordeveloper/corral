@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 class: C  # contains AGENTS/GOVERNANCE/Workflow normative surfaces; human merge
 writes:
   - governance-docs        # AGENTS.md, docs/GOVERNANCE.md, docs/ENGINEERING_WORKFLOW.md
@@ -170,3 +170,28 @@ tooling are follow-ups per the rule-growth law, not PR0 gold-plating.
 - Both validation tasks completed post-merge; gaps they surface become
   follow-up issues before PR1 starts.
 - v2.0 in `docs/history/`; this plan in `docs/plans/done/`.
+
+## Outcome
+
+Landed as PR #1 (merge `79224b8`), eight commits, founder-merged. `verify`
+green on the merged tree. All twenty-six normative edits were acked per-edit
+before they were written; the canonical documents, both ADRs, the licences,
+CONTRIBUTING, the workspace shells, and the full enforcement set are in.
+
+Two drifts were caught and repaired inside the PR rather than left for the
+scan: `ARCHITECTURE.md` still used `Done` as an execution state after the UX
+contract replaced it with Ready and Exited, and all three decision records
+still announced themselves as pending materialization.
+
+Still open — this plan is archived because its work is done, not because the
+list below is empty:
+
+- **branch protection on `main`** — a founder console action. Until it is
+  set, "nobody pushes directly to main" is law without a mechanism.
+- **the two Workflow §15 validation tasks** — one Class A and one Class B
+  executed by an agent using only the repository documents. The DoD makes
+  these a gate on starting PR1.
+- **two `AGENTS.md` micro-edits awaiting ack** — the file states its own
+  bound as ~260 lines while carrying 289, and its routing line does not
+  mention `docs/decisions/`. Both are normative, so neither was changed
+  silently.
