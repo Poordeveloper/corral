@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# THE merge gate. There is exactly one definition of merge-ready
+# verification and this is it (AGENTS.md §Verification).
+#
+# A failure here is information. Do not skip, loosen, or retry a check to
+# make it pass: repair the cause, or formally quarantine it with human
+# approval (docs/ENGINEERING_WORKFLOW.md §6.2).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+./scripts/verify-fast
+
+echo "==> full test suite"
+cargo test --workspace --all-targets
+
+echo "==> dependency direction"
+./scripts/check-dependency-direction
+
+echo "==> dependency hygiene"
+if ! command -v cargo-deny >/dev/null 2>&1; then
+    echo "cargo-deny is required by the merge gate but is not installed." >&2
+    echo "Install it with: cargo install cargo-deny --locked" >&2
+    exit 1
+fi
+cargo deny check
+
+echo "verify: OK"

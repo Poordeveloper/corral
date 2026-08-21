@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Dependency direction: nothing on the client side may depend on
+# corral-core (ARCHITECTURE.md §10).
+#
+# corral-core owns domain semantics and invariants; corral-protocol owns wire
+# vocabulary and compatibility-facing representations. A type appearing on the
+# wire does not move its business semantics into the protocol crate, and a
+# surface must never reach past the protocol into the domain.
+#
+# Every client-side crate is checked for a direct edge to corral-core. Because
+# they are all in the forbidden set, a transitive path would require one of
+# them to hold a direct edge, so direct edges are sufficient to close the rule.
+# Adding a new surface crate means adding it here.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+CLIENT_SIDE="corral-protocol corral-client corral corral-tui corral-desktop corral-tray"
+FORBIDDEN="corral-core"
+
+metadata="$(cargo metadata --format-version 1 --no-deps)"
+violations=0
+
+for crate in $CLIENT_SIDE; do
+    present="$(printf '%s' "$metadata" | jq -r --arg c "$crate" \
+        '[.packages[] | select(.name == $c)] | length')"
+    [ "$present" = "0" ] && continue
+
+    deps="$(printf '%s' "$metadata" | jq -r --arg c "$crate" --arg f "$FORBIDDEN" \
+        '.packages[] | select(.name == $c) | .dependencies[] | select(.name == $f) | .name')"
+
+    if [ -n "$deps" ]; then
+        echo "dependency-direction: $crate depends on $FORBIDDEN" >&2
+        violations=$((violations + 1))
+    fi
+done
+
+if [ "$violations" -ne 0 ]; then
+    echo "" >&2
+    echo "Client-side crates consume the wire vocabulary in corral-protocol." >&2
+    echo "If a domain concept is genuinely needed on the client, decide where" >&2
+    echo "it belongs before moving it — that is an architecture decision." >&2
+    exit 1
+fi
+
+echo "dependency-direction: OK"

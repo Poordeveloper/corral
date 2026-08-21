@@ -1,0 +1,19 @@
+# Quarantine registry (docs/ENGINEERING_WORKFLOW.md §6.2).
+#
+# A quarantine is a human-approved, time-bounded lease over a test whose
+# blocking semantics are temporarily suspended. Quarantined tests keep
+# running and reporting; a silent #[ignore] is not a quarantine.
+#
+# An entry looks like:
+#
+#   [[quarantine]]
+#   test = "pty_detach_reattach_preserves_screen"
+#   owner = "runtime/pty"            # subsystem boundary, not an agent
+#   issue = "FLK-17"                 # durable tracking
+#   deadline = "2026-09-04"          # 3 maintainer working days
+#   renewals = 0                     # two ordinary renewals, then a
+#                                    # strategy change is required
+#   release_critical = true          # blocks release while outstanding
+#   evidence = "flake-probe run 2026-08-30: 3/50 fail at merge-base a1b2c3d"
+#
+# The registry is empty: no test exists yet.

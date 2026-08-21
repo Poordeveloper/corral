@@ -1,0 +1,75 @@
+# CI calls the repository scripts and adds only the PR-metadata checks that
+# docs/ENGINEERING_WORKFLOW.md Appendix A closed-lists. It never re-implements
+# test selection, quarantine, compatibility, or release logic: that lives in
+# scripts/ so the same gate runs locally and here.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Install cargo-deny
+        run: command -v cargo-deny || cargo install cargo-deny --locked
+
+      - run: ./scripts/verify
+
+  pr-checks:
+    name: PR checks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Conventional commits
+        run: ./scripts/check-commit-messages "${{ github.event.pull_request.base.sha }}"
+
+      - name: Change size (advisory)
+        run: ./scripts/loc-advisory "${{ github.event.pull_request.base.sha }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Risk surface
+        run: |
+          set +e
+          out="$(./scripts/check-risk-surface "${{ github.event.pull_request.base.sha }}")"
+          status=$?
+          echo "$out"
+          if [ "$status" -eq 10 ]; then
+            {
+              echo "## HUMAN_REVIEW_REQUIRED"
+              echo ""
+              echo '```'
+              echo "$out"
+              echo '```'
+              echo ""
+              echo "This pull request is merged by a human regardless of the class claimed."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          exit $status
+
+      - name: Quarantine leases
+        run: ./scripts/check-quarantines

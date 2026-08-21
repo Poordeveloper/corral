@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Iteration gate. Fast feedback while working; never merge evidence.
+# The merge gate is ./scripts/verify (AGENTS.md §Verification).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+echo "==> fmt"
+cargo fmt --all --check
+
+echo "==> clippy"
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+echo "==> unit tests"
+cargo test --workspace --lib
+
+echo "verify-fast: OK"

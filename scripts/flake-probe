@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Flake probe (docs/ENGINEERING_WORKFLOW.md §6.1).
+#
+# A recorded diagnostic experiment: repeat one test at a fixed commit and
+# report the distribution. This is not a merge-gate retry — a failed
+# canonical verification stays failed until the cause is repaired or the
+# flake is formally quarantined.
+#
+# Proving a pre-existing flake means observing both PASS and FAIL at the
+# merge-base commit, on the same runner class. Run this there, not only on
+# your branch.
+#
+#   flake-probe <test-filter> [-n runs] [-p package]
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+[ $# -ge 1 ] || { echo "usage: flake-probe <test-filter> [-n runs] [-p package]" >&2; exit 2; }
+
+FILTER="$1"; shift
+RUNS=50
+PKG=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -n) RUNS="$2"; shift 2 ;;
+        -p) PKG="$2"; shift 2 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+pkg_args=""
+[ -n "$PKG" ] && pkg_args="--package $PKG"
+
+commit="$(git rev-parse HEAD)"
+dirty=""
+git diff --quiet 2>/dev/null || dirty=" (working tree dirty — the record is not reproducible)"
+
+echo "flake-probe: $FILTER x $RUNS"
+echo "commit:   $commit$dirty"
+echo "platform: $(uname -s) $(uname -m)"
+echo ""
+
+pass=0
+fail=0
+failures=""
+i=1
+while [ "$i" -le "$RUNS" ]; do
+    start="$(date +%s)"
+    # shellcheck disable=SC2086
+    if out="$(cargo test $pkg_args -- --exact "$FILTER" --nocapture 2>&1)"; then
+        pass=$((pass + 1))
+        printf '.'
+    else
+        fail=$((fail + 1))
+        printf 'F'
+        failures="$failures
+--- run $i ---
+$(printf '%s' "$out" | tail -20)"
+    fi
+    elapsed=$(( $(date +%s) - start ))
+    echo "$elapsed" >> "${TMPDIR:-/tmp}/flake-probe-times.$$"
+    i=$((i + 1))
+done
+echo ""
+echo ""
+
+echo "pass: $pass   fail: $fail   of $RUNS"
+if [ -f "${TMPDIR:-/tmp}/flake-probe-times.$$" ]; then
+    sort -n "${TMPDIR:-/tmp}/flake-probe-times.$$" > "${TMPDIR:-/tmp}/flake-probe-sorted.$$"
+    n="$(wc -l < "${TMPDIR:-/tmp}/flake-probe-sorted.$$" | tr -d ' ')"
+    p50_line=$(( (n + 1) / 2 ))
+    p95_line=$(( (n * 95 + 99) / 100 ))
+    [ "$p95_line" -lt 1 ] && p95_line=1
+    echo "seconds  p50: $(sed -n "${p50_line}p" "${TMPDIR:-/tmp}/flake-probe-sorted.$$")s   p95: $(sed -n "${p95_line}p" "${TMPDIR:-/tmp}/flake-probe-sorted.$$")s   max: $(tail -1 "${TMPDIR:-/tmp}/flake-probe-sorted.$$")s"
+    rm -f "${TMPDIR:-/tmp}/flake-probe-times.$$" "${TMPDIR:-/tmp}/flake-probe-sorted.$$"
+fi
+
+if [ -n "$failures" ]; then
+    echo ""
+    echo "failure signatures:"
+    printf '%s\n' "$failures"
+fi
+
+echo ""
+echo "Record this block in the PR body or the flake issue. Both PASS and FAIL"
+echo "at the merge-base commit prove a pre-existing flake; failures only on"
+echo "the branch commit are a regression of that branch."
