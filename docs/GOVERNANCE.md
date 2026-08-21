@@ -16,15 +16,19 @@ ROADMAP.md                         what the current phase allows
     ↓
 docs/adr/                          irreversible decisions
                                    (status + read_when frontmatter)
+docs/decisions/                    founder acceptance evidence, immutable;
+                                   ADRs materialize them by reference
 docs/plans/                        bounded implementation plans
                                    (done/ after landing)
     ↓
 docs/references/                   evidence: architecture-benchmarks.md
                                    (settled-decision ledger) + source reports
     ↓
-scripts/verify, scripts/verify-fast   the only definition of code done;
+scripts/verify-fast                iteration feedback, never merge evidence
+scripts/verify                     the one definition of merge-ready;
                                    CI = verify + the closed list of
                                    PR-metadata checks (Workflow Appendix A)
+scripts/verify-release             release gate; strict superset of verify
 ```
 
 Ownership rules:
@@ -34,6 +38,9 @@ Ownership rules:
   the ADR-trigger lists diverged before any code existed.)
 - `CLAUDE.md` contains only `@AGENTS.md`.
 - The canonical ADR-trigger list lives in AGENTS.md §Architectural changes.
+- `docs/decisions/` records what the founder accepted and when; it is never
+  edited to change a past decision. `docs/adr/` materializes those decisions
+  as single-topic, supersedable records. Neither copies the other's text.
 - Settled architecture decisions live as ledger rows; reopening one requires
   reading its row and bringing new evidence (AGENTS.md §Scope discipline).
 - Changes to AGENTS.md, this file, or the Workflow require explicit founder
