@@ -2,22 +2,35 @@
 # Quarantine registry check (docs/ENGINEERING_WORKFLOW.md §6.2).
 #
 # A quarantine is a human-approved, time-bounded lease, not a silent
-# #[ignore]. This script reads docs/quarantine.toml and reports leases that
-# have expired or that cover release-critical coverage.
+# #[ignore]. This script validates docs/quarantine.toml — every entry must
+# carry test, owner, issue, deadline, and release_critical — and reports
+# leases that have expired or that cover release-critical coverage.
 #
-#   check-quarantines             report expired leases (advisory, exit 0)
-#   check-quarantines --release   fail when any release-critical quarantine
-#                                 is outstanding
+#   check-quarantines             validate entries; report expired leases
+#                                 (expiry is advisory — it costs the owner
+#                                 autonomous merge, not CI green; §6.2)
+#   check-quarantines --release   additionally fail when any release-critical
+#                                 quarantine is outstanding
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 REGISTRY="docs/quarantine.toml"
-mode="${1:-report}"
+
+case "${1:-}" in
+    "") mode="report" ;;
+    --release) mode="release" ;;
+    *) echo "check-quarantines: unknown argument '${1}'" >&2
+       echo "usage: check-quarantines [--release]" >&2; exit 2 ;;
+esac
 
 [ -f "$REGISTRY" ] || { echo "quarantines: no registry at $REGISTRY" >&2; exit 1; }
 
-# Entries are TOML tables named [[quarantine]]; an empty registry is normal.
-count="$(grep -c '^\[\[quarantine\]\]' "$REGISTRY" || true)"
+# The registry documents its own entry format in comment lines, so strip
+# comments before matching anything: pattern-matching the raw file would read
+# the commented example entry as data.
+entries="$(grep -v '^[[:space:]]*#' "$REGISTRY" || true)"
+
+count="$(printf '%s\n' "$entries" | grep -c '^\[\[quarantine\]\]' || true)"
 
 if [ "$count" = "0" ]; then
     echo "quarantines: none"
@@ -25,10 +38,29 @@ if [ "$count" = "0" ]; then
 fi
 
 echo "quarantines: $count registered"
-grep -n 'test\s*=\|owner\s*=\|deadline\s*=\|release_critical\s*=' "$REGISTRY" || true
 
-if [ "$mode" = "--release" ]; then
-    if grep -q 'release_critical *= *true' "$REGISTRY"; then
+# A lease without an owner or deadline is not a lease (§6.2): every entry
+# must carry each mandatory field exactly once.
+malformed=0
+for field in test owner issue deadline release_critical; do
+    have="$(printf '%s\n' "$entries" | grep -c "^[[:space:]]*$field[[:space:]]*=" || true)"
+    if [ "$have" -ne "$count" ]; then
+        echo "quarantines: $have of $count entries carry '$field'" >&2
+        malformed=$((malformed + 1))
+    fi
+done
+if [ "$malformed" -ne 0 ]; then
+    echo "" >&2
+    echo "Every quarantine is a human-approved lease carrying test, owner," >&2
+    echo "issue, deadline, and release_critical (docs/ENGINEERING_WORKFLOW.md" >&2
+    echo "§6.2). Repair the registry entry." >&2
+    exit 1
+fi
+
+printf '%s\n' "$entries" | grep 'test *=\|owner *=\|deadline *=\|release_critical *=' || true
+
+if [ "$mode" = "release" ]; then
+    if printf '%s\n' "$entries" | grep -q 'release_critical *= *true'; then
         echo "" >&2
         echo "A release-critical invariant is quarantined. Release is blocked" >&2
         echo "until it is repaired or replaced by human-confirmed equivalent" >&2
@@ -46,7 +78,9 @@ while IFS= read -r line; do
         echo "quarantines: lease expired on $d" >&2
         expired=$((expired + 1))
     fi
-done < "$REGISTRY"
+done <<EOF
+$entries
+EOF
 
 if [ "$expired" -ne 0 ]; then
     echo "An expired lease costs its owner autonomous merge until it is" >&2

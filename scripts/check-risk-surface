@@ -27,9 +27,13 @@ fail_closed() {
 
 git rev-parse --verify --quiet "$BASE" >/dev/null || fail_closed "unknown base ref '$BASE'"
 merge_base="$(git merge-base "$BASE" HEAD 2>/dev/null)" || fail_closed "no merge base with '$BASE'"
-files="$(git diff --name-only "$merge_base"...HEAD 2>/dev/null)" || fail_closed "could not diff against '$BASE'"
 
-[ -n "$files" ] && echo "$files" >/dev/null
+# NUL-separated, unquoted paths: word-splitting or core.quotePath C-quoting
+# would let a path with spaces or non-ASCII bytes dodge every pattern below,
+# turning the fail-closed gate into fail-open.
+listfile="$(mktemp "${TMPDIR:-/tmp}/risk-surface.XXXXXX")" || fail_closed "could not create a temp file"
+trap 'rm -f "$listfile"' EXIT
+git diff --name-only -z "$merge_base"...HEAD >"$listfile" 2>/dev/null || fail_closed "could not diff against '$BASE'"
 
 has_deletions() {
     # 1 when the file's diff removes or rewrites lines, 0 when it is add-only.
@@ -42,7 +46,7 @@ matches=""
 note() { matches="$matches$1
 "; }
 
-for f in $files; do
+while IFS= read -r -d '' f; do
     case "$f" in
         *migrations/*|*.sql|*/schema.rs|*/schema/*)
             note "durable schema or migrations" ;;
@@ -84,8 +88,18 @@ for f in $files; do
             note "accepted architecture decisions" ;;
     esac
     case "$f" in
-        AGENTS.md|docs/GOVERNANCE.md|docs/ENGINEERING_WORKFLOW.md)
+        AGENTS.md|CLAUDE.md|docs/GOVERNANCE.md|docs/ENGINEERING_WORKFLOW.md)
             note "canonical law" ;;
+    esac
+    case "$f" in
+        docs/decisions/*)
+            note "founder decision records" ;;
+    esac
+    # The CI workflows are the sole execution point of this detector and the
+    # other gates; editing them can neuter a gate without touching scripts/.
+    case "$f" in
+        .github/*)
+            note "CI gate wiring" ;;
     esac
     case "$f" in
         *detection-manifest*|*/manifests/*.toml)
@@ -109,7 +123,7 @@ for f in $files; do
                 note "canonical invariants or glossary rewritten"
             fi ;;
     esac
-done
+done <"$listfile"
 
 if [ -z "$matches" ]; then
     echo "risk-surface: none"

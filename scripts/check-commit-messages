@@ -19,7 +19,11 @@ while IFS= read -r subject; do
         bad=$((bad + 1))
     fi
 done <<EOF
-$(git log --format='%s' "$BASE"..HEAD)
+$(
+    # Merge subjects are exempt: CI checks out GitHub's synthetic PR merge
+    # ref, whose "Merge <sha> into <sha>" commit is not authored work.
+    git log --no-merges --format='%s' "$BASE"..HEAD
+)
 EOF
 
 if [ "$bad" -ne 0 ]; then

@@ -13,6 +13,11 @@ cd "$(dirname "$0")/.."
 echo "==> full test suite"
 cargo test --workspace --all-targets
 
+# --all-targets does not include doctests; without this, documented contract
+# examples would never run anywhere in the verification map.
+echo "==> doctests"
+cargo test --workspace --doc
+
 echo "==> dependency direction"
 ./scripts/check-dependency-direction
 
@@ -22,6 +27,7 @@ if ! command -v cargo-deny >/dev/null 2>&1; then
     echo "Install it with: cargo install cargo-deny --locked" >&2
     exit 1
 fi
+cargo deny --version
 cargo deny check
 
 echo "verify: OK"

@@ -32,7 +32,8 @@ pkg_args=""
 
 commit="$(git rev-parse HEAD)"
 dirty=""
-git diff --quiet 2>/dev/null || dirty=" (working tree dirty — the record is not reproducible)"
+# Staged and untracked changes also make the record non-reproducible.
+[ -z "$(git status --porcelain 2>/dev/null)" ] || dirty=" (working tree dirty — the record is not reproducible)"
 
 echo "flake-probe: $FILTER x $RUNS"
 echo "commit:   $commit$dirty"
@@ -55,6 +56,15 @@ while [ "$i" -le "$RUNS" ]; do
         failures="$failures
 --- run $i ---
 $(printf '%s' "$out" | tail -20)"
+    fi
+    # cargo test exits 0 when a filter matches nothing, so a typoed test name
+    # would fabricate a clean N/N PASS record. Refuse to probe zero tests.
+    if [ "$i" -eq 1 ] && ! printf '%s' "$out" | grep -Eq '^running [1-9]'; then
+        echo ""
+        echo "flake-probe: filter '$FILTER' matched no tests — nothing ran." >&2
+        echo "A clean run over zero tests is not evidence; check the exact" >&2
+        echo "test name (and -p) against the harness output." >&2
+        exit 2
     fi
     elapsed=$(( $(date +%s) - start ))
     echo "$elapsed" >> "${TMPDIR:-/tmp}/flake-probe-times.$$"
