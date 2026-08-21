@@ -30,7 +30,7 @@ Every logical Session has a Corral-owned globally unique identity.
 
 Never use `(node, provider_session_id)`, pane id, terminal id, cwd, path, or provider id as the Corral primary key.
 
-Heuristic bindings are never authoritative and must never enable control operations.
+Heuristic bindings are never authoritative and must never enable control operations. Heuristic-assurance evidence may render, marked unverified, but never fires a notification.
 
 ## Runtime truth
 
@@ -48,7 +48,7 @@ Do not silently substitute local execution when requested remote execution is un
 
 Do not duplicate agent-status detection when an authoritative runtime source already provides it.
 
-Agent status is evidence with source and freshness. Provider-native signals outrank in-band/screen heuristics, and no cached evidence outranks fresher contradicting runtime evidence.
+Agent status is evidence with source and freshness. Source authority applies only to evidence still fresh enough to support its claim: provider-native signals outrank in-band/screen heuristics, but a stale high-authority signal is invalidated by fresher contradicting evidence and the state is recomputed — possibly to Unknown. Fresher low-authority evidence does not thereby inherit the right to assert a state its source may not assert.
 
 Attention/status derivation runs only in `corrald`. Clients render the daemon's attention state; no client derives its own.
 
@@ -65,6 +65,8 @@ Do not create surface-specific Session identities.
 Shared runtime/session facts belong behind the daemon/protocol boundary. Presentation-only state belongs in the client surface.
 
 Do not make semantic RPC depend on Desktop-specific concepts such as rows, cards, sidebars, widgets, or windows.
+
+PTYs are owned by `corrald` alone. No surface — Desktop, TUI, Tray, CLI — ever hosts a session PTY; surfaces render streams they do not own.
 
 Closing a UI surface must not unnecessarily terminate managed work.
 
@@ -88,13 +90,17 @@ Never reinterpret an absent field as a known negative value when absence may mea
 
 Wire protocols must tolerate additive evolution: unknown methods, notifications, fields, and discriminants each have an explicit compatibility behavior.
 
-A shipped wire discriminant/opcode number is permanent; never reuse it.
+Wire permanence begins at the first external tagged release exposing the contract: from then on a shipped discriminant/opcode number is permanent and is never reused. Before that release, renumbering is legal when tests and fixtures move with it. Persisted event semantics harden earlier — at the first write into non-rebuildable storage after the dogfood epoch.
 
 Changing semantic content can break an old client even when the schema does not change; review both syntax and meaning.
 
 ## Durable state
 
-SQLite schema changes, durable event types, and migration semantics require explicit human acceptance in the PR. Agents never advance schema or durable-event versions autonomously.
+Every durable schema or event diff requires human merge; agents never merge one autonomously. Additive change that implements accepted design — no altered meaning for existing fields or events, no changed identity/key semantics, no changed migration guarantee, no changed ownership, no reinterpretation of recorded facts — needs no new decision ceremony. Anything else is an architectural decision requiring explicit human acceptance. Uncertainty resolves to the stricter path.
+
+Durable state has two kinds with opposite guarantees: derived state rebuildable from an authoritative source, and Corral-owned facts with no external source of truth (acknowledgements, the durable semantic event log, manual corrections).
+
+`STORAGE_EPOCH` at the repository root records `dev`, `dogfood`, or `released`; only a human maintainer advances it. Before `dogfood`, development databases are disposable. From `dogfood` onward, Corral-owned facts may not be silently reinterpreted or discarded: migrate them, introduce a new representation, or obtain explicit approval for a destructive reset — which restarts any evidence window that depended on the discarded data.
 
 The durable semantic event log records Corral-owned facts only. Provider history stays provider-owned; live runtime state stays runtime-owned and is never persisted as fact.
 
@@ -121,9 +127,11 @@ One task has one explicit goal and one coherent semantic scope.
 
 A change may cross files/modules when required to repair the same invariant or owner boundary. Do not absorb unrelated cleanup or adjacent product work.
 
+Repair the owner, not the symptom. Do not add speculative retries, wider timeouts, weakened assertions, test-only behavior, duplicate fallbacks, or consumer-side normalization when the producer owns the invalid state. A consumer may fail closed temporarily when invalid upstream state would otherwise cause unsafe behavior — refusing control, degrading to Unknown — but it must never silently repair or reinterpret that state, and the containment names the root-cause follow-up.
+
 Record unrelated problems as follow-ups.
 
-Feature-class and architectural work requires an accepted plan or ADR before implementation begins.
+Implementation must be preceded by a written plan for Class B/C work. A new or changed architectural decision requires explicit human acceptance before implementation crosses that decision boundary. Work that implements already-accepted architecture may proceed from an unblocked implementation plan without repeated founder approval.
 
 Before proposing an architecture that differs from settled decisions, read the matching row in `docs/references/architecture-benchmarks.md` and bring new evidence.
 
@@ -189,7 +197,7 @@ Protocol changes require compatibility coverage. Wire types require future-input
 
 Runtime changes test relevant lifecycle failures: detach, disconnect, restart, crash, handoff, and unverifiable state.
 
-A flaky test is a P1 bug: quarantine with owner and deadline; never retry-loop CI to green; widening test timeouts needs the same owner-repair justification as production masking.
+A flaky test is a P1 bug. Quarantine is a human-approved, time-bounded lease with a tracked owner — never a silent `#[ignore]`; quarantined tests keep running and reporting, and a quarantine over release-critical coverage blocks release. Never retry-loop CI to green. Widening a test timeout requires measured evidence that the test is correct and its budget unrealistic; a timeout is never widened to conceal uncertainty about whether the system makes progress. Mechanics: `docs/ENGINEERING_WORKFLOW.md`.
 
 A regression test should fail on the pre-fix behavior for the intended reason whenever practical.
 
@@ -199,10 +207,15 @@ Do not duplicate production logic inside tests.
 
 Use repository verification entry points rather than inventing a new definition of done:
 
-    ./scripts/verify-fast
-    ./scripts/verify
+    ./scripts/verify-fast      iteration feedback; never merge evidence
+    ./scripts/verify           the one definition of merge-ready
+    ./scripts/verify-release   release gate; a strict superset of verify
 
-CI runs exactly `./scripts/verify` for build/test truth, plus only the PR-metadata checks declared in the Engineering Workflow's verification map. No other definition of done exists.
+There is exactly one definition of merge-ready verification: `./scripts/verify`. Repository scripts own verification semantics; CI calls them and adds only the PR-metadata checks declared in the Engineering Workflow's verification map. CI configuration never re-implements test selection, quarantine, compatibility, or release logic.
+
+Scheduled jobs may amplify evidence — stress, fuzz, soak, repeated flake probes, breadth too expensive per PR. No merge-critical invariant may be covered only there.
+
+A failed canonical verification stays failed until the cause is repaired or formally quarantined. Diagnostic reruns are permitted as recorded experiments; retrying until green is not.
 
 Run focused tests during iteration. Run the final relevant verification on the final tree before claiming completion.
 
@@ -221,6 +234,8 @@ Never use `git add .`, `git add -A`, or `git add --all` in a shared/multi-agent 
 Never use `git reset --hard`, `git clean -fd`, or blanket `git stash` to discard or hide work you do not own.
 
 Never use `--no-verify`. Never force-push a shared branch.
+
+Nobody pushes directly to `main` — humans included. Every change lands through a pull request under the merge-authority rules in `docs/ENGINEERING_WORKFLOW.md`.
 
 Before commit/PR, inspect `git status` and the complete diff.
 
