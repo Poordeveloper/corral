@@ -43,8 +43,9 @@ Ownership rules:
   as single-topic, supersedable records. Neither copies the other's text.
 - Settled architecture decisions live as ledger rows; reopening one requires
   reading its row and bringing new evidence (AGENTS.md §Scope discipline).
-- Changes to AGENTS.md, this file, or the Workflow require explicit founder
-  acknowledgement — governance is class C regardless of diff size.
+- Normative changes to AGENTS.md, this file, or the Workflow require explicit
+  founder acknowledgement — Class C regardless of diff size. Pure editorial
+  changes follow the Workflow's documentation class map (§11.1).
 - PRODUCT/ARCHITECTURE/ROADMAP were derived at PR0 from the Development Plan
   and the founder decision records. The plan now lives in `docs/history/` as
   a source, not canon: the canonical files own their topics, and a

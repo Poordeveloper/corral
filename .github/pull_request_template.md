@@ -41,6 +41,12 @@ script names and semantics · detection-manifest schemas
 
 <!-- Required when the diff approaches the staging threshold (Workflow §5). -->
 
+<!--
+Durable schema / migration / event diffs only: after explicit human
+acceptance, the approving human (never an agent) adds this line here:
+DURABLE-APPROVED-BY: <name>
+-->
+
 ---
 
 <!-- Contributors: answering these is enough; the maintainer classifies. -->

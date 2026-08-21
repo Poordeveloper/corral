@@ -9,9 +9,18 @@ on:
   push:
     branches: [main]
 
+# A pinned gate tool: an unpinned install would freeze whatever version the
+# cache first captured while local machines float, so "verify is green" would
+# stop meaning one thing. Bump deliberately, in its own change.
+env:
+  CARGO_DENY_VERSION: 0.20.2
+
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseding a PR push cancels the stale run; a push to main never cancels
+  # the previous merge's verify, so every merged commit keeps a completed
+  # verification record.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   verify:
@@ -32,7 +41,9 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-
 
       - name: Install cargo-deny
-        run: command -v cargo-deny || cargo install cargo-deny --locked
+        run: |
+          cargo deny --version 2>/dev/null | grep -qF "cargo-deny $CARGO_DENY_VERSION" \
+            || cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
 
       - run: ./scripts/verify
 
@@ -51,6 +62,10 @@ jobs:
       - name: Change size (advisory)
         run: ./scripts/loc-advisory "${{ github.event.pull_request.base.sha }}" | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # The step renders the summary and then propagates the script's exit
+      # code unchanged: a red check is the machine half of the human-merge
+      # gate. Agents cannot merge over it; after reviewing, the maintainer
+      # merges with admin authority (Workflow §8).
       - name: Risk surface
         run: |
           set +e
@@ -67,9 +82,13 @@ jobs:
               echo ""
               echo "This pull request is merged by a human regardless of the class claimed."
             } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
           fi
           exit $status
+
+      - name: Schema / durable-event gate
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: ./scripts/check-schema-gate "${{ github.event.pull_request.base.sha }}"
 
       - name: Quarantine leases
         run: ./scripts/check-quarantines

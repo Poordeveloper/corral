@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Schema / durable-event human gate (docs/ENGINEERING_WORKFLOW.md Appendix A;
+# AGENTS.md §Durable state).
+#
+# When a diff touches durable schema, migration, or durable-event paths, the
+# PR body must carry a human-added approval marker line:
+#
+#   DURABLE-APPROVED-BY: <human>
+#
+# The marker records explicit human acceptance; an agent never adds it on its
+# own authority. When the detector cannot determine the diff, it fails
+# closed: unknown is not "clean".
+#
+#   PR_BODY='<pr body>' check-schema-gate [base-ref]   default base: origin/main
+#
+# Exit 0  no durable surface touched, or marker present
+# Exit 10 durable surface touched without an approval marker (or fail-closed)
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+BASE="${1:-origin/main}"
+
+fail_closed() {
+    echo "schema-gate: HUMAN APPROVAL REQUIRED"
+    echo ""
+    echo "reason: $1"
+    echo "The gate could not establish what changed, so it fails closed."
+    exit 10
+}
+
+git rev-parse --verify --quiet "$BASE" >/dev/null || fail_closed "unknown base ref '$BASE'"
+merge_base="$(git merge-base "$BASE" HEAD 2>/dev/null)" || fail_closed "no merge base with '$BASE'"
+
+listfile="$(mktemp "${TMPDIR:-/tmp}/schema-gate.XXXXXX")" || fail_closed "could not create a temp file"
+trap 'rm -f "$listfile"' EXIT
+git diff --name-only -z "$merge_base"...HEAD >"$listfile" 2>/dev/null || fail_closed "could not diff against '$BASE'"
+
+touched=""
+while IFS= read -r -d '' f; do
+    case "$f" in
+        *migrations/*|*.sql|*/schema.rs|*/schema/*|*/events.rs|*/event/*|*/session_events*)
+            touched="$touched  - $f
+" ;;
+    esac
+done <"$listfile"
+
+if [ -z "$touched" ]; then
+    echo "schema-gate: no durable surface touched"
+    exit 0
+fi
+
+if printf '%s' "${PR_BODY:-}" | grep -Eq '^[[:space:]]*DURABLE-APPROVED-BY:[[:space:]]*[^[:space:]]'; then
+    echo "schema-gate: durable surface touched; approval marker present"
+    printf '%s' "$touched"
+    exit 0
+fi
+
+echo "schema-gate: HUMAN APPROVAL REQUIRED"
+echo ""
+echo "durable schema / migration / event surfaces touched:"
+printf '%s' "$touched"
+echo ""
+echo "Every durable schema or event diff requires human merge (AGENTS.md"
+echo "§Durable state). After explicit human acceptance, the human adds the"
+echo "line 'DURABLE-APPROVED-BY: <name>' to the PR body."
+exit 10
