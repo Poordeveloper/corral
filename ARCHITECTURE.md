@@ -98,17 +98,17 @@ terminal control when a compatible runtime owns it. Managed sessions are
 launched through Corral's runtime: deterministic identity, persistent
 runtime, terminal control, create/send/interrupt/resume, reliable attention.
 
-Corral must be useful before a user adopts managed sessions. Both terms are
-internal vocabulary (`PRODUCT.md` §8).
+Corral must be useful before a user moves any work into managed sessions.
+Both terms are internal vocabulary (`PRODUCT.md` §8).
 
 ### Lifecycle axes
 
-Execution state and user organization stay separate. `Done` means work
-completed, not that the user wants it hidden. `Archived` removes a Session
-from the active surface while preserving identity and history. `Deleted`
-removes Corral-owned metadata only and never provider-owned history — for
-observed sessions, deleting inside Corral must not modify provider source
-data.
+Execution state and user organization stay separate. A completed turn or an
+ended runtime says nothing about whether the user wants the Session out of
+the way. `Archived` removes a Session from the active surface while
+preserving identity and history. `Deleted` removes Corral-owned metadata
+only and never provider-owned history — for observed sessions, deleting
+inside Corral must not modify provider source data.
 
 ## 2. Evidence and attention
 

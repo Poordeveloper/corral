@@ -3,13 +3,15 @@
 > Status: founder-accepted decisions from the 2026-08-21 workflow/governance
 > grill (third grill; companions: `2026-08-21-m1-decision-grill.md`,
 > `2026-08-21-m1-ux-contract.md`).
-> Scope: engineering workflow and governance only. Where in conflict, this
-> record supersedes older text in `AGENTS.md` and
-> `Corral_Engineering_Workflow_v2.md`, pending PR0 materialization.
+> Scope: engineering workflow and governance only.
+> Materialized into canon at PR0 — ten amendments to `AGENTS.md` and the
+> full `docs/ENGINEERING_WORKFLOW.md`, each founder-acked per edit before
+> the change landed. The workflow draft it supersedes is superseded in git
+> history rather than kept as a second document.
 > Per the in-grill ruling on documentation classes: materializing these
-> decisions into canon at PR0 is documentation materialization (Class B,
-> citing this record as acceptance evidence); any normative deviation from
-> this record is Class C.
+> decisions into canon is documentation materialization (Class B, citing
+> this record as acceptance evidence); any normative deviation from this
+> record is Class C.
 
 ## 1. Workflow founder decisions
 
