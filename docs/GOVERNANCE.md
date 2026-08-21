@@ -45,6 +45,8 @@ Ownership rules:
   reading its row and bringing new evidence (AGENTS.md §Scope discipline).
 - Changes to AGENTS.md, this file, or the Workflow require explicit founder
   acknowledgement — governance is class C regardless of diff size.
-- During bootstrap, `Corral_Development_Plan_v2.0_EN.md` is the source from
-  which PRODUCT/ARCHITECTURE/ROADMAP are derived at PR0; after that, the
-  canonical files own their topics and the plan is historical record.
+- PRODUCT/ARCHITECTURE/ROADMAP were derived at PR0 from the Development Plan
+  and the founder decision records. The plan now lives in `docs/history/` as
+  a source, not canon: the canonical files own their topics, and a
+  disagreement with the retired plan is resolved in favour of the canonical
+  files.
