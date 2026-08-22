@@ -167,6 +167,17 @@ pub(crate) fn sessions(connection: &Connection) -> Result<Vec<Session>, StateErr
     Ok(sessions)
 }
 
+pub(crate) fn session(
+    connection: &Connection,
+    id: CorralSessionId,
+) -> Result<Option<Session>, StateError> {
+    let row: Option<i64> = connection
+        .prepare_cached("SELECT created_at_ms FROM sessions WHERE id = ?1")?
+        .query_row(params![id.to_string()], |row| row.get(0))
+        .optional()?;
+    Ok(row.map(|created_at_ms| Session::new(id, from_millis(created_at_ms))))
+}
+
 pub(crate) fn binding(
     connection: &Connection,
     id: BindingId,
@@ -269,16 +280,33 @@ fn run_from(row: RunRow) -> Result<Run, StateError> {
         id.parse().map_err(FatalState::from)?,
         session.parse().map_err(FatalState::from)?,
         binding.parse().map_err(FatalState::from)?,
-        RunOrdinal::from_position(
-            u32::try_from(ordinal)
-                .map_err(|_| unreadable("a run ordinal", "an out-of-range integer"))?,
-        ),
         occurrence(started),
-    );
+    )
+    .with_ordinal(RunOrdinal::from_position(u32::try_from(ordinal).map_err(
+        |_| unreadable("a run ordinal", "an out-of-range integer"),
+    )?));
     Ok(match end_state {
         None => run,
         Some(token) => run.ended(run_end_from_token(&token)?, occurrence(ended)),
     })
+}
+
+/// The episode this runtime binding is currently running, if any.
+///
+/// A runtime binding names one runtime, and one runtime runs one episode at a
+/// time — so this is what a second `RunStarted` under the same binding has to
+/// find empty.
+pub(crate) fn live_run_of_binding(
+    connection: &Connection,
+    binding: BindingId,
+) -> Result<Option<RunId>, StateError> {
+    let found: Option<String> = connection
+        .prepare_cached("SELECT id FROM runs WHERE runtime_binding_id = ?1 AND end_state IS NULL")?
+        .query_row(params![binding.to_string()], |row| row.get(0))
+        .optional()?;
+    found
+        .map(|id| id.parse().map_err(|error| FatalState::from(error).into()))
+        .transpose()
 }
 
 pub(crate) fn run_count(

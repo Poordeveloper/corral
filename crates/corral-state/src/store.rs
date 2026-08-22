@@ -6,8 +6,9 @@ use corral_core::{
     CorralSessionId, Evidence, EvidenceSource, NodeId, OccurrenceTime, Provenance, Run, RunEnd,
     RunId, RunOrdinal, Session, SessionLineage,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 
+use crate::encoding;
 use crate::error::{FatalState, Refusal, StateError};
 use crate::event::{self, SessionEvent};
 use crate::projection;
@@ -20,6 +21,10 @@ use crate::schema;
 /// this process validated at startup. Once it concludes it cannot vouch for
 /// durable truth, it never answers normally again — a normal-looking
 /// projection from an untrusted store is worse than no answer (ADR 0002, Q14).
+///
+/// A write decides and records inside one transaction: what it read to reach
+/// its decision cannot change under it, so an idempotent path stays idempotent
+/// when two writers race.
 pub struct Store {
     connection: Connection,
     node: NodeId,
@@ -104,6 +109,35 @@ impl CommandAcceptance {
     }
 }
 
+/// How large a command fingerprint may be.
+///
+/// The canonical form is stored whole, so a conflict can be read rather than
+/// guessed at — but a durable row is not a place for unbounded client input. A
+/// command whose semantic inputs are genuinely large fingerprints a digest of
+/// them instead, which the accepted semantics allow (ADR 0002, Q12).
+const FINGERPRINT_LIMIT: usize = 4096;
+
+/// What a write concluded: the answer for the caller, and the facts to append.
+struct Written<T> {
+    answer: T,
+    facts: Vec<SessionEvent>,
+}
+
+impl<T> Written<T> {
+    /// A write that found the work already done. Nothing is appended, and the
+    /// answer is what the store already held.
+    fn nothing_to_record(answer: T) -> Self {
+        Self {
+            answer,
+            facts: Vec::new(),
+        }
+    }
+
+    fn recording(answer: T, facts: Vec<SessionEvent>) -> Self {
+        Self { answer, facts }
+    }
+}
+
 impl Store {
     /// Open the registry store, or conclude it cannot be used.
     pub fn open(path: &Path) -> Result<Self, StateError> {
@@ -123,46 +157,47 @@ impl Store {
         self.node
     }
 
+    /// Confirm the store can still vouch for durable truth.
+    ///
+    /// What every other operation does first, on its own — for a caller whose
+    /// answer is a claim about the registry rather than a fact out of it. An
+    /// empty list is such a claim.
+    pub fn vouch(&mut self) -> Result<(), StateError> {
+        self.read(|_| Ok(()))
+    }
+
     pub fn sessions(&mut self) -> Result<Vec<Session>, StateError> {
-        self.vouch()?;
-        let outcome = projection::sessions(&self.connection);
-        self.guard(outcome)
+        self.read(projection::sessions)
+    }
+
+    pub fn session(&mut self, id: CorralSessionId) -> Result<Option<Session>, StateError> {
+        self.read(|connection| projection::session(connection, id))
     }
 
     pub fn binding(&mut self, id: BindingId) -> Result<Option<Binding>, StateError> {
-        self.vouch()?;
-        let outcome = projection::binding(&self.connection, id);
-        self.guard(outcome)
+        self.read(|connection| projection::binding(connection, id))
     }
 
     pub fn bindings_of(&mut self, session: CorralSessionId) -> Result<Vec<Binding>, StateError> {
-        self.vouch()?;
-        let outcome = projection::bindings_of(&self.connection, session);
-        self.guard(outcome)
+        self.read(|connection| projection::bindings_of(connection, session))
     }
 
     pub fn runs_of(&mut self, session: CorralSessionId) -> Result<Vec<Run>, StateError> {
-        self.vouch()?;
-        let outcome = projection::runs_of(&self.connection, session);
-        self.guard(outcome)
+        self.read(|connection| projection::runs_of(connection, session))
     }
 
     pub fn lineage_of(
         &mut self,
         child: CorralSessionId,
     ) -> Result<Option<SessionLineage>, StateError> {
-        self.vouch()?;
-        let outcome = projection::lineage_of(&self.connection, child);
-        self.guard(outcome)
+        self.read(|connection| projection::lineage_of(connection, child))
     }
 
     pub fn receipt(
         &mut self,
         command: &corral_core::CommandId,
     ) -> Result<Option<CommandReceipt>, StateError> {
-        self.vouch()?;
-        let outcome = projection::receipt(&self.connection, command);
-        self.guard(outcome)
+        self.read(|connection| projection::receipt(connection, command))
     }
 
     /// One Session's stream, oldest fact first.
@@ -170,9 +205,7 @@ impl Store {
         &mut self,
         session: CorralSessionId,
     ) -> Result<Vec<RecordedEvent>, StateError> {
-        self.vouch()?;
-        let outcome = read_events(&self.connection, Some(session));
-        self.guard(outcome)
+        self.read(|connection| read_events(connection, Some(session)))
     }
 
     /// Create a Session under a client-supplied command id.
@@ -186,49 +219,60 @@ impl Store {
         command: &Command,
         at: SystemTime,
     ) -> Result<CommandAcceptance, StateError> {
-        self.vouch()?;
-        let existing = {
-            let outcome = projection::receipt(&self.connection, command.id());
-            self.guard(outcome)?
-        };
-        if let Some(receipt) = existing {
-            if receipt.fingerprint() == command.fingerprint() {
-                return Ok(CommandAcceptance::Replayed(receipt));
-            }
-            return Err(Refusal::CommandIdConflict {
-                command: command.id().clone(),
+        let at = encoding::as_stored(at)?;
+        let length = command.fingerprint().as_str().len();
+        if length > FINGERPRINT_LIMIT {
+            return Err(Refusal::FingerprintTooLarge {
+                length,
+                limit: FINGERPRINT_LIMIT,
             }
             .into());
         }
 
-        let session = CorralSessionId::mint();
-        let receipt = CommandReceipt::new(
-            command.id().clone(),
-            command.fingerprint().clone(),
-            CommandOutcome::SessionCreated(session),
-            at,
-        );
-        self.commit(&[
-            SessionEvent::SessionCreated {
-                session,
-                created_at: at,
-            },
-            SessionEvent::CommandAccepted {
-                command: command.id().clone(),
-                fingerprint: command.fingerprint().clone(),
-                outcome: CommandOutcome::SessionCreated(session),
-                accepted_at: at,
-            },
-        ])?;
-        Ok(CommandAcceptance::Executed(receipt))
+        self.write(|transaction| {
+            if let Some(receipt) = projection::receipt(transaction, command.id())? {
+                if receipt.fingerprint() == command.fingerprint() {
+                    return Ok(Written::nothing_to_record(CommandAcceptance::Replayed(
+                        receipt,
+                    )));
+                }
+                return Err(Refusal::CommandIdConflict {
+                    command: command.id().clone(),
+                }
+                .into());
+            }
+
+            let session = CorralSessionId::mint();
+            let receipt = CommandReceipt::new(
+                command.id().clone(),
+                command.fingerprint().clone(),
+                CommandOutcome::SessionCreated(session),
+                at,
+            );
+            Ok(Written::recording(
+                CommandAcceptance::Executed(receipt),
+                vec![
+                    SessionEvent::SessionCreated {
+                        session,
+                        created_at: at,
+                    },
+                    SessionEvent::CommandAccepted {
+                        command: command.id().clone(),
+                        fingerprint: command.fingerprint().clone(),
+                        outcome: CommandOutcome::SessionCreated(session),
+                        accepted_at: at,
+                    },
+                ],
+            ))
+        })
     }
 
     /// Resolve an external identity to its Session, creating both the Session
     /// and the binding when the identity is new.
     ///
-    /// This is what discovery performs, and it is one transaction so that a
-    /// re-scan racing a first scan cannot produce two Sessions for one
-    /// external identity.
+    /// This is what discovery performs, and the lookup and the creation share
+    /// one transaction, so a re-scan racing a first scan cannot produce two
+    /// Sessions for one external identity.
     pub fn resolve_or_create_session(
         &mut self,
         key: BindingKey,
@@ -236,33 +280,50 @@ impl Store {
         evidence: Evidence,
         at: SystemTime,
     ) -> Result<SessionResolution, StateError> {
-        self.vouch()?;
-        let existing = {
-            let outcome = projection::binding_by_key(&self.connection, &key);
-            self.guard(outcome)?
-        };
-        if let Some(binding) = existing {
-            let session = self.session_of(binding.session())?;
-            return Ok(SessionResolution::Existing { session, binding });
-        }
+        let at = encoding::as_stored(at)?;
+        let evidence = as_stored_evidence(evidence)?;
 
-        let session = Session::new(CorralSessionId::mint(), at);
-        let binding = Binding::new(
-            BindingId::mint(),
-            session.id(),
-            key,
-            provenance,
-            evidence,
-            at,
-        );
-        self.commit(&[
-            SessionEvent::SessionCreated {
-                session: session.id(),
-                created_at: at,
-            },
-            SessionEvent::BindingAdded(binding.clone()),
-        ])?;
-        Ok(SessionResolution::Created { session, binding })
+        self.write(move |transaction| {
+            if let Some(binding) = projection::binding_by_key(transaction, &key)? {
+                let session =
+                    projection::session(transaction, binding.session())?.ok_or_else(|| {
+                        FatalState::Unreadable {
+                            detail: format!(
+                                "binding {} names session {}, which the projections do not hold",
+                                binding.id(),
+                                binding.session()
+                            ),
+                        }
+                    })?;
+                return Ok(Written::nothing_to_record(SessionResolution::Existing {
+                    session,
+                    binding,
+                }));
+            }
+
+            let session = Session::new(CorralSessionId::mint(), at);
+            let binding = Binding::new(
+                BindingId::mint(),
+                session.id(),
+                key,
+                provenance,
+                evidence,
+                at,
+            );
+            Ok(Written::recording(
+                SessionResolution::Created {
+                    session,
+                    binding: binding.clone(),
+                },
+                vec![
+                    SessionEvent::SessionCreated {
+                        session: session.id(),
+                        created_at: at,
+                    },
+                    SessionEvent::BindingAdded(binding),
+                ],
+            ))
+        })
     }
 
     /// Attach an external identity to a Session Corral already has.
@@ -274,19 +335,23 @@ impl Store {
         evidence: Evidence,
         at: SystemTime,
     ) -> Result<BindingResolution, StateError> {
-        self.vouch()?;
-        let existing = {
-            let outcome = projection::binding_by_key(&self.connection, &key);
-            self.guard(outcome)?
-        };
-        if let Some(binding) = existing {
-            return Ok(BindingResolution::Existing(binding));
-        }
+        let at = encoding::as_stored(at)?;
+        let evidence = as_stored_evidence(evidence)?;
 
-        let binding = Binding::new(BindingId::mint(), session, key, provenance, evidence, at);
-        self.refuse_second_control_capable_runtime_binding(&binding)?;
-        self.commit(&[SessionEvent::BindingAdded(binding.clone())])?;
-        Ok(BindingResolution::Created(binding))
+        self.write(move |transaction| {
+            if let Some(binding) = projection::binding_by_key(transaction, &key)? {
+                return Ok(Written::nothing_to_record(BindingResolution::Existing(
+                    binding,
+                )));
+            }
+
+            let binding = Binding::new(BindingId::mint(), session, key, provenance, evidence, at);
+            refuse_second_control_capable_runtime_binding(transaction, &binding)?;
+            Ok(Written::recording(
+                BindingResolution::Created(binding.clone()),
+                vec![SessionEvent::BindingAdded(binding)],
+            ))
+        })
     }
 
     /// Replace the evidence supporting a binding.
@@ -299,15 +364,20 @@ impl Store {
         binding: BindingId,
         evidence: Evidence,
     ) -> Result<Binding, StateError> {
-        self.vouch()?;
-        let confirmed = self.require_binding(binding)?.with_evidence(evidence);
-        self.refuse_second_control_capable_runtime_binding(&confirmed)?;
-        self.commit(&[SessionEvent::BindingConfirmed {
-            session: confirmed.session(),
-            binding,
-            evidence,
-        }])?;
-        Ok(confirmed)
+        let evidence = as_stored_evidence(evidence)?;
+
+        self.write(move |transaction| {
+            let confirmed = require_binding(transaction, binding)?.with_evidence(evidence);
+            refuse_second_control_capable_runtime_binding(transaction, &confirmed)?;
+            Ok(Written::recording(
+                confirmed.clone(),
+                vec![SessionEvent::BindingConfirmed {
+                    session: confirmed.session(),
+                    binding,
+                    evidence,
+                }],
+            ))
+        })
     }
 
     /// Open a Run under the Session its runtime binding names.
@@ -328,42 +398,61 @@ impl Store {
         occurrence: EvidenceSource,
         started: OccurrenceTime,
     ) -> Result<RecordedRun, StateError> {
-        self.vouch()?;
-        let binding = self.require_binding(runtime_binding)?;
-        if binding.kind() != BindingKind::Runtime {
-            return Err(Refusal::NotARuntimeBinding(runtime_binding).into());
-        }
-        if !occurrence.establishes_runtime_occurrence() {
-            return Err(Refusal::EvidenceCannotMintARun {
-                binding: runtime_binding,
-                source: occurrence,
+        let started = as_stored_occurrence(started)?;
+
+        self.write(move |transaction| {
+            let binding = require_binding(transaction, runtime_binding)?;
+            if binding.kind() != BindingKind::Runtime {
+                return Err(Refusal::NotARuntimeBinding(runtime_binding).into());
             }
-            .into());
-        }
+            if !occurrence.establishes_runtime_occurrence() {
+                return Err(Refusal::EvidenceCannotMintARun {
+                    binding: runtime_binding,
+                    source: occurrence,
+                }
+                .into());
+            }
+            // One runtime runs one episode at a time. The log can only speak
+            // for the Runs it holds — a Run withheld as heuristic is the
+            // caller's live state, and staying out of this question is the
+            // same reason it stays out of the log.
+            if let Some(live) = projection::live_run_of_binding(transaction, runtime_binding)? {
+                return Err(Refusal::RunAlreadyLive {
+                    binding: runtime_binding,
+                    run: live,
+                }
+                .into());
+            }
 
-        let session = binding.session();
-        let ordinal = {
-            let outcome = projection::run_count(&self.connection, session);
-            RunOrdinal::from_position(self.guard(outcome)?.saturating_add(1))
-        };
-        let run = Run::started(RunId::mint(), session, runtime_binding, ordinal, started);
+            let session = binding.session();
+            let run = Run::started(RunId::mint(), session, runtime_binding, started);
+            if !binding.assurance().may_assert_durable_fact() {
+                // Unnumbered on purpose: the store numbers the Runs it keeps,
+                // and a number it has not kept would name a position another
+                // Run already occupies.
+                return Ok(Written::nothing_to_record(RecordedRun {
+                    run,
+                    durability: Durability::Withheld,
+                }));
+            }
 
-        if !binding.assurance().may_assert_durable_fact() {
-            return Ok(RecordedRun {
-                run,
-                durability: Durability::Withheld,
-            });
-        }
-        self.commit(&[SessionEvent::RunStarted {
-            session,
-            run: run.id(),
-            runtime_binding,
-            ordinal,
-            started_at: started.authoritative(),
-        }])?;
-        Ok(RecordedRun {
-            run,
-            durability: Durability::Recorded,
+            let ordinal = RunOrdinal::from_position(
+                projection::run_count(transaction, session)?.saturating_add(1),
+            );
+            let run = run.with_ordinal(ordinal);
+            Ok(Written::recording(
+                RecordedRun {
+                    run: run.clone(),
+                    durability: Durability::Recorded,
+                },
+                vec![SessionEvent::RunStarted {
+                    session,
+                    run: run.id(),
+                    runtime_binding,
+                    ordinal,
+                    started_at: started.authoritative(),
+                }],
+            ))
         })
     }
 
@@ -378,23 +467,30 @@ impl Store {
         end: RunEnd,
         at: OccurrenceTime,
     ) -> Result<Durability, StateError> {
-        self.vouch()?;
-        let Some(recorded) = self.recorded_run(run.id())? else {
-            return Ok(Durability::Withheld);
-        };
-        // An episode ends once. Recording a second end would overwrite a fact
-        // the log already states, and "exited" quietly becoming
-        // "unverifiable" is exactly the rewriting the log exists to prevent.
-        if !recorded.is_live() {
-            return Err(Refusal::RunAlreadyEnded(run.id()).into());
-        }
-        self.commit(&[SessionEvent::RunEnded {
-            session: recorded.session(),
-            run: run.id(),
-            end,
-            ended_at: at.authoritative(),
-        }])?;
-        Ok(Durability::Recorded)
+        let at = as_stored_occurrence(at)?;
+        let id = run.id();
+
+        self.write(move |transaction| {
+            let Some(recorded) = projection::recorded_run(transaction, id)? else {
+                return Ok(Written::nothing_to_record(Durability::Withheld));
+            };
+            // An episode ends once. Recording a second end would overwrite a
+            // fact the log already states, and "exited" quietly becoming
+            // "unverifiable" is exactly the rewriting the log exists to
+            // prevent.
+            if !recorded.is_live() {
+                return Err(Refusal::RunAlreadyEnded(id).into());
+            }
+            Ok(Written::recording(
+                Durability::Recorded,
+                vec![SessionEvent::RunEnded {
+                    session: recorded.session(),
+                    run: id,
+                    end,
+                    ended_at: at.authoritative(),
+                }],
+            ))
+        })
     }
 
     /// A runtime binding became available for this Run.
@@ -403,9 +499,11 @@ impl Store {
         run: &Run,
         at: SystemTime,
     ) -> Result<Durability, StateError> {
-        self.record_run_fact(run, |session| SessionEvent::RunAttached {
+        let at = encoding::as_stored(at)?;
+        let id = run.id();
+        self.record_run_fact(id, move |session| SessionEvent::RunAttached {
             session,
-            run: run.id(),
+            run: id,
             at,
         })
     }
@@ -417,9 +515,11 @@ impl Store {
         run: &Run,
         at: SystemTime,
     ) -> Result<Durability, StateError> {
-        self.record_run_fact(run, |session| SessionEvent::RunDetached {
+        let at = encoding::as_stored(at)?;
+        let id = run.id();
+        self.record_run_fact(id, move |session| SessionEvent::RunDetached {
             session,
-            run: run.id(),
+            run: id,
             at,
         })
     }
@@ -430,8 +530,12 @@ impl Store {
     /// similarity cannot produce a `SessionLineage` at all, so no guessed
     /// edge can reach the log (ADR 0002 D4).
     pub fn record_fork(&mut self, lineage: SessionLineage) -> Result<(), StateError> {
-        self.vouch()?;
-        self.commit(&[SessionEvent::SessionForkedFrom(lineage)])
+        self.write(move |_| {
+            Ok(Written::recording(
+                (),
+                vec![SessionEvent::SessionForkedFrom(lineage)],
+            ))
+        })
     }
 
     /// Rebuild every projection from the log.
@@ -441,13 +545,11 @@ impl Store {
     /// does not hold, which is an architecture violation rather than a repair
     /// job (ADR 0002 D6).
     pub fn rebuild_projections(&mut self) -> Result<(), StateError> {
-        self.vouch()?;
-        let recorded = {
-            let outcome = read_events(&self.connection, None);
-            self.guard(outcome)?
-        };
-        let outcome = replay(&mut self.connection, &recorded);
-        self.guard(outcome)
+        self.write(|transaction| {
+            projection::clear(transaction)?;
+            replay(transaction)?;
+            Ok(Written::nothing_to_record(()))
+        })
     }
 
     /// Record a fact about a Run, if the log knows the Run at all.
@@ -457,83 +559,47 @@ impl Store {
     /// store does not agree the Run belongs to.
     fn record_run_fact(
         &mut self,
-        run: &Run,
+        run: RunId,
         event: impl FnOnce(CorralSessionId) -> SessionEvent,
     ) -> Result<Durability, StateError> {
-        self.vouch()?;
-        let Some(recorded) = self.recorded_run(run.id())? else {
-            return Ok(Durability::Withheld);
-        };
-        self.commit(&[event(recorded.session())])?;
-        Ok(Durability::Recorded)
+        self.write(move |transaction| {
+            let Some(recorded) = projection::recorded_run(transaction, run)? else {
+                return Ok(Written::nothing_to_record(Durability::Withheld));
+            };
+            Ok(Written::recording(
+                Durability::Recorded,
+                vec![event(recorded.session())],
+            ))
+        })
     }
 
-    fn recorded_run(&mut self, run: RunId) -> Result<Option<Run>, StateError> {
-        let outcome = projection::recorded_run(&self.connection, run);
-        self.guard(outcome)
-    }
-
-    fn require_binding(&mut self, id: BindingId) -> Result<Binding, StateError> {
-        let outcome = projection::binding(&self.connection, id);
-        self.guard(outcome)?
-            .ok_or_else(|| Refusal::UnknownBinding(id).into())
-    }
-
-    fn session_of(&mut self, id: CorralSessionId) -> Result<Session, StateError> {
-        let outcome = projection::sessions(&self.connection);
-        self.guard(outcome)?
-            .into_iter()
-            .find(|session| session.id() == id)
-            .ok_or_else(|| {
-                FatalState::Unreadable {
-                    detail: format!(
-                        "binding names session {id}, which the projections do not hold"
-                    ),
-                }
-                .into()
-            })
-    }
-
-    /// At most one control-capable runtime binding is active per Session.
-    ///
-    /// Supersession has no producer and no accepted event, so the second
-    /// acquisition fails closed rather than quietly displacing the first: a
-    /// projection may not learn a fact the log cannot express (ADR 0002, Q15).
-    fn refuse_second_control_capable_runtime_binding(
+    fn read<T>(
         &mut self,
-        candidate: &Binding,
-    ) -> Result<(), StateError> {
-        if !candidate.is_control_capable_runtime_binding() {
-            return Ok(());
-        }
-        let outcome = projection::bindings_of(&self.connection, candidate.session());
-        let existing = self.guard(outcome)?.into_iter().find(|binding| {
-            binding.id() != candidate.id() && binding.is_control_capable_runtime_binding()
-        });
-        match existing {
-            None => Ok(()),
-            Some(existing) => Err(Refusal::ControlCapableRuntimeBindingExists {
-                session: candidate.session(),
-                existing: existing.id(),
-            }
-            .into()),
-        }
-    }
-
-    fn commit(&mut self, events: &[SessionEvent]) -> Result<(), StateError> {
-        let outcome = commit(&mut self.connection, events);
-        self.guard(outcome)
-    }
-
-    fn vouch(&mut self) -> Result<(), StateError> {
+        work: impl FnOnce(&Connection) -> Result<T, StateError>,
+    ) -> Result<T, StateError> {
         if let Some(fatal) = &self.fatal {
             return Err(StateError::Fatal(fatal.clone()));
         }
-        let outcome = schema::vouch(&self.connection, self.node);
+        let outcome =
+            schema::vouch(&self.connection, self.node).and_then(|()| work(&self.connection));
+        self.guard(outcome)
+    }
+
+    fn write<T>(
+        &mut self,
+        work: impl FnOnce(&Transaction<'_>) -> Result<Written<T>, StateError>,
+    ) -> Result<T, StateError> {
+        if let Some(fatal) = &self.fatal {
+            return Err(StateError::Fatal(fatal.clone()));
+        }
+        let outcome = transact(&mut self.connection, self.node, work);
         self.guard(outcome)
     }
 
     /// Remember a fatal conclusion, so nothing after it is answered normally.
+    ///
+    /// Only a fatal one: a refusal leaves the store exactly as it was, and
+    /// latching those would let one rejected write end the daemon.
     fn guard<T>(&mut self, outcome: Result<T, StateError>) -> Result<T, StateError> {
         if let Err(StateError::Fatal(fatal)) = &outcome {
             self.fatal.get_or_insert_with(|| fatal.clone());
@@ -542,12 +608,33 @@ impl Store {
     }
 }
 
-/// Append facts and update the projections they justify — one transaction, so
-/// a failure anywhere leaves neither.
-fn commit(connection: &mut Connection, events: &[SessionEvent]) -> Result<(), StateError> {
-    let recorded_at = crate::encoding::millis(SystemTime::now())?;
-    let transaction = connection.transaction()?;
-    for event in events {
+/// Decide and record in one transaction.
+///
+/// Immediate rather than deferred: a write takes the writer lock before it
+/// reads, so it cannot decide on state another writer changes before the
+/// commit — and cannot deadlock trying to upgrade a read lock it already
+/// holds. Vouching happens inside it too, so the identity a write trusted is
+/// the identity it wrote under.
+fn transact<T>(
+    connection: &mut Connection,
+    node: NodeId,
+    work: impl FnOnce(&Transaction<'_>) -> Result<Written<T>, StateError>,
+) -> Result<T, StateError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    schema::vouch(&transaction, node)?;
+    let Written { answer, facts } = work(&transaction)?;
+    append(&transaction, &facts)?;
+    transaction.commit()?;
+    Ok(answer)
+}
+
+/// Append facts and update the projections they justify.
+fn append(transaction: &Transaction<'_>, facts: &[SessionEvent]) -> Result<(), StateError> {
+    if facts.is_empty() {
+        return Ok(());
+    }
+    let recorded_at = encoding::millis(SystemTime::now())?;
+    for event in facts {
         let session = event.session().to_string();
         // The per-Session sequence is the order Corral accepted facts about
         // that Session. It only ever grows: a fact learned late is appended
@@ -568,10 +655,61 @@ fn commit(connection: &mut Connection, events: &[SessionEvent]) -> Result<(), St
                 recorded_at,
             ],
         )?;
-        projection::apply(&transaction, event)?;
+        projection::apply(transaction, event)?;
     }
-    transaction.commit()?;
     Ok(())
+}
+
+fn require_binding(connection: &Connection, id: BindingId) -> Result<Binding, StateError> {
+    projection::binding(connection, id)?.ok_or_else(|| Refusal::UnknownBinding(id).into())
+}
+
+/// At most one control-capable runtime binding is active per Session.
+///
+/// Supersession has no producer and no accepted event, so the second
+/// acquisition fails closed rather than quietly displacing the first: a
+/// projection may not learn a fact the log cannot express (ADR 0002, Q15).
+fn refuse_second_control_capable_runtime_binding(
+    connection: &Connection,
+    candidate: &Binding,
+) -> Result<(), StateError> {
+    if !candidate.is_control_capable_runtime_binding() {
+        return Ok(());
+    }
+    let existing = projection::bindings_of(connection, candidate.session())?
+        .into_iter()
+        .find(|binding| {
+            binding.id() != candidate.id() && binding.is_control_capable_runtime_binding()
+        });
+    match existing {
+        None => Ok(()),
+        Some(existing) => Err(Refusal::ControlCapableRuntimeBindingExists {
+            session: candidate.session(),
+            existing: existing.id(),
+        }
+        .into()),
+    }
+}
+
+/// An instant as the store will read it back, so a value handed to a caller is
+/// the value a later read produces.
+fn as_stored_evidence(evidence: Evidence) -> Result<Evidence, StateError> {
+    Ok(Evidence::new(
+        evidence.source(),
+        evidence.assurance(),
+        encoding::as_stored(evidence.observed_at())?,
+    ))
+}
+
+fn as_stored_occurrence(at: OccurrenceTime) -> Result<OccurrenceTime, StateError> {
+    Ok(match at {
+        OccurrenceTime::Authoritative(instant) => {
+            OccurrenceTime::Authoritative(encoding::as_stored(instant)?)
+        }
+        // Never written, so never rounded: only what the store keeps has to
+        // match what it will read back.
+        other => other,
+    })
 }
 
 /// One fact as the log holds it: what happened, and where it sits in its
@@ -615,40 +753,56 @@ fn read_events(
     let mut statement = connection.prepare(&format!(
         "SELECT session_id, seq, kind, payload FROM session_events {filter} ORDER BY global_seq"
     ))?;
-    let rows = statement.query_map(rusqlite::params_from_iter(parameters), |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-        ))
-    })?;
+    let rows = statement.query_map(rusqlite::params_from_iter(parameters), decode_row)?;
 
     let mut events = Vec::new();
     for row in rows {
         let (session, seq, kind, payload) = row?;
-        let payload: serde_json::Value =
-            serde_json::from_str(&payload).map_err(|source| FatalState::Unreadable {
-                detail: source.to_string(),
-            })?;
-        events.push(RecordedEvent {
-            seq: u64::try_from(seq).map_err(|_| FatalState::Unreadable {
-                detail: format!("sequence {seq} is not a position in a stream"),
-            })?,
-            event: event::decode(session.parse().map_err(FatalState::from)?, &kind, &payload)?,
-        });
+        events.push(recorded_event(session, seq, &kind, &payload)?);
     }
     Ok(events)
 }
 
-fn replay(connection: &mut Connection, events: &[RecordedEvent]) -> Result<(), StateError> {
-    let transaction = connection.transaction()?;
-    projection::clear(&transaction)?;
-    for recorded in events {
-        projection::apply(&transaction, &recorded.event)?;
+/// Replay the whole log into the projections, one fact at a time.
+///
+/// Streamed rather than collected: the log is append-only and never
+/// compacted, so materializing it would make the peak cost of a rebuild grow
+/// with the account's whole history — on the one operation whose purpose is
+/// recovery.
+fn replay(transaction: &Transaction<'_>) -> Result<(), StateError> {
+    let mut statement = transaction
+        .prepare("SELECT session_id, seq, kind, payload FROM session_events ORDER BY global_seq")?;
+    let rows = statement.query_map([], decode_row)?;
+    for row in rows {
+        let (session, seq, kind, payload) = row?;
+        let recorded = recorded_event(session, seq, &kind, &payload)?;
+        projection::apply(transaction, &recorded.event)?;
     }
-    transaction.commit()?;
     Ok(())
+}
+
+type EventRow = (String, i64, String, String);
+
+fn decode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+}
+
+fn recorded_event(
+    session: String,
+    seq: i64,
+    kind: &str,
+    payload: &str,
+) -> Result<RecordedEvent, StateError> {
+    let payload: serde_json::Value =
+        serde_json::from_str(payload).map_err(|source| FatalState::Unreadable {
+            detail: source.to_string(),
+        })?;
+    Ok(RecordedEvent {
+        seq: u64::try_from(seq).map_err(|_| FatalState::Unreadable {
+            detail: format!("sequence {seq} is not a position in a stream"),
+        })?,
+        event: event::decode(session.parse().map_err(FatalState::from)?, kind, &payload)?,
+    })
 }
 
 #[cfg(test)]

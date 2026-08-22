@@ -17,7 +17,8 @@ pub enum StateError {
     Fatal(FatalState),
 }
 
-/// A write the store declined. The store is still usable.
+/// An answer other than the one asked for, from a store that is still
+/// trustworthy. Nothing was written, and the caller may carry on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// A command id already names a different semantic command. Nothing was
@@ -27,6 +28,13 @@ pub enum Refusal {
     CommandIdConflict {
         command: CommandId,
     },
+    /// Another writer held the store for longer than the wait allows. Nothing
+    /// happened, and the same call may be made again — this is the canonical
+    /// transient condition, and treating it as a broken store would let one
+    /// backup tool take the daemon down.
+    Busy {
+        detail: String,
+    },
     UnknownBinding(BindingId),
     /// A Run's association is its runtime binding; no other kind of binding
     /// can carry one.
@@ -34,6 +42,19 @@ pub enum Refusal {
     /// A process episode ends once. A second end would overwrite a recorded
     /// outcome rather than add a fact.
     RunAlreadyEnded(RunId),
+    /// A runtime binding names one runtime, which cannot be running two
+    /// episodes at once. The earlier Run ends before another opens.
+    RunAlreadyLive {
+        binding: BindingId,
+        run: RunId,
+    },
+    /// A command fingerprint is stored whole so a conflict can be read rather
+    /// than guessed at, and a durable row is not a place to put unbounded
+    /// client input.
+    FingerprintTooLarge {
+        length: usize,
+        limit: usize,
+    },
     /// A Run may be minted only from independent authoritative evidence that a
     /// concrete runtime occurrence exists. Semantic evidence proves identity,
     /// never live runtime truth (ADR 0002 D2).
@@ -103,26 +124,26 @@ impl From<FatalState> for StateError {
     }
 }
 
-/// Constraint violations are the storage engine refusing a write it has fully
-/// rolled back; everything else it reports is a failure to store at all.
+/// Which storage-engine failures leave a usable store, and which do not.
 ///
-/// The mapping is deliberately strict in the second case: once the state layer
+/// Contention and constraint violations both end with the store exactly as it
+/// was: the first never started, the second was rolled back whole. Neither is
+/// a reason to stop trusting it. Everything else is: once the state layer
 /// cannot explain what happened, it stops vouching rather than retrying.
-/// Narrowing which engine failures are genuinely transient is a follow-up for
-/// the phase that has a producer under real load.
 impl From<rusqlite::Error> for StateError {
     fn from(error: rusqlite::Error) -> Self {
+        let detail = error.to_string();
         match &error {
-            rusqlite::Error::SqliteFailure(failure, _)
-                if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                Self::Refused(Refusal::Constraint {
-                    detail: error.to_string(),
-                })
-            }
-            _ => Self::Fatal(FatalState::Storage {
-                detail: error.to_string(),
-            }),
+            rusqlite::Error::SqliteFailure(failure, _) => match failure.code {
+                rusqlite::ErrorCode::ConstraintViolation => {
+                    Self::Refused(Refusal::Constraint { detail })
+                }
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked => {
+                    Self::Refused(Refusal::Busy { detail })
+                }
+                _ => Self::Fatal(FatalState::Storage { detail }),
+            },
+            _ => Self::Fatal(FatalState::Storage { detail }),
         }
     }
 }
@@ -144,11 +165,22 @@ impl fmt::Display for Refusal {
                 "command id {} already names a different command; nothing was executed",
                 command.as_str()
             ),
+            Self::Busy { detail } => {
+                write!(f, "the store was held by another writer: {detail}")
+            }
             Self::UnknownBinding(binding) => write!(f, "binding {binding} is not recorded"),
             Self::NotARuntimeBinding(binding) => {
                 write!(f, "binding {binding} is not a runtime binding")
             }
             Self::RunAlreadyEnded(run) => write!(f, "run {run} has already ended"),
+            Self::RunAlreadyLive { binding, run } => write!(
+                f,
+                "binding {binding} already has the live run {run}; one runtime is one episode"
+            ),
+            Self::FingerprintTooLarge { length, limit } => write!(
+                f,
+                "the command fingerprint is {length} bytes, and the limit is {limit}"
+            ),
             Self::EvidenceCannotMintARun { binding, source } => write!(
                 f,
                 "binding {binding} rests on {source:?} evidence, which proves identity rather \

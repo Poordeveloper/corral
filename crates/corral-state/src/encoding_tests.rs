@@ -76,6 +76,19 @@ fn instants_round_trip_on_both_sides_of_the_epoch() {
     }
 }
 
+/// A real clock carries nanoseconds. Rounding at the boundary is what keeps
+/// a value the store returns equal to the value it later reads back.
+#[test]
+fn an_instant_finer_than_the_store_rounds_to_what_will_be_read_back() {
+    let precise = SystemTime::UNIX_EPOCH + Duration::new(1_766_000_000, 123_456_789);
+
+    let stored = as_stored(precise).expect("representable");
+
+    assert_ne!(stored, precise);
+    assert_eq!(stored, from_millis(millis(precise).expect("representable")));
+    assert_eq!(as_stored(stored).expect("representable"), stored);
+}
+
 #[test]
 fn a_clock_beyond_the_stored_range_is_refused() {
     let absurd = SystemTime::UNIX_EPOCH + Duration::from_secs(u64::MAX / 1_000);

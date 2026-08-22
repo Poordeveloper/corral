@@ -70,7 +70,7 @@ pub struct Run {
     id: RunId,
     session: CorralSessionId,
     runtime_binding: BindingId,
-    ordinal: RunOrdinal,
+    ordinal: Option<RunOrdinal>,
     started: OccurrenceTime,
     ended: Option<(RunEnd, OccurrenceTime)>,
 }
@@ -81,17 +81,26 @@ impl Run {
         id: RunId,
         session: CorralSessionId,
         runtime_binding: BindingId,
-        ordinal: RunOrdinal,
         started: OccurrenceTime,
     ) -> Self {
         Self {
             id,
             session,
             runtime_binding,
-            ordinal,
+            ordinal: None,
             started,
             ended: None,
         }
+    }
+
+    /// Give this Run its position within its Session.
+    ///
+    /// Only whoever holds the Session's Runs can number them, which is why a
+    /// Run does not arrive with one.
+    #[must_use]
+    pub fn with_ordinal(mut self, ordinal: RunOrdinal) -> Self {
+        self.ordinal = Some(ordinal);
+        self
     }
 
     #[must_use]
@@ -113,8 +122,13 @@ impl Run {
         self.runtime_binding
     }
 
+    /// This Run's position within its Session, when something has numbered it.
+    ///
+    /// `None` is an ordinary answer: a Run nobody is keeping the Session's
+    /// Runs for has no position, and inventing one would put two Runs on
+    /// screen under the same number.
     #[must_use]
-    pub fn ordinal(&self) -> RunOrdinal {
+    pub fn ordinal(&self) -> Option<RunOrdinal> {
         self.ordinal
     }
 
@@ -149,6 +163,8 @@ impl Run {
 ///
 /// Never an identity and never a reference: correcting a wrong binding
 /// renumbers it, and a renumbered reference is a rewritten fact (ADR 0002 D1).
+/// It is unique among the Runs whoever assigns it is keeping, which is why it
+/// is assigned rather than derived.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RunOrdinal(u32);
 

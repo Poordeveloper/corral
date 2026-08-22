@@ -7,7 +7,6 @@ fn run(started: OccurrenceTime) -> Run {
         RunId::mint(),
         CorralSessionId::mint(),
         BindingId::mint(),
-        RunOrdinal::FIRST,
         started,
     )
 }
@@ -68,6 +67,19 @@ fn an_unverifiable_end_is_not_an_exit() {
 
     assert_eq!(ended.end(), Some(RunEnd::Unverifiable));
     assert!(!matches!(ended.end(), Some(RunEnd::Exited(_))));
+}
+
+/// A Run nobody is numbering has no number. An invented one would name a
+/// position another Run already occupies.
+#[test]
+fn a_run_arrives_without_a_position() {
+    let unnumbered = run(OccurrenceTime::Unknown);
+
+    assert_eq!(unnumbered.ordinal(), None);
+    assert_eq!(
+        unnumbered.with_ordinal(RunOrdinal::FIRST).ordinal(),
+        Some(RunOrdinal::FIRST)
+    );
 }
 
 #[test]

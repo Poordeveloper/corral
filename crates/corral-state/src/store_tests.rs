@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use corral_core::{
     Assurance, BindingKind, CommandFingerprint, CommandId, CommandKind, ControlEligibility,
-    EvidenceSource, ExitCause, ExternalId, ProviderId,
+    EvidenceSource, ExitCause, ExternalId, ProviderId, RunOrdinal,
 };
 
 use super::*;
@@ -340,6 +340,11 @@ fn a_heuristically_bound_run_writes_no_durable_lifecycle_fact() {
         .expect("recorded");
 
     assert_eq!(recorded.durability(), Durability::Withheld);
+    assert_eq!(
+        recorded.run().ordinal(),
+        None,
+        "the store numbers the Runs it keeps"
+    );
     assert_eq!(ended, Durability::Withheld);
     assert_eq!(store.runs_of(session.id()).expect("readable"), Vec::new());
     assert_eq!(
@@ -554,8 +559,8 @@ fn native_resume_opens_a_new_run_under_the_same_session() {
     assert_eq!(store.sessions().expect("readable").len(), 1);
     let runs = store.runs_of(session).expect("readable");
     assert_eq!(runs.len(), 2);
-    assert_eq!(runs[0].ordinal().position(), 1);
-    assert_eq!(runs[1].ordinal().position(), 2);
+    assert_eq!(runs[0].ordinal(), Some(RunOrdinal::FIRST));
+    assert_eq!(runs[1].ordinal(), Some(RunOrdinal::FIRST.next()));
     assert_eq!(runs[0].end(), Some(RunEnd::Exited(ExitCause::Completed)));
     assert!(runs[1].is_live());
 }
@@ -971,6 +976,128 @@ fn snapshot(store: &mut Store, commands: &[CommandId]) -> String {
         .expect("render");
     }
     rendered
+}
+
+/// A runtime binding names one runtime, and one runtime runs one episode at a
+/// time. Two live Runs behind one binding would leave PR8 choosing between
+/// contradictory episodes for one row.
+#[test]
+fn one_runtime_binding_runs_one_episode_at_a_time() {
+    let mut store = TestStore::new("one-episode");
+    let (session, binding) = managed_session(&mut store, "run-a");
+    let first = store
+        .record_run_started(
+            binding,
+            EvidenceSource::CorralConstructed,
+            OccurrenceTime::Authoritative(instant(20)),
+        )
+        .expect("recorded");
+
+    let refusal = store
+        .record_run_started(
+            binding,
+            EvidenceSource::CorralConstructed,
+            OccurrenceTime::Authoritative(instant(21)),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::RunAlreadyLive { run, .. }) if run == first.run().id()
+    ));
+    assert_eq!(store.runs_of(session).expect("readable").len(), 1);
+}
+
+/// A real clock carries nanoseconds and the store keeps milliseconds, so a
+/// value it hands back has to be the value it will read back — otherwise the
+/// receipt a retry gets never equals the one the first execution returned.
+#[test]
+fn a_receipt_survives_a_clock_finer_than_the_store() {
+    let mut store = TestStore::new("precision");
+    let command = command("cmd-1", "/work");
+    let precise = SystemTime::UNIX_EPOCH + Duration::new(1_766_000_000, 123_456_789);
+
+    let first = store.create_session(&command, precise).expect("created");
+    let again = store
+        .create_session(&command, precise + Duration::from_secs(5))
+        .expect("replayed");
+
+    assert!(matches!(again, CommandAcceptance::Replayed(_)));
+    assert_eq!(again.receipt(), first.receipt());
+    assert_eq!(
+        store.receipt(command.id()).expect("readable").as_ref(),
+        Some(first.receipt()),
+        "the receipt the write returned is the receipt the store holds"
+    );
+}
+
+/// The same rule for every value a write hands back, not just receipts.
+#[test]
+fn a_binding_is_returned_as_the_store_will_read_it_back() {
+    let mut store = TestStore::new("precision-binding");
+    let node = store.node();
+    let precise = SystemTime::UNIX_EPOCH + Duration::new(1_766_000_000, 987_654_321);
+    let SessionResolution::Created { session, binding } = store
+        .resolve_or_create_session(
+            key(node, BindingKind::ProviderSession, "sess-1"),
+            Provenance::Discovered,
+            Evidence::new(EvidenceSource::ProviderHook, Assurance::Attested, precise),
+            precise,
+        )
+        .expect("resolved")
+    else {
+        panic!("a new external identity is a new Session");
+    };
+
+    assert_eq!(
+        store.binding(binding.id()).expect("readable"),
+        Some(binding)
+    );
+    assert_eq!(store.sessions().expect("readable"), vec![session]);
+}
+
+/// The canonical fingerprint is stored whole so a conflict can be read. A
+/// durable row is still not a place for unbounded client input.
+#[test]
+fn an_oversized_fingerprint_is_refused_before_anything_is_written() {
+    let mut store = TestStore::new("fingerprint-size");
+    let huge = Command::new(
+        CommandId::new("cmd-1").expect("usable"),
+        CommandFingerprint::builder(CommandKind::new("session.create").expect("usable"))
+            .input("cwd", "x".repeat(8192))
+            .build(),
+    );
+
+    let refusal = store
+        .create_session(&huge, instant(10))
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::FingerprintTooLarge { .. })
+    ));
+    assert_eq!(store.sessions().expect("readable"), Vec::new());
+}
+
+/// Contention is the canonical transient condition. A store that latched it
+/// would let one backup tool end the daemon.
+#[test]
+fn a_refusal_leaves_the_store_usable() {
+    let mut store = TestStore::new("refusal-usable");
+    store
+        .create_session(&command("cmd-1", "/work"), instant(10))
+        .expect("created");
+
+    let refusal = store
+        .create_session(&command("cmd-1", "/elsewhere"), instant(20))
+        .expect_err("refused");
+
+    assert!(!refusal.is_fatal());
+    assert_eq!(
+        store.sessions().expect("still readable").len(),
+        1,
+        "a refused write does not stop the store answering"
+    );
 }
 
 /// A store that is not the schema this build knows is refused rather than

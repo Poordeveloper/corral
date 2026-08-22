@@ -131,6 +131,16 @@ pub(crate) fn millis(at: SystemTime) -> Result<i64, FatalState> {
     millis.map_err(|_| FatalState::UnrepresentableTime)
 }
 
+/// The same instant as the store would read it back.
+///
+/// The store keeps instants to the millisecond, so a value it hands a caller
+/// has to be rounded to that resolution first — otherwise a receipt returned
+/// by the write that created it never equals the receipt a retry reads back,
+/// and "the same command returns the same receipt" quietly stops being true.
+pub(crate) fn as_stored(at: SystemTime) -> Result<SystemTime, FatalState> {
+    Ok(from_millis(millis(at)?))
+}
+
 pub(crate) fn from_millis(millis: i64) -> SystemTime {
     let magnitude = Duration::from_millis(millis.unsigned_abs());
     if millis < 0 {

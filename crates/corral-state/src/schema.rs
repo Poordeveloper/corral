@@ -7,9 +7,10 @@
 //! event log or a projection of it.
 
 use std::path::Path;
+use std::time::Duration;
 
 use corral_core::NodeId;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use crate::encoding;
 use crate::error::{FatalState, StateError};
@@ -20,6 +21,14 @@ use crate::error::{FatalState, StateError};
 /// are disposable, and the first migration is written by the change that
 /// needs one. A store at any other version is refused rather than guessed at.
 pub(crate) const SCHEMA_VERSION: u32 = 1;
+
+/// How long an operation waits for another writer before giving up.
+///
+/// Corral runs one primary daemon per account, so contention means something
+/// unusual — a backup tool, a tool inspecting the store, a departing daemon.
+/// Waiting is the right answer to all three; concluding the store is broken is
+/// not.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The durable shape. Written once, on a store that has none.
 ///
@@ -82,6 +91,9 @@ CREATE TABLE runs (
     end_state          TEXT
 ) STRICT;
 
+CREATE INDEX bindings_by_session ON bindings (session_id);
+CREATE INDEX runs_by_session ON runs (session_id);
+
 CREATE TABLE session_lineage (
     child_session_id  TEXT PRIMARY KEY REFERENCES sessions(id),
     parent_session_id TEXT NOT NULL,
@@ -119,7 +131,7 @@ pub(crate) fn open(path: &Path) -> Result<(Connection, NodeId), StateError> {
         detail,
     };
 
-    let connection = Connection::open(path).map_err(|source| unopenable(source.to_string()))?;
+    let mut connection = Connection::open(path).map_err(|source| unopenable(source.to_string()))?;
     // Referential integrity is the store's own rule, enforced by the store:
     // duplicating it as Rust pre-checks would leave two owners of one
     // invariant, and the transaction rollback it triggers is what keeps an
@@ -128,14 +140,24 @@ pub(crate) fn open(path: &Path) -> Result<(Connection, NodeId), StateError> {
         .pragma_update(None, "foreign_keys", true)
         .map_err(|source| unopenable(source.to_string()))?;
 
+    // A momentary lock is not this daemon's answer to give up on: without a
+    // wait, one concurrent writer turns every operation into a hard failure.
+    connection
+        .busy_timeout(BUSY_TIMEOUT)
+        .map_err(|source| unopenable(source.to_string()))?;
+
+    // `quick_check` rather than `integrity_check`: it catches the structural
+    // damage and the "this is not a database" case that make a store unusable,
+    // without reading every page. The log is append-only, so a full check would
+    // make every cold start slower than the last one forever.
     let integrity: String = connection
-        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
         .map_err(|source| unopenable(source.to_string()))?;
     if integrity != "ok" {
         return Err(unopenable(integrity).into());
     }
 
-    let node = initialize(&connection).map_err(|error| match error {
+    let node = initialize(&mut connection).map_err(|error| match error {
         StateError::Fatal(FatalState::Storage { detail }) => unopenable(detail).into(),
         other => other,
     })?;
@@ -144,29 +166,36 @@ pub(crate) fn open(path: &Path) -> Result<(Connection, NodeId), StateError> {
 
 /// Create the schema on an empty store, and read back the identity of one that
 /// already exists.
-fn initialize(connection: &Connection) -> Result<NodeId, StateError> {
-    let existing: Option<u32> = stored_version(connection)?;
-    match existing {
-        None => {
-            let node = NodeId::mint();
-            connection.execute_batch(&format!("BEGIN;\n{DEFINITION}\nCOMMIT;"))?;
-            connection.execute(
-                "INSERT INTO schema_version (only_row, version) VALUES (0, ?1)",
-                [SCHEMA_VERSION],
-            )?;
-            connection.execute(
-                "INSERT INTO node_identity (only_row, node_id) VALUES (0, ?1)",
-                [node.to_string()],
-            )?;
-            Ok(node)
+///
+/// Creation is one transaction, tables and identity together. Split across
+/// two, a crash in between would leave a store with tables and no identity —
+/// a shape neither branch below can interpret, and one no later start could
+/// repair.
+fn initialize(connection: &mut Connection) -> Result<NodeId, StateError> {
+    if let Some(version) = stored_version(connection)? {
+        if version != SCHEMA_VERSION {
+            return Err(FatalState::SchemaVersionMismatch {
+                expected: SCHEMA_VERSION,
+                found: Some(version),
+            }
+            .into());
         }
-        Some(SCHEMA_VERSION) => stored_node(connection),
-        found => Err(FatalState::SchemaVersionMismatch {
-            expected: SCHEMA_VERSION,
-            found,
-        }
-        .into()),
+        return stored_node(connection);
     }
+
+    let node = NodeId::mint();
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(DEFINITION)?;
+    transaction.execute(
+        "INSERT INTO schema_version (only_row, version) VALUES (0, ?1)",
+        [SCHEMA_VERSION],
+    )?;
+    transaction.execute(
+        "INSERT INTO node_identity (only_row, node_id) VALUES (0, ?1)",
+        [node.to_string()],
+    )?;
+    transaction.commit()?;
+    Ok(node)
 }
 
 /// Confirm the store is still the schema and the store this process validated.
