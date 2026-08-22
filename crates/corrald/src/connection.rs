@@ -20,10 +20,12 @@ enum Dispatch {
     Reply(Frame),
     /// Answer and close: the connection's state machine cannot continue.
     ReplyThenClose(Frame),
-    /// The registry store declined, and is still intact. Protocol 1 has no
-    /// code for a transient state condition and PR2 invents none, so this
-    /// connection closes and the caller may come back. The daemon keeps
-    /// serving every other client.
+    /// The registry store declined, and is still intact. Protocol 1 defines no
+    /// error code for a transient state condition, and PR2 is ruled zero-wire,
+    /// so it does not mint one: this connection closes — an outcome the client
+    /// already handles — and the caller may come back. The phase that serves
+    /// state-derived facts on the wire owns the retryable code. The daemon
+    /// keeps serving every other client meanwhile.
     CloseWithoutReply(corral_state::StateError),
     /// The registry store can no longer vouch for durable truth. Nothing is
     /// answered — a normal-looking reply from an untrusted store is the one
@@ -192,7 +194,7 @@ async fn serve_established(
     writer: &mut FrameWriter<OwnedWriteHalf>,
     shutdown: &mut watch::Receiver<bool>,
     lifecycle: &Arc<Lifecycle>,
-    state: &DaemonState,
+    state: &Arc<DaemonState>,
 ) {
     loop {
         let frame = tokio::select! {
@@ -202,7 +204,7 @@ async fn serve_established(
 
         let dispatched = match frame {
             Ok(None) => return,
-            Ok(Some(Frame::Request(request))) => dispatch(&request, state),
+            Ok(Some(Frame::Request(request))) => dispatch(&request, state).await,
             // Unknown notifications are ignored by design: a notification
             // expects no answer, so dropping one cannot present as a hang.
             Ok(Some(Frame::Notification(notification))) => {
@@ -230,6 +232,10 @@ async fn serve_established(
             }
             Dispatch::FailClosed(error) => {
                 error!(%error, "the registry store can no longer be trusted");
+                // Noted before the shutdown is committed, and separately from
+                // it: a signal committing first must not turn this into a
+                // clean exit.
+                lifecycle.note_untrusted_state();
                 lifecycle.commit_shutdown(ShutdownReason::FatalState);
                 return;
             }
@@ -240,7 +246,7 @@ async fn serve_established(
     }
 }
 
-fn dispatch(request: &Request, state: &DaemonState) -> Dispatch {
+async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
     let id = request.id;
     match request.method.as_str() {
         // The hello is a bootstrap transition, not an idempotent request.
@@ -262,7 +268,7 @@ fn dispatch(request: &Request, state: &DaemonState) -> Dispatch {
             // no longer vouch for durable truth must not have that claim made
             // in its name. Only that conclusion ends the daemon — a refusal
             // leaves the store intact and costs this connection alone.
-            Ok(()) => match state.vouch() {
+            Ok(()) => match state.vouch().await {
                 Ok(()) => Dispatch::Reply(Frame::result(id, SessionListResult::empty_wire_value())),
                 Err(error) if error.is_fatal() => Dispatch::FailClosed(error),
                 Err(error) => Dispatch::CloseWithoutReply(error),

@@ -103,3 +103,35 @@ async fn shutdown_is_broadcast_to_every_subscriber() {
     assert!(second.changed().await.is_ok());
     assert!(*first.borrow());
 }
+
+/// Whichever cause commits the shutdown first wins the reason, so the exit
+/// status cannot be read off it: a signal landing in the same moment as the
+/// store's conclusion would report a clean stop from a daemon that could not
+/// trust its own durable state.
+#[test]
+fn an_untrusted_store_decides_the_exit_whatever_committed_the_shutdown() {
+    let lifecycle = Lifecycle::new(Instant::now());
+    assert_eq!(lifecycle.exit_disposition(), ExitDisposition::Clean);
+
+    lifecycle.commit_shutdown(ShutdownReason::Signal("SIGTERM"));
+    lifecycle.note_untrusted_state();
+
+    assert_eq!(
+        lifecycle.shutdown_reason(),
+        Some(ShutdownReason::Signal("SIGTERM")),
+        "the first cause still owns the reason"
+    );
+    assert_eq!(
+        lifecycle.exit_disposition(),
+        ExitDisposition::UntrustedState
+    );
+}
+
+#[test]
+fn a_clean_shutdown_stays_a_clean_exit() {
+    let lifecycle = Lifecycle::new(Instant::now());
+
+    lifecycle.commit_shutdown(ShutdownReason::Signal("SIGINT"));
+
+    assert_eq!(lifecycle.exit_disposition(), ExitDisposition::Clean);
+}
