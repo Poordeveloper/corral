@@ -18,7 +18,7 @@ impl Registry {
     fn new(name: &str) -> Self {
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
         let directory =
-            PathBuf::from("/tmp").join(format!("corrald-{}-{unique}-{name}", std::process::id()));
+            std::env::temp_dir().join(format!("corrald-{}-{unique}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("create the scratch directory");
         Self {
@@ -46,7 +46,9 @@ fn error_code(dispatch: Dispatch) -> (ErrorCode, bool) {
     let (frame, close) = match dispatch {
         Dispatch::Reply(frame) => (frame, false),
         Dispatch::ReplyThenClose(frame) => (frame, true),
-        Dispatch::FailClosed(error) => panic!("expected an answer, got {error}"),
+        Dispatch::CloseWithoutReply(error) | Dispatch::FailClosed(error) => {
+            panic!("expected an answer, got {error}")
+        }
     };
     match frame {
         Frame::Response(response) => match response.outcome {

@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
-use corral_core::Session;
 use corral_state::{StateError, Store};
 
 /// The daemon's one handle on durable state.
@@ -25,9 +24,14 @@ impl DaemonState {
         })
     }
 
-    /// The Sessions the registry holds.
-    pub fn sessions(&self) -> Result<Vec<Session>, StateError> {
-        self.lock().sessions()
+    /// Confirm the registry can still vouch for durable truth.
+    ///
+    /// What an answer derived from the registry needs before it may be given.
+    /// Protocol 1 assigns no session encoding, so nothing this build serves
+    /// carries a fact out of the store — but an empty list is still a claim
+    /// about it, and this is the question behind that claim.
+    pub fn vouch(&self) -> Result<(), StateError> {
+        self.lock().vouch()
     }
 
     /// A poisoned lock means another task panicked while holding it. The store

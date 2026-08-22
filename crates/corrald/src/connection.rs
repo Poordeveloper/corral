@@ -20,6 +20,11 @@ enum Dispatch {
     Reply(Frame),
     /// Answer and close: the connection's state machine cannot continue.
     ReplyThenClose(Frame),
+    /// The registry store declined, and is still intact. Protocol 1 has no
+    /// code for a transient state condition and PR2 invents none, so this
+    /// connection closes and the caller may come back. The daemon keeps
+    /// serving every other client.
+    CloseWithoutReply(corral_state::StateError),
     /// The registry store can no longer vouch for durable truth. Nothing is
     /// answered — a normal-looking reply from an untrusted store is the one
     /// outcome fail-closed exists to prevent — and the whole daemon stops
@@ -219,6 +224,10 @@ async fn serve_established(
         let (frame, close) = match dispatched {
             Dispatch::Reply(frame) => (frame, false),
             Dispatch::ReplyThenClose(frame) => (frame, true),
+            Dispatch::CloseWithoutReply(error) => {
+                warn!(%error, "the registry could not answer; closing the connection");
+                return;
+            }
             Dispatch::FailClosed(error) => {
                 error!(%error, "the registry store can no longer be trusted");
                 lifecycle.commit_shutdown(ShutdownReason::FatalState);
@@ -247,16 +256,16 @@ fn dispatch(request: &Request, state: &DaemonState) -> Dispatch {
             Err(error) => Dispatch::Reply(Frame::error(id, error)),
         },
         method::SESSION_LIST => match no_params(request) {
-            Ok(()) => match state.sessions() {
-                // Protocol 1 assigns no session encoding, so this build serves
-                // the sessions it can describe, which is none. The registry is
-                // still read: an empty list is a claim about it, and a store
-                // that can no longer vouch for durable truth must not have
-                // that claim made in its name.
-                Ok(_registry) => {
-                    Dispatch::Reply(Frame::result(id, SessionListResult::empty_wire_value()))
-                }
-                Err(error) => Dispatch::FailClosed(error),
+            // Protocol 1 assigns no session encoding, so this build serves the
+            // sessions it can describe, which is none. The registry is still
+            // asked: an empty list is a claim about it, and a store that can
+            // no longer vouch for durable truth must not have that claim made
+            // in its name. Only that conclusion ends the daemon — a refusal
+            // leaves the store intact and costs this connection alone.
+            Ok(()) => match state.vouch() {
+                Ok(()) => Dispatch::Reply(Frame::result(id, SessionListResult::empty_wire_value())),
+                Err(error) if error.is_fatal() => Dispatch::FailClosed(error),
+                Err(error) => Dispatch::CloseWithoutReply(error),
             },
             Err(error) => Dispatch::Reply(Frame::error(id, error)),
         },
