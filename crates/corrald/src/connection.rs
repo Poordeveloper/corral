@@ -10,8 +10,9 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
 use tracing::{debug, error, warn};
 
-use crate::lifecycle::{EstablishedGuard, Lifecycle};
+use crate::lifecycle::{EstablishedGuard, Lifecycle, ShutdownReason};
 use crate::policy::DaemonPolicy;
+use crate::state::DaemonState;
 
 /// What a dispatched request produced.
 enum Dispatch {
@@ -19,6 +20,11 @@ enum Dispatch {
     Reply(Frame),
     /// Answer and close: the connection's state machine cannot continue.
     ReplyThenClose(Frame),
+    /// The registry store can no longer vouch for durable truth. Nothing is
+    /// answered — a normal-looking reply from an untrusted store is the one
+    /// outcome fail-closed exists to prevent — and the whole daemon stops
+    /// serving (ADR 0002, Q14).
+    FailClosed(corral_state::StateError),
 }
 
 /// Serve one accepted connection through its whole life.
@@ -30,6 +36,7 @@ enum Dispatch {
 pub async fn serve(
     stream: UnixStream,
     lifecycle: Arc<Lifecycle>,
+    state: Arc<DaemonState>,
     policy: DaemonPolicy,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -52,7 +59,7 @@ pub async fn serve(
         _ = shutdown.changed() => return,
     };
 
-    serve_established(&mut reader, &mut writer, &mut shutdown).await;
+    serve_established(&mut reader, &mut writer, &mut shutdown, &lifecycle, &state).await;
     drop(established);
 }
 
@@ -179,6 +186,8 @@ async fn serve_established(
     reader: &mut FrameReader<OwnedReadHalf>,
     writer: &mut FrameWriter<OwnedWriteHalf>,
     shutdown: &mut watch::Receiver<bool>,
+    lifecycle: &Arc<Lifecycle>,
+    state: &DaemonState,
 ) {
     loop {
         let frame = tokio::select! {
@@ -188,7 +197,7 @@ async fn serve_established(
 
         let dispatched = match frame {
             Ok(None) => return,
-            Ok(Some(Frame::Request(request))) => dispatch(&request),
+            Ok(Some(Frame::Request(request))) => dispatch(&request, state),
             // Unknown notifications are ignored by design: a notification
             // expects no answer, so dropping one cannot present as a hang.
             Ok(Some(Frame::Notification(notification))) => {
@@ -210,6 +219,11 @@ async fn serve_established(
         let (frame, close) = match dispatched {
             Dispatch::Reply(frame) => (frame, false),
             Dispatch::ReplyThenClose(frame) => (frame, true),
+            Dispatch::FailClosed(error) => {
+                error!(%error, "the registry store can no longer be trusted");
+                lifecycle.commit_shutdown(ShutdownReason::FatalState);
+                return;
+            }
         };
         if writer.write_frame(&frame).await.is_err() || close {
             return;
@@ -217,7 +231,7 @@ async fn serve_established(
     }
 }
 
-fn dispatch(request: &Request) -> Dispatch {
+fn dispatch(request: &Request, state: &DaemonState) -> Dispatch {
     let id = request.id;
     match request.method.as_str() {
         // The hello is a bootstrap transition, not an idempotent request.
@@ -233,9 +247,17 @@ fn dispatch(request: &Request) -> Dispatch {
             Err(error) => Dispatch::Reply(Frame::error(id, error)),
         },
         method::SESSION_LIST => match no_params(request) {
-            // PR1 owns no registry, so the honest answer is an empty list
-            // rather than an absent one.
-            Ok(()) => Dispatch::Reply(Frame::result(id, SessionListResult::empty_wire_value())),
+            Ok(()) => match state.sessions() {
+                // Protocol 1 assigns no session encoding, so this build serves
+                // the sessions it can describe, which is none. The registry is
+                // still read: an empty list is a claim about it, and a store
+                // that can no longer vouch for durable truth must not have
+                // that claim made in its name.
+                Ok(_registry) => {
+                    Dispatch::Reply(Frame::result(id, SessionListResult::empty_wire_value()))
+                }
+                Err(error) => Dispatch::FailClosed(error),
+            },
             Err(error) => Dispatch::Reply(Frame::error(id, error)),
         },
         // A compatibility safety net, not how features are discovered: the

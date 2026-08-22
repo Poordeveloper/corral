@@ -149,6 +149,14 @@ impl TestAccount {
         self.corral_root.join("log")
     }
 
+    pub fn state_dir(&self) -> PathBuf {
+        self.corral_root.join("state")
+    }
+
+    pub fn registry(&self) -> PathBuf {
+        self.state_dir().join("registry.sqlite3")
+    }
+
     pub fn log(&self) -> PathBuf {
         self.log_dir().join("corrald.log")
     }

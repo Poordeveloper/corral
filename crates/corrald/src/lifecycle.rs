@@ -16,6 +16,10 @@ pub enum ShutdownReason {
     /// No established client for the whole idle grace.
     Idle,
     Signal(&'static str),
+    /// The registry store can no longer vouch for durable truth. The daemon
+    /// stops serving rather than answering from an untrusted store, and exits
+    /// non-zero so the next activation retries initialization (ADR 0002, Q14).
+    FatalState,
 }
 
 /// What the idle watchdog should do next.

@@ -7,24 +7,31 @@
 //! proves is stale, and bind last. A daemon that loses the claim exits
 //! cleanly, having touched nothing (ADR 0001 D2, D4).
 //!
-//! PR1 owns no durable Corral state. A new `corrald` reconstructs nothing from
-//! its predecessor; the lock and socket pathnames are rendezvous artifacts, not
-//! semantic state.
+//! The registry store is opened and validated before the endpoint is bound, so
+//! a store the daemon cannot vouch for is a startup failure rather than
+//! something a client discovers after its hello succeeded (ADR 0002, Q14). The
+//! lock and socket pathnames are rendezvous artifacts, not semantic state: a
+//! new `corrald` reconstructs nothing from its predecessor's runtime.
 
 mod connection;
 mod lifecycle;
 mod platform;
 mod policy;
 mod server;
+mod state;
 
 use std::fmt;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::Parser;
 use corral_rendezvous::{RendezvousError, RendezvousPaths, SingletonClaim, remove_stale_socket};
+use corral_state::StateError;
 use tracing::{error, info};
 
+use crate::lifecycle::ShutdownReason;
 use crate::policy::{DaemonPolicy, SINGLETON_CLAIM_WAIT};
+use crate::state::DaemonState;
 
 /// `corrald` is started by Corral surfaces, not by people. Run directly it is
 /// an ordinary foreground process logging to standard error.
@@ -41,6 +48,7 @@ struct Arguments {
 #[derive(Debug)]
 enum StartupError {
     Rendezvous(RendezvousError),
+    State(StateError),
     Runtime(std::io::Error),
     Serve(std::io::Error),
 }
@@ -82,12 +90,18 @@ fn start() -> Result<ExitCode, StartupError> {
     // Only the claim holder may clean, and only a confirmed socket artifact.
     remove_stale_socket(&claim, paths.socket()).map_err(StartupError::Rendezvous)?;
 
+    // Before the endpoint exists, not after: a daemon that answered a hello and
+    // then found its registry unusable would already have told a client it can
+    // be relied on.
+    paths.ensure_state_dir().map_err(StartupError::Rendezvous)?;
+    let state = Arc::new(DaemonState::open(paths.registry()).map_err(StartupError::State)?);
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(StartupError::Runtime)?;
-    runtime
-        .block_on(server::serve(paths.socket(), policy))
+    let reason = runtime
+        .block_on(server::serve(paths.socket(), policy, state))
         .map_err(StartupError::Serve)?;
 
     // Order matters and is stated rather than left to drop order: the runtime
@@ -100,6 +114,13 @@ fn start() -> Result<ExitCode, StartupError> {
     // behind, so failing to unlink here costs nothing.
     let _ = std::fs::remove_file(paths.socket());
     drop(claim);
+
+    // A daemon that stopped because it could not trust its own durable state
+    // says so in its exit status. The next activation retries initialization;
+    // if the cause persists it still cannot become ready.
+    if reason == Some(ShutdownReason::FatalState) {
+        return Ok(ExitCode::FAILURE);
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -117,6 +138,7 @@ impl fmt::Display for StartupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Rendezvous(error) => write!(f, "{error}"),
+            Self::State(error) => write!(f, "{error}"),
             Self::Runtime(source) => write!(f, "the async runtime could not start: {source}"),
             Self::Serve(source) => write!(f, "the endpoint could not be served: {source}"),
         }

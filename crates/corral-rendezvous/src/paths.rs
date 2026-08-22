@@ -10,9 +10,11 @@ use crate::error::{InvalidEndpointReason, RendezvousError};
 const CORRAL_DIR: &str = ".corral";
 const RUN_DIR: &str = "run";
 const LOG_DIR: &str = "log";
+const STATE_DIR: &str = "state";
 const SOCKET_FILE: &str = "corrald.sock";
 const LOCK_FILE: &str = "corrald.lock";
 const LOG_FILE: &str = "corrald.log";
+const REGISTRY_FILE: &str = "registry.sqlite3";
 
 /// Runtime and log directories are user-private: the flock and these modes are
 /// a transport fence, deliberately not a security boundary (ADR 0001).
@@ -32,6 +34,8 @@ pub struct RendezvousPaths {
     lock: PathBuf,
     log_dir: PathBuf,
     log_file: PathBuf,
+    state_dir: PathBuf,
+    registry: PathBuf,
 }
 
 impl RendezvousPaths {
@@ -48,6 +52,7 @@ impl RendezvousPaths {
         let root = root.as_ref();
         let run_dir = root.join(RUN_DIR);
         let log_dir = root.join(LOG_DIR);
+        let state_dir = root.join(STATE_DIR);
         let socket = run_dir.join(SOCKET_FILE);
 
         if socket_address_length_exceeded(&socket) {
@@ -57,10 +62,12 @@ impl RendezvousPaths {
         Ok(Self {
             lock: run_dir.join(LOCK_FILE),
             log_file: log_dir.join(LOG_FILE),
+            registry: state_dir.join(REGISTRY_FILE),
             root: root.to_path_buf(),
             socket,
             run_dir,
             log_dir,
+            state_dir,
         })
     }
 
@@ -85,6 +92,20 @@ impl RendezvousPaths {
         &self.log_file
     }
 
+    /// The registry store of this account's daemon.
+    ///
+    /// Not a rendezvous artifact: it carries no singleton rules and nobody
+    /// cleans it up as stale. It lives here because the Corral root's layout
+    /// has one owner, and a second crate deriving paths under the root would
+    /// be a second answer to where an account's files are.
+    pub fn registry(&self) -> &Path {
+        &self.registry
+    }
+
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
     /// Create the user-private runtime directory. Idempotent.
     pub fn ensure_run_dir(&self) -> Result<(), RendezvousError> {
         self.ensure_private_tree(&self.run_dir)
@@ -93,6 +114,11 @@ impl RendezvousPaths {
     /// Create the user-private log directory. Idempotent.
     pub fn ensure_log_dir(&self) -> Result<(), RendezvousError> {
         self.ensure_private_tree(&self.log_dir)
+    }
+
+    /// Create the user-private durable-state directory. Idempotent.
+    pub fn ensure_state_dir(&self) -> Result<(), RendezvousError> {
+        self.ensure_private_tree(&self.state_dir)
     }
 
     /// Check every directory Corral owns on the way down, not just the leaf.

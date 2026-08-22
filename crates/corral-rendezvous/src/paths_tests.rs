@@ -17,6 +17,11 @@ fn derives_every_artifact_from_the_account_home() {
         paths.log_file(),
         Path::new("/home/example/.corral/log/corrald.log")
     );
+    assert_eq!(paths.state_dir(), Path::new("/home/example/.corral/state"));
+    assert_eq!(
+        paths.registry(),
+        Path::new("/home/example/.corral/state/registry.sqlite3")
+    );
 }
 
 /// The account home only supplies the root; the layout under it is one
