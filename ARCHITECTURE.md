@@ -433,6 +433,8 @@ crates/
 ├── corral-core        domain semantics and invariants; no IO
 ├── corral-protocol    wire vocabulary, protocol schemas, compatibility-
 │                      facing representations
+├── corral-rendezvous  canonical rendezvous paths, OS-account home
+│                      resolution, singleton lock/socket artifact rules
 ├── corral-client      shared client/core logic
 ├── corrald            daemon: registry, runtime, attention, protocol server
 └── corral             CLI / TUI

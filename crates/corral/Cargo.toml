@@ -1,0 +1,28 @@
+[package]
+name = "corral"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "corral"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+corral-client = { workspace = true }
+corral-protocol = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+corral-protocol = { workspace = true }
+# Integration tests drive real daemons, so they need to send real signals.
+rustix = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

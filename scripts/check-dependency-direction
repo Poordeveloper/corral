@@ -14,7 +14,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-CLIENT_SIDE="corral-protocol corral-client corral corral-tui corral-desktop corral-tray"
+CLIENT_SIDE="corral-protocol corral-rendezvous corral-client corral corral-tui corral-desktop corral-tray"
 FORBIDDEN="corral-core"
 
 metadata="$(cargo metadata --format-version 1 --no-deps)"
