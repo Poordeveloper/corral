@@ -10,7 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-use support::wire::spawn_silent_daemon;
+use support::wire::{FakeBehaviour, spawn_fake_daemon};
 use support::{SETTLE, TestAccount, lock_is_held, run, stderr, stdout, wait_until};
 
 #[test]
@@ -307,7 +307,7 @@ fn a_client_waits_out_a_departing_owner_and_then_starts_one() {
 #[test]
 fn a_peer_that_never_answers_expires_the_budget() {
     let account = TestAccount::new("silent").with_activation_deadline(Duration::from_millis(500));
-    let _silent = spawn_silent_daemon(&account.socket());
+    let _silent = spawn_fake_daemon(&account.socket(), FakeBehaviour::StaySilent);
 
     let started = std::time::Instant::now();
     let output = run(account.corral().arg("ping"));
@@ -328,7 +328,7 @@ fn a_peer_that_never_answers_expires_the_budget() {
 fn an_override_to_a_peer_that_never_answers_expires_the_budget() {
     let account = TestAccount::new("silent-o").with_activation_deadline(Duration::from_millis(500));
     let elsewhere = account.scratch().join("silent.sock");
-    let _silent = spawn_silent_daemon(&elsewhere);
+    let _silent = spawn_fake_daemon(&elsewhere, FakeBehaviour::StaySilent);
 
     let started = std::time::Instant::now();
     let output = run(account
@@ -379,9 +379,6 @@ fn an_override_reaches_a_live_daemon() {
 
 #[test]
 fn a_runtime_directory_open_to_others_fails_closed() {
-    if rustix::process::geteuid().is_root() {
-        return;
-    }
     let account = TestAccount::new("wide-dir");
     let run_dir = account.socket().parent().expect("run dir").to_path_buf();
     std::fs::create_dir_all(&run_dir).expect("create");

@@ -11,13 +11,16 @@ mod support;
 
 use std::time::Duration;
 
-use support::wire::{hello_reply, spawn_fake_daemon};
+use support::wire::{FakeBehaviour, hello_reply, spawn_fake_daemon};
 use support::{TestAccount, run, stderr};
 
 #[test]
 fn an_incompatible_daemon_is_terminal_and_is_left_running() {
     let account = TestAccount::new("incompatible").with_activation_deadline(Duration::from_secs(3));
-    let fake = spawn_fake_daemon(&account.socket(), Some(hello_reply(9, 9, "incompatible")));
+    let fake = spawn_fake_daemon(
+        &account.socket(),
+        FakeBehaviour::AnswerThenClose(hello_reply(9, 9, "incompatible")),
+    );
 
     let output = run(account.corral().arg("ping"));
 
@@ -41,7 +44,10 @@ fn an_incompatible_daemon_is_terminal_and_is_left_running() {
 #[test]
 fn a_daemons_own_verdict_is_never_taken_on_trust() {
     let account = TestAccount::new("divergent").with_activation_deadline(Duration::from_secs(3));
-    let _fake = spawn_fake_daemon(&account.socket(), Some(hello_reply(9, 9, "compatible")));
+    let _fake = spawn_fake_daemon(
+        &account.socket(),
+        FakeBehaviour::AnswerThenClose(hello_reply(9, 9, "compatible")),
+    );
 
     let output = run(account.corral().arg("ping"));
 
@@ -55,7 +61,9 @@ fn a_malformed_server_hello_fails_the_handshake() {
     let account = TestAccount::new("bad-hello").with_activation_deadline(Duration::from_secs(3));
     let _fake = spawn_fake_daemon(
         &account.socket(),
-        Some(b"{\"type\":\"response\",\"id\":0,\"outcome\":{\"result\":{}}}\n".to_vec()),
+        FakeBehaviour::AnswerThenClose(
+            b"{\"type\":\"response\",\"id\":0,\"outcome\":{\"result\":{}}}\n".to_vec(),
+        ),
     );
 
     let output = run(account.corral().arg("ping"));
@@ -70,7 +78,10 @@ fn a_malformed_server_hello_fails_the_handshake() {
 #[test]
 fn a_daemon_that_vanishes_mid_request_is_reported_not_replayed() {
     let account = TestAccount::new("vanishing").with_activation_deadline(Duration::from_secs(3));
-    let fake = spawn_fake_daemon(&account.socket(), Some(hello_reply(1, 1, "compatible")));
+    let fake = spawn_fake_daemon(
+        &account.socket(),
+        FakeBehaviour::AnswerThenClose(hello_reply(1, 1, "compatible")),
+    );
 
     let output = run(account.corral().arg("ping"));
 

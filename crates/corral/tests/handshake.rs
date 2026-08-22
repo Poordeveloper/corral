@@ -220,7 +220,11 @@ fn an_oversize_frame_closes_the_connection() {
     let mut client = RawClient::connect(&account.socket());
 
     let oversize = vec![b'x'; corral_protocol::MAX_FRAME_BYTES + 4096];
-    client.send_raw(&oversize);
 
-    assert!(client.receive().is_none());
+    // The daemon stops reading the moment its buffer crosses the limit, so
+    // the tail of this write may find a closed peer. Either way the answer
+    // under test is the same: the connection is gone.
+    if client.send_raw_tolerating_close(&oversize) {
+        assert!(client.receive().is_none());
+    }
 }

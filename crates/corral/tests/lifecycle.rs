@@ -145,24 +145,10 @@ fn a_restarted_daemon_reports_the_same_empty_world() {
     assert_eq!(support::stdout(&before), support::stdout(&after));
 }
 
-/// Once shutdown is committed it is never cancelled. A connection that was
-/// merely pending cannot promote itself afterwards and revive the daemon.
-#[test]
-fn a_hello_after_the_shutdown_commit_cannot_revive_the_daemon() {
-    let account = TestAccount::new("post-commit")
-        .with_idle_grace(Duration::from_millis(300))
-        // Long enough that the pending connection outlives the idle commit,
-        // which is the point: pendings hold no lifetime right.
-        .with_pre_hello_deadline(Duration::from_secs(30));
-    let daemon = account.start_daemon();
-    let mut pending = RawClient::connect(&account.socket());
-
-    wait_until(SETTLE, || !lock_is_held(&account.lock()));
-
-    assert!(
-        pending.say_hello_expecting_close(),
-        "a hello after the commit must not establish"
-    );
-    let (code, log) = daemon.wait();
-    assert_eq!(code, Some(0), "{log}");
-}
+// The commit-then-establish order is covered by `corrald::lifecycle` unit
+// tests rather than here. There is no externally observable window: the daemon
+// commits, closes its connections and exits in one step, so a process-level
+// test cannot distinguish "the guard refused the hello" from "the process was
+// gone". A test that cannot fail for the intended reason is worse than none,
+// and the one that used to live here was proved vacuous by removing the guard
+// and watching it stay green.
