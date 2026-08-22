@@ -67,3 +67,16 @@ fn unknown_hello_fields_are_ignored() {
 
     assert_eq!(hello.protocol_version, 1);
 }
+
+/// The field is `compatibility_result`, as ADR 0001 and S3(a) name it. A peer
+/// spelling it otherwise states no verdict, and a verdict may not be assumed
+/// from an absent field.
+#[test]
+fn a_server_hello_without_a_verdict_does_not_decode() {
+    let error = serde_json::from_str::<ServerHello>(
+        r#"{"protocol_version":1,"min_compatible_peer_version":1,"compatibility":"compatible"}"#,
+    )
+    .expect_err("required field");
+
+    assert!(error.to_string().contains("compatibility_result"));
+}
