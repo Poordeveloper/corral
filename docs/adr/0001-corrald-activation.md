@@ -32,7 +32,13 @@ activation. `CORRAL_ENDPOINT` is a **connection override, not an instance
 namespace**: the client connects there first; if unreachable, it reports
 an explicit endpoint-unavailable error — no silent fallback, no auto-spawn
 at a second namespace. Auto-activation is always governed by the canonical
-singleton identity.
+singleton identity. The account home is read through `uzers`
+(`get_effective_uid` → `get_user_by_uid` → `home_dir`), the narrow safe
+wrapper approved in
+`docs/decisions/2026-08-22-pr1-dependency-and-test-seam.md` (D-EX1);
+direct libc is rejected because it would widen the unsafe boundary, and
+`home`/`dirs`-style crates because they prefer `$HOME`, which is the defect
+this decision exists to close.
 
 **D2 — Singleton claim.** The canonical lock is held with `flock` EX
 (bounded blocking wait, ~5 s) for the daemon's lifetime; the flock is the
@@ -187,14 +193,34 @@ corral-client → corral-rendezvous → OS abstraction; corral-client →
 corral-protocol; corrald → {corral-rendezvous, corral-protocol}. No
 corrald → corral-client edge; no corral-core dependency in PR1.
 
-**Test injection.** Runtime policy is explicit in code (`DaemonPolicy {
-idle_grace, pre_hello_deadline }`, `ClientActivationPolicy {
-activation_deadline }`); production entrypoints construct fixed defaults;
-tests construct values directly. Process-level tests may pass a typed,
-test-only settings input containing only those daemon timing knobs, available
-solely in a test-support build, rejected by production packaging, never
-part of normal auto-activation. No generic hidden `--internal-config`
-backdoor.
+**Test injection.** Two seams, deliberately different kinds, both behind
+the non-default `test-support` feature. Normal production binaries do not
+recognize either seam's environment variables; only explicit test-support
+builds do — a boundary a machine can check, not a claim about build
+profiles.
+
+*Runtime policy* is explicit in code (`DaemonPolicy { idle_grace,
+pre_hello_deadline }`, `ClientActivationPolicy { activation_deadline }`);
+production entrypoints construct fixed defaults and tests construct values
+directly. Process-level tests may supply those timing knobs as typed
+scalars, never an open configuration map, never part of normal
+auto-activation. No generic hidden `--internal-config` backdoor.
+
+*The rendezvous namespace seam* is not a policy knob and not a
+configuration surface: `CORRAL_TEST_ROOT` names a whole alternative Corral
+root, so a test can exercise real resolution, locking, socket binding and
+sibling auto-spawn without writing into the developer's own account.
+Production `corral_root` is `<account home>/.corral`; a test-support build
+resolves `CORRAL_TEST_ROOT` instead when set, and it must be absolute.
+Substitution, never fallback — neither root is reached for when the other
+fails. Everything downstream is unchanged: same path-length limit, same
+private directory creation, same lock and socket artifact rules, and client
+and daemon resolve through the same `corral-rendezvous` function, so the
+seam cannot make them disagree about which daemon is primary. An
+environment variable is the right carrier because an auto-spawned child
+inherits the namespace without adding a parameter to the production
+activation protocol. Ruled in
+`docs/decisions/2026-08-22-pr1-dependency-and-test-seam.md` (D-EX2).
 
 ## Platform scope
 
@@ -262,6 +288,9 @@ exists; future idle-policy configuration surfaces; CLI exit-code taxonomy.
   security boundary.
 
 Acceptance evidence: `docs/decisions/2026-08-22-pr1-activation-grill.md`
-(S1–S6), materialized here and accepted by the founder on merge of this
-change — which precedes the PR1 implementation in history, so no
-implementation commit crosses this decision boundary before acceptance.
+(S1–S6), and `docs/decisions/2026-08-22-pr1-dependency-and-test-seam.md`
+for the two late plan-resolution decisions (D-EX1, D-EX2) that surfaced
+while the accepted plan was being resolved into an implementation — a new
+third-party dependency and a supplement to the approved test-injection
+surface, neither an ordinary coding detail, so both were ruled before the
+implementation could rely on them.
