@@ -61,9 +61,11 @@ the bar does not need to wait for the Attention Engine.
 
 It does still wait for PR5. A Desktop opened onto a screen of Unknown would
 be rebuilt as each later phase adds meaning to render; waiting one phase
-for hooks costs one phase and saves a round of graphical rework. Both
-surfaces gain the five-state rendering at PR8: the TUI pays that extension
-once and cheaply, and the Desktop pays it once rather than at every phase.
+for hooks costs one phase and saves a round of graphical rework. The
+five-state projection lands in PR8, and the TUI renders it inside that
+phase; the in-flight Desktop workstream integrates the same projection
+before PR9 merges. Each surface pays the extension once, rather than at
+every phase.
 
 Rejected: starting the Desktop straight after PR3 or PR4. Nothing
 technically prevents it — Desktop and TUI are two clients of one protocol,
