@@ -8,7 +8,7 @@ use corral_protocol::{
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::lifecycle::{EstablishedGuard, Lifecycle};
 use crate::policy::DaemonPolicy;
@@ -163,7 +163,12 @@ async fn write_hello(
     id: RequestId,
     hello: &ServerHello,
 ) -> Result<(), ()> {
-    let value = serde_json::to_value(hello).map_err(|_| ())?;
+    let value = serde_json::to_value(hello).map_err(|source| {
+        // Encoding a fixed struct cannot fail, so if it ever does the daemon
+        // is not in a state to serve. Close, but say why: a silent close is
+        // indistinguishable from the peer going away.
+        error!(%source, "the server hello could not be encoded");
+    })?;
     writer
         .write_frame(&Frame::result(id, value))
         .await
