@@ -7,5 +7,10 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+# Corral-minted identity. Nothing else here needs a dependency: the domain is
+# types and invariants, and it deliberately owns no encoding.
+uuid = { workspace = true }
+
 [lints]
 workspace = true
