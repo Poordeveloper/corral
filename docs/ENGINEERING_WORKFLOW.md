@@ -101,8 +101,17 @@ Misclassification handling:
 
 Class B and C work is preceded by a written plan (AGENTS.md §Scope
 discipline). A plan is a thinking boundary, not a word count: a small fix
-gets a small plan; never pad one to fill the template. Hard cap: one page /
-~60 lines.
+gets a small plan; never pad one to fill the template. The plan must be as
+short as possible while remaining executable without oral history; length
+is a review signal, not a correctness invariant.
+
+Size target: ~150 lines. Exceeding the target is not a governance
+violation, but the plan must then carry a `Plan Size Justification`
+section stating why it remains one coherent semantic scope and why
+splitting would make implementation or review worse. The fresh reviewer
+rules on it: coherent → accepted over budget; scope too broad → split. The
+target is a review-pressure threshold, never a line-count CI gate.
+Decision: `docs/decisions/2026-08-22-plan-size-budget.md`.
 
 ```text
 ---
