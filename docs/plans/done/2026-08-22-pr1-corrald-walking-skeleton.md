@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 class: C  # contains ADR 0001 + an ARCHITECTURE §4 amendment; founder acceptance + human merge
 writes:
   - adr                    # ADR 0001 (rewritten per the activation grill)
