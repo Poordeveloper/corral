@@ -20,7 +20,8 @@ const PRIVATE_DIR_MODE: u32 = 0o700;
 
 /// The canonical rendezvous of one OS account.
 ///
-/// Derivation is a pure function of the account home, so every process of the
+/// Derivation is a pure function of the Corral root, and in production that
+/// root is a pure function of the OS-account home. So every process of the
 /// same effective OS user on the same host computes the same paths whatever
 /// their shell, session type, cron or ssh environment looks like (ADR 0001 D1).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,18 +34,19 @@ pub struct RendezvousPaths {
 }
 
 impl RendezvousPaths {
-    /// The canonical rendezvous of the effective OS user.
+    /// The canonical rendezvous this process must use.
+    ///
+    /// Client and daemon both arrive here, so neither can hold a different
+    /// idea of which daemon is the account's primary.
     pub fn canonical() -> Result<Self, RendezvousError> {
-        Self::for_account_home(account_home()?)
+        Self::for_corral_root(corral_root()?)
     }
 
-    /// The same derivation rooted at an explicit account home.
-    ///
-    /// This is the whole of the path rule; `canonical` only supplies the home.
-    pub fn for_account_home(home: impl AsRef<Path>) -> Result<Self, RendezvousError> {
-        let base = home.as_ref().join(CORRAL_DIR);
-        let run_dir = base.join(RUN_DIR);
-        let log_dir = base.join(LOG_DIR);
+    /// The layout rule, given a Corral root.
+    pub fn for_corral_root(root: impl AsRef<Path>) -> Result<Self, RendezvousError> {
+        let root = root.as_ref();
+        let run_dir = root.join(RUN_DIR);
+        let log_dir = root.join(LOG_DIR);
         let socket = run_dir.join(SOCKET_FILE);
 
         if socket_address_length_exceeded(&socket) {
@@ -58,6 +60,11 @@ impl RendezvousPaths {
             run_dir,
             log_dir,
         })
+    }
+
+    /// The production root of an OS account, and the layout under it.
+    pub fn for_account_home(home: impl AsRef<Path>) -> Result<Self, RendezvousError> {
+        Self::for_corral_root(home.as_ref().join(CORRAL_DIR))
     }
 
     pub fn socket(&self) -> &Path {
@@ -145,15 +152,27 @@ fn ensure_private_dir(path: &Path) -> Result<(), RendezvousError> {
     Ok(())
 }
 
+/// The Corral root this process must use.
+///
+/// In production this is `<account home>/.corral` and nothing can move it. A
+/// `test-support` build resolves a test namespace instead when one is set — a
+/// substitution, never a fallback: production resolution failing does not
+/// reach for the namespace, and the namespace failing does not reach for
+/// production.
+fn corral_root() -> Result<PathBuf, RendezvousError> {
+    if let Some(root) = test_namespace::root()? {
+        return Ok(root);
+    }
+    Ok(account_home()?.join(CORRAL_DIR))
+}
+
 /// The home directory of the effective OS user, from the account database.
 ///
 /// Never `$HOME`: the canonical rendezvous is user-wide, so a shell variable
 /// must not be able to give one OS account two primary daemons (ADR 0001 D1).
+/// The uid is the effective one, matching the filesystem and process authority
+/// Corral actually acts with.
 fn account_home() -> Result<PathBuf, RendezvousError> {
-    if let Some(root) = test_account_home() {
-        return Ok(root);
-    }
-
     let uid = uzers::get_effective_uid();
     let user =
         uzers::get_user_by_uid(uid).ok_or_else(|| RendezvousError::AccountHomeUnresolvable {
@@ -177,21 +196,54 @@ fn account_home() -> Result<PathBuf, RendezvousError> {
     Ok(home)
 }
 
-/// Test-support only (ADR 0001, "Test injection").
+/// The test-only rendezvous namespace seam (ADR 0001, "Test injection").
 ///
-/// Process-level tests must exercise real activation without writing into the
-/// developer's own account, and the account database cannot be redirected. The
-/// substitution is compiled out of release builds, so production packaging
-/// cannot reach it and canonical identity there always comes from the account
-/// database.
-#[cfg(debug_assertions)]
-fn test_account_home() -> Option<PathBuf> {
-    std::env::var_os("CORRAL_TEST_ROOT").map(PathBuf::from)
-}
+/// Not a runtime-policy knob and not a configuration surface: it names a whole
+/// alternative Corral root, so a process-level test can exercise real
+/// resolution, locking, socket binding and sibling auto-spawn without writing
+/// into the developer's own account.
+///
+/// Normal production binaries do not recognize the variable at all; only
+/// explicit `test-support` builds do, and `test-support` is not a default
+/// feature. Everything downstream of the root — path-length limits, private
+/// directory creation, lock and socket artifact rules — is the same code a
+/// production root runs through.
+mod test_namespace {
+    use std::path::PathBuf;
 
-#[cfg(not(debug_assertions))]
-fn test_account_home() -> Option<PathBuf> {
-    None
+    use crate::error::RendezvousError;
+
+    #[cfg(feature = "test-support")]
+    const TEST_ROOT: &str = "CORRAL_TEST_ROOT";
+
+    #[cfg(feature = "test-support")]
+    pub(super) fn root() -> Result<Option<PathBuf>, RendezvousError> {
+        let Some(raw) = std::env::var_os(TEST_ROOT) else {
+            return Ok(None);
+        };
+        let path = PathBuf::from(&raw);
+        if path.as_os_str().is_empty() {
+            return Err(RendezvousError::InvalidTestNamespace {
+                raw,
+                detail: "it is empty",
+            });
+        }
+        if !path.is_absolute() {
+            // Quietly using the production root here would turn the seam into
+            // a conditional configuration surface, which is the one thing it
+            // may never become.
+            return Err(RendezvousError::InvalidTestNamespace {
+                raw,
+                detail: "it is not an absolute path",
+            });
+        }
+        Ok(Some(path))
+    }
+
+    #[cfg(not(feature = "test-support"))]
+    pub(super) fn root() -> Result<Option<PathBuf>, RendezvousError> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -217,8 +269,18 @@ mod tests {
         );
     }
 
+    /// The account home only supplies the root; the layout under it is one
+    /// rule, so a test namespace differs from a real account in nothing else.
     #[test]
-    fn derivation_depends_on_nothing_but_the_home() {
+    fn the_account_home_only_supplies_the_root() {
+        let from_home = RendezvousPaths::for_account_home("/home/example").expect("derivable");
+        let from_root = RendezvousPaths::for_corral_root("/home/example/.corral").expect("ok");
+
+        assert_eq!(from_home, from_root);
+    }
+
+    #[test]
+    fn derivation_depends_on_nothing_but_the_root() {
         let a = RendezvousPaths::for_account_home("/home/example").expect("derivable");
         let b = RendezvousPaths::for_account_home("/home/example/").expect("derivable");
         assert_eq!(a, b);
@@ -228,6 +290,18 @@ mod tests {
     fn a_canonical_path_too_long_for_a_socket_is_a_configuration_error() {
         let deep = format!("/{}", "d".repeat(200));
         let error = RendezvousPaths::for_account_home(&deep).expect_err("too long");
+        assert!(matches!(
+            error,
+            RendezvousError::CanonicalEndpointTooLong { .. }
+        ));
+    }
+
+    /// A test namespace is subject to the same limits as a real root: the seam
+    /// substitutes the root and nothing else.
+    #[test]
+    fn a_test_namespace_gets_the_same_validation_as_a_real_root() {
+        let deep = format!("/{}", "d".repeat(200));
+        let error = RendezvousPaths::for_corral_root(&deep).expect_err("too long");
         assert!(matches!(
             error,
             RendezvousError::CanonicalEndpointTooLong { .. }

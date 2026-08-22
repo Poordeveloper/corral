@@ -7,11 +7,21 @@
 
 #![allow(dead_code)]
 
+// The seam that lets these tests run against a private Corral root exists only
+// in a test-support build, so without it the suite would silently drive the
+// developer's own daemon.
+#[cfg(not(feature = "test-support"))]
+compile_error!(
+    "the end-to-end suite needs the test-support rendezvous namespace: run ./scripts/verify, \
+     or cargo test --features corral/test-support,corrald/test-support"
+);
+
 pub mod wire;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -25,23 +35,50 @@ static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// The daemon, resolved exactly the way the product resolves it: as `corral`'s
 /// sibling. Cargo puts both binaries in the same directory.
+///
+/// The seam check is not ceremony: a `corrald` built without `test-support`
+/// resolves the developer's real account home instead of this test's root, so
+/// the suite would quietly drive their own daemon. Failing loudly here is the
+/// difference between a red test and a damaged machine.
 pub fn corrald_binary() -> PathBuf {
-    let directory = Path::new(CORRAL_BINARY)
-        .parent()
-        .expect("the corral binary has a directory");
-    let daemon = directory.join("corrald");
-    assert!(
-        daemon.exists(),
-        "{} is missing; build the whole workspace (the merge gate runs \
-         `cargo test --workspace --all-targets`)",
-        daemon.display()
-    );
-    daemon
+    static DAEMON: OnceLock<PathBuf> = OnceLock::new();
+    DAEMON
+        .get_or_init(|| {
+            let directory = Path::new(CORRAL_BINARY)
+                .parent()
+                .expect("the corral binary has a directory");
+            let daemon = directory.join("corrald");
+            let image = std::fs::read(&daemon).unwrap_or_else(|source| {
+                panic!(
+                    "{} could not be read ({source}); build the whole workspace, which the \
+                     merge gate does",
+                    daemon.display()
+                )
+            });
+            assert!(
+                contains(&image, b"CORRAL_TEST_ROOT"),
+                "{} was built without the test-support rendezvous seam and would serve the \
+                 real account; rebuild with --features corral/test-support,corrald/test-support",
+                daemon.display()
+            );
+            daemon
+        })
+        .clone()
 }
 
-/// A private OS-account home standing in for one user's canonical rendezvous.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// A private Corral root standing in for one OS account's rendezvous.
 pub struct TestAccount {
-    root: PathBuf,
+    /// Scratch space for fixtures. The Corral root is a directory inside it,
+    /// so nothing a test leaves lying around can be mistaken for rendezvous
+    /// state.
+    base: PathBuf,
+    corral_root: PathBuf,
     idle_grace: Duration,
     pre_hello_deadline: Duration,
     activation_deadline: Duration,
@@ -54,13 +91,15 @@ impl TestAccount {
     pub fn new(name: &str) -> Self {
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
         let short: String = name.chars().take(6).collect();
-        let root =
+        let base =
             PathBuf::from("/tmp").join(format!("crl-{}-{unique}-{short}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("create the test account home");
+        let _ = std::fs::remove_dir_all(&base);
+        let corral_root = base.join("corral");
+        std::fs::create_dir_all(&corral_root).expect("create the test Corral root");
 
         Self {
-            root,
+            base,
+            corral_root,
             // Short enough that a daemon a test forgets about disappears on its
             // own, long enough that it does not exit mid-test.
             idle_grace: Duration::from_secs(3),
@@ -84,20 +123,30 @@ impl TestAccount {
         self
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
+    /// The Corral root this account's processes resolve to.
+    pub fn corral_root(&self) -> &Path {
+        &self.corral_root
+    }
+
+    /// Somewhere to put fixtures that are not rendezvous state.
+    pub fn scratch(&self) -> &Path {
+        &self.base
     }
 
     pub fn socket(&self) -> PathBuf {
-        self.root.join(".corral/run/corrald.sock")
+        self.corral_root.join("run/corrald.sock")
     }
 
     pub fn lock(&self) -> PathBuf {
-        self.root.join(".corral/run/corrald.lock")
+        self.corral_root.join("run/corrald.lock")
+    }
+
+    pub fn log_dir(&self) -> PathBuf {
+        self.corral_root.join("log")
     }
 
     pub fn log(&self) -> PathBuf {
-        self.root.join(".corral/log/corrald.log")
+        self.log_dir().join("corrald.log")
     }
 
     /// A `corral` invocation bound to this account's rendezvous.
@@ -117,7 +166,7 @@ impl TestAccount {
 
     fn apply_environment(&self, command: &mut Command) {
         command
-            .env("CORRAL_TEST_ROOT", &self.root)
+            .env("CORRAL_TEST_ROOT", &self.corral_root)
             .env("CORRAL_TEST_IDLE_GRACE_MS", millis(self.idle_grace))
             .env(
                 "CORRAL_TEST_PRE_HELLO_DEADLINE_MS",
@@ -151,7 +200,7 @@ impl Drop for TestAccount {
     fn drop(&mut self) {
         // Removing the rendezvous leaves any surviving daemon with nothing to
         // serve; it idles out on the short grace this account configured.
-        let _ = std::fs::remove_dir_all(&self.root);
+        let _ = std::fs::remove_dir_all(&self.base);
     }
 }
 

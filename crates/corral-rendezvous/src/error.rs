@@ -36,6 +36,11 @@ pub enum RendezvousError {
     OccupiedSocketPath { path: PathBuf, found: FileKind },
     /// Inspecting or removing the socket pathname failed.
     SocketPathname { path: PathBuf, source: io::Error },
+    /// Only reachable in a `test-support` build: the test rendezvous namespace
+    /// was set to something that cannot be a Corral root. Production binaries
+    /// do not recognize the seam, so they cannot produce this.
+    #[cfg(feature = "test-support")]
+    InvalidTestNamespace { raw: OsString, detail: &'static str },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +117,11 @@ impl fmt::Display for RendezvousError {
             Self::SocketPathname { path, source } => {
                 write!(f, "the socket pathname {} : {source}", path.display())
             }
+            #[cfg(feature = "test-support")]
+            Self::InvalidTestNamespace { raw, detail } => write!(
+                f,
+                "the test rendezvous namespace {raw:?} is not a usable Corral root: {detail}"
+            ),
         }
     }
 }

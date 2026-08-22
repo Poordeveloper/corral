@@ -16,5 +16,12 @@ rustix = { workspace = true }
 # `$HOME` (ADR 0001 D1), and no standard-library API reads the account database.
 uzers = { workspace = true }
 
+[features]
+# The test-only rendezvous namespace seam. Not a default feature: normal
+# production binaries do not recognize the seam's environment variable, and
+# only explicit test-support builds do.
+test-support = []
+
+
 [lints]
 workspace = true

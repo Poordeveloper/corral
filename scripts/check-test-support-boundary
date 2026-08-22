@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# The test-support seam must not exist in a production binary.
+#
+# `test-support` carries the rendezvous namespace seam (CORRAL_TEST_ROOT) and
+# the daemon/client timing knobs. It is not a default feature, so normal
+# production binaries do not recognize those variables at all — this check is
+# what makes that boundary mechanical rather than a promise in a comment.
+#
+# The build below is deliberately the plain one: no dev-dependencies, no
+# feature flags. It uses its own target directory so it neither thrashes nor
+# is thrashed by the feature-enabled build the test suite uses.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+TARGET_DIR="target/test-support-boundary"
+SEAM_PREFIX="CORRAL_TEST_"
+
+CARGO_TARGET_DIR="$TARGET_DIR" cargo build --workspace --quiet
+
+violations=0
+for binary in corral corrald; do
+    path="$TARGET_DIR/debug/$binary"
+    if [ ! -x "$path" ]; then
+        echo "test-support-boundary: $path was not built" >&2
+        exit 1
+    fi
+    if grep -a -q "$SEAM_PREFIX" "$path"; then
+        echo "test-support-boundary: $binary carries the $SEAM_PREFIX seam" >&2
+        violations=$((violations + 1))
+    fi
+done
+
+if [ "$violations" -ne 0 ]; then
+    echo "" >&2
+    echo "A production build recognizes a test-only environment variable." >&2
+    echo "Gate it behind the crate's 'test-support' feature and keep the" >&2
+    echo "variable name inside the gated code (AGENTS.md §Tests; ADR 0001)." >&2
+    exit 1
+fi
+
+echo "test-support-boundary: OK"
