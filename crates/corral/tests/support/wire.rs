@@ -62,7 +62,7 @@ impl RawClient {
     pub fn establish(&mut self) -> Value {
         let response = self.say_hello(1, 1);
         assert_eq!(
-            response["outcome"]["result"]["compatibility"], "compatible",
+            response["outcome"]["result"]["compatibility_result"], "compatible",
             "expected an established connection, got {response}"
         );
         response
@@ -79,6 +79,27 @@ impl RawClient {
             },
         }));
         self.receive().expect("the daemon answered the hello")
+    }
+
+    /// Send a hello and report whether the daemon closed instead of
+    /// answering.
+    ///
+    /// The write itself may fail once the daemon has closed, which is the same
+    /// answer: the connection is gone.
+    pub fn say_hello_expecting_close(&mut self) -> bool {
+        let mut line = serde_json::to_vec(&json!({
+            "type": "request",
+            "id": 0,
+            "method": "hello",
+            "params": {"protocol_version": 1, "min_compatible_peer_version": 1},
+        }))
+        .expect("encode a frame");
+        line.push(b'\n');
+        if self.writer.write_all(&line).is_err() {
+            return true;
+        }
+        let _ = self.writer.flush();
+        self.receive().is_none()
     }
 
     pub fn request(&mut self, id: u64, method: &str, params: Option<Value>) -> Option<Value> {
@@ -123,7 +144,7 @@ impl Drop for FakeDaemon {
 /// Serve `hello_reply` — raw bytes, so a test can send something undecodable —
 /// to every connection, then close it.
 pub fn spawn_fake_daemon(socket: &Path, hello_reply: Option<Vec<u8>>) -> FakeDaemon {
-    std::fs::create_dir_all(socket.parent().expect("run directory")).expect("create the run dir");
+    super::create_private_dir_all(socket.parent().expect("run directory"));
     let listener = std::os::unix::net::UnixListener::bind(socket).expect("bind the fake daemon");
     listener
         .set_nonblocking(true)
@@ -169,10 +190,47 @@ pub fn hello_reply(protocol_version: u32, min_peer: u32, compatibility: &str) ->
             "protocol_version": protocol_version,
             "min_compatible_peer_version": min_peer,
             "capabilities": [],
-            "compatibility": compatibility,
+            "compatibility_result": compatibility,
         }},
     }))
     .expect("encode");
     line.push(b'\n');
     line
+}
+
+/// Accepts connections and never answers, holding them open.
+///
+/// A peer that is reachable but never becomes protocol-ready is the case an
+/// overall activation budget exists for, and the one a closing fake cannot
+/// produce: closing looks like a daemon on its way out, which is legitimately
+/// retried.
+pub fn spawn_silent_daemon(socket: &Path) -> FakeDaemon {
+    super::create_private_dir_all(socket.parent().expect("run directory"));
+    let listener = std::os::unix::net::UnixListener::bind(socket).expect("bind the silent daemon");
+    listener
+        .set_nonblocking(true)
+        .expect("poll for connections");
+
+    let connections = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let counter = Arc::clone(&connections);
+    let stopped = Arc::clone(&stop);
+
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        while !stopped.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    held.push(stream);
+                }
+                Err(source) if source.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+
+    FakeDaemon { connections, stop }
 }

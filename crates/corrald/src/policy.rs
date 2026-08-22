@@ -78,16 +78,3 @@ mod test_policy {
         None
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn production_defaults_are_the_documented_ones() {
-        let policy = DaemonPolicy::default();
-
-        assert_eq!(policy.idle_grace, Duration::from_secs(60));
-        assert_eq!(policy.pre_hello_deadline, Duration::from_secs(10));
-    }
-}

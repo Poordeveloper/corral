@@ -90,11 +90,15 @@ fn start() -> Result<ExitCode, StartupError> {
         .block_on(server::serve(paths.socket(), policy))
         .map_err(StartupError::Serve)?;
 
+    // Order matters and is stated rather than left to drop order: the runtime
+    // and every connection it owns go first, then the rendezvous pathname,
+    // and the claim last. While the claim is held a probing client sees an
+    // owner and refuses to start a replacement, so nothing can bind into a
+    // half-dismantled rendezvous (ADR 0001 D6).
+    drop(runtime);
     // Best effort: the next claim winner owns whatever an abrupt death leaves
     // behind, so failing to unlink here costs nothing.
     let _ = std::fs::remove_file(paths.socket());
-    // The claim outlives the socket deliberately: while it is held, probing
-    // clients still see an owner and refuse to start a replacement.
     drop(claim);
     Ok(ExitCode::SUCCESS)
 }

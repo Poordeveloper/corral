@@ -1,7 +1,7 @@
 //! The protocol 1 baseline: every method this version serves, and nothing else.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// The bootstrap transition. Legal exactly once, as the first message.
 pub const HELLO: &str = "hello";
@@ -16,6 +16,18 @@ pub const SESSION_LIST: &str = "session.list";
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct PingResult {}
 
+impl PingResult {
+    /// The wire value, built without a fallible encode.
+    ///
+    /// Serializing a fixed empty struct cannot fail, but a `Result` at the
+    /// call site invites an error path that only a bug could reach — and the
+    /// only thing to put in it would be an error code no version declares.
+    /// A round-trip test keeps this honest against the type.
+    pub fn wire_value() -> Value {
+        json!({})
+    }
+}
+
 /// `session.list`'s result.
 ///
 /// The element type is deliberately unassigned: PR1 serves no sessions, and
@@ -27,6 +39,13 @@ pub struct SessionListResult {
     pub sessions: Vec<Value>,
 }
 
+impl SessionListResult {
+    /// The wire value for the empty list, built without a fallible encode.
+    pub fn empty_wire_value() -> Value {
+        json!({"sessions": []})
+    }
+}
+
 /// Whether `params` is acceptable for a baseline method that takes none.
 ///
 /// A parameter this build does not implement is refused rather than dropped:
@@ -36,30 +55,5 @@ pub fn accepts_no_params(params: Option<&Value>) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn an_empty_session_list_encodes_as_an_empty_array() {
-        let encoded = serde_json::to_string(&SessionListResult::default()).expect("encode");
-
-        assert_eq!(encoded, r#"{"sessions":[]}"#);
-    }
-
-    #[test]
-    fn a_future_session_shape_still_decodes() {
-        let decoded: SessionListResult =
-            serde_json::from_str(r#"{"sessions":[{"id":"s1","attention":"needs_you"}]}"#)
-                .expect("decode");
-
-        assert_eq!(decoded.sessions.len(), 1);
-    }
-
-    #[test]
-    fn baseline_methods_accept_absent_and_null_params_only() {
-        assert!(accepts_no_params(None));
-        assert!(accepts_no_params(Some(&Value::Null)));
-        assert!(!accepts_no_params(Some(&json!({"workspace": "x"}))));
-    }
-}
+#[path = "method_tests.rs"]
+mod tests;

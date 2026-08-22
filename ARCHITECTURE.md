@@ -479,6 +479,9 @@ terms: `PRODUCT.md` §8.
 | **Acknowledge** | the user has seen an attention item; held by `corrald`, consistent across surfaces |
 | **Observed / Managed** | launched outside Corral versus launched through Corral's runtime. Internal vocabulary |
 | **Node** | a machine running `corrald`. Scopes bindings; never part of Session identity |
+| **Canonical rendezvous** | the one filesystem location where an OS account's primary `corrald` is claimed and reached. Derived from the account home; no environment variable moves it |
+| **Singleton claim** | the exclusive lock a `corrald` holds for its lifetime, released by the kernel when the process dies. The claim is the singleton truth; the socket is only the meeting place |
+| **Pending handshake / Established client** | a connection before versus after a successful hello. Only established clients count towards daemon lifetime |
 | **Endpoint** | the wire-level concept of a reachable address. Never sockets or file descriptors in the domain model |
 | **Provider** | an integrated coding-agent product with declared capabilities |
 | **Capability** | a declared provider or protocol ability (`history`, `resume`, `terminal`, `structured_approval`, `terminal.stream.v1`, …). Absence means unknown, never a known negative |

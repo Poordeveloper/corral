@@ -7,7 +7,7 @@ use tokio::net::UnixStream;
 
 use crate::connection::{Connection, handshake};
 use crate::endpoint::EndpointSelection;
-use crate::error::{ActivationContext, ActivationError};
+use crate::error::{ActivationContext, ActivationError, OwnerEvidence};
 use crate::policy::ClientActivationPolicy;
 use crate::spawn::{SpawnedDaemon, spawn_daemon};
 
@@ -24,7 +24,7 @@ pub async fn activate(policy: &ClientActivationPolicy) -> Result<Connection, Act
     let deadline = Instant::now() + policy.activation_deadline;
 
     match EndpointSelection::from_environment()? {
-        EndpointSelection::Explicit(endpoint) => connect_explicit(&endpoint).await,
+        EndpointSelection::Explicit(endpoint) => connect_explicit(&endpoint, deadline).await,
         EndpointSelection::Canonical(paths) => {
             paths.ensure_run_dir()?;
             activate_canonical(&paths, policy, deadline).await
@@ -33,22 +33,31 @@ pub async fn activate(policy: &ClientActivationPolicy) -> Result<Connection, Act
 }
 
 /// An externally managed endpoint: connect or fail, never start anything.
-async fn connect_explicit(endpoint: &Path) -> Result<Connection, ActivationError> {
-    let stream = UnixStream::connect(endpoint).await.map_err(|source| {
-        ActivationError::ExplicitEndpointUnavailable {
-            endpoint: endpoint.to_path_buf(),
-            source,
-        }
-    })?;
+async fn connect_explicit(
+    endpoint: &Path,
+    deadline: Instant,
+) -> Result<Connection, ActivationError> {
+    let unavailable = |source| ActivationError::ExplicitEndpointUnavailable {
+        endpoint: endpoint.to_path_buf(),
+        source,
+    };
 
-    match handshake(stream, endpoint, ActivationContext::ExistingPrimary).await? {
-        Some(connection) => Ok(connection),
+    // The budget covers the handshake too. A peer that accepts the connection
+    // and never answers is precisely what an overall deadline exists for.
+    let attempt = async {
+        let stream = UnixStream::connect(endpoint).await.map_err(unavailable)?;
+        handshake(stream, endpoint, ActivationContext::ExistingPrimary).await
+    };
+
+    match within(deadline, attempt).await {
+        Some(Ok(Some(connection))) => Ok(connection),
         // Nothing here may start a replacement, so a daemon that closed
         // mid-bootstrap is simply unavailable.
-        None => Err(ActivationError::ExplicitEndpointUnavailable {
-            endpoint: endpoint.to_path_buf(),
-            source: io::Error::from(io::ErrorKind::ConnectionAborted),
-        }),
+        Some(Ok(None)) => Err(unavailable(io::Error::from(
+            io::ErrorKind::ConnectionAborted,
+        ))),
+        Some(Err(error)) => Err(error),
+        None => Err(unavailable(io::Error::from(io::ErrorKind::TimedOut))),
     }
 }
 
@@ -58,6 +67,10 @@ async fn activate_canonical(
     deadline: Instant,
 ) -> Result<Connection, ActivationError> {
     let mut spawned: Option<SpawnedDaemon> = None;
+    // What the client has actually established about a primary owner. Derived
+    // facts would be guesses, and a guess reported as a runtime fact is the
+    // one thing activation may never do.
+    let mut owner = OwnerEvidence::NotProbed;
 
     loop {
         let context = if spawned.is_some() {
@@ -66,37 +79,69 @@ async fn activate_canonical(
             ActivationContext::ExistingPrimary
         };
 
-        match UnixStream::connect(paths.socket()).await {
+        // Connect and handshake share the remaining budget with everything
+        // else. Leaving the readiness step unbounded would leave the one
+        // stage the deadline exists for outside it.
+        match within(deadline, connect_and_handshake(paths, context)).await {
+            Some(Ok(Some(mut connection))) => {
+                connection.attach_daemon(spawned);
+                return Ok(connection);
+            }
             // A daemon that closes during the bootstrap was on its way out.
             // Its lock is about to be released, so the remaining deadline is
             // exactly the right thing to spend here.
-            Ok(stream) => {
-                if let Some(mut connection) = handshake(stream, paths.socket(), context).await? {
-                    connection.attach_daemon(spawned);
-                    return Ok(connection);
-                }
-            }
-            Err(source) if activation_may_repair(&source) => {}
-            Err(source) => {
-                return Err(ActivationError::Endpoint {
-                    endpoint: paths.socket().to_path_buf(),
-                    source,
-                });
-            }
+            Some(Ok(None)) => {}
+            Some(Err(error)) => return Err(error),
+            None => return Err(give_up(paths, policy, spawned.as_mut(), owner)),
         }
 
         if Instant::now() >= deadline {
-            return Err(give_up(paths, policy, spawned.as_mut()));
+            return Err(give_up(paths, policy, spawned.as_mut(), owner));
         }
 
         // Absence of a socket says nothing about whether starting a daemon is
         // safe; only absence of a lock owner does.
-        if spawned.is_none() && probe_owner(paths.lock())? == OwnerProbe::NoOwner {
-            spawned = Some(spawn_daemon(paths)?);
+        if spawned.is_none() {
+            owner = match probe_owner(paths.lock())? {
+                OwnerProbe::OwnerPresent => OwnerEvidence::Present,
+                OwnerProbe::NoOwner => {
+                    spawned = Some(spawn_daemon(paths)?);
+                    OwnerEvidence::Absent
+                }
+            };
         }
 
         tokio::time::sleep(RETRY_INTERVAL).await;
     }
+}
+
+/// One attempt at the canonical endpoint.
+///
+/// `Ok(None)` means "not usable yet, and a daemon appearing would fix it".
+async fn connect_and_handshake(
+    paths: &RendezvousPaths,
+    context: ActivationContext,
+) -> Result<Option<Connection>, ActivationError> {
+    match UnixStream::connect(paths.socket()).await {
+        Ok(stream) => handshake(stream, paths.socket(), context).await,
+        Err(source) if activation_may_repair(&source) => Ok(None),
+        Err(source) => Err(ActivationError::Endpoint {
+            endpoint: paths.socket().to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Run `work` with whatever is left of the overall budget.
+///
+/// `None` means the budget ran out. An already-expired deadline still refuses
+/// rather than granting one free unbounded attempt.
+async fn within<T>(deadline: Instant, work: impl Future<Output = T>) -> Option<T> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return None;
+    }
+    tokio::time::timeout(remaining, work).await.ok()
 }
 
 /// Connect failures that a daemon appearing would fix.
@@ -119,19 +164,29 @@ fn give_up(
     paths: &RendezvousPaths,
     policy: &ClientActivationPolicy,
     spawned: Option<&mut SpawnedDaemon>,
+    owner: OwnerEvidence,
 ) -> ActivationError {
-    match spawned {
-        Some(daemon) => ActivationError::SpawnedDaemonDidNotBecomeReady {
+    if let Some(daemon) = spawned {
+        return ActivationError::SpawnedDaemonDidNotBecomeReady {
             endpoint: paths.socket().to_path_buf(),
             deadline: policy.activation_deadline,
             spawn_result: daemon.outcome(),
-        },
-        // Never spawning means every probe found an owner: a primary daemon
-        // exists and its rendezvous is unusable.
-        None => ActivationError::OwnerPresentButUnreachable {
+        };
+    }
+    match owner {
+        // Observed, not inferred: a probe reported an owner and the endpoint
+        // never became usable.
+        OwnerEvidence::Present => ActivationError::OwnerPresentButUnreachable {
             lock_path: paths.lock().to_path_buf(),
             endpoint: paths.socket().to_path_buf(),
             deadline: policy.activation_deadline,
+        },
+        // The budget ran out before the rendezvous could be assessed. Claiming
+        // an owner here would invent a fact nothing observed.
+        evidence => ActivationError::ActivationBudgetExpired {
+            endpoint: paths.socket().to_path_buf(),
+            deadline: policy.activation_deadline,
+            owner: evidence,
         },
     }
 }

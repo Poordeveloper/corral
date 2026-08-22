@@ -19,6 +19,7 @@ compile_error!(
 pub mod wire;
 
 use std::io::Read;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -235,6 +236,19 @@ impl Drop for DaemonProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Create a directory the way the product does: private to its owner.
+///
+/// Corral refuses a runtime directory that is readable by anyone else, so a
+/// test that pre-creates one has to respect the same rule or it is testing
+/// the refusal instead of what it meant to test.
+pub fn create_private_dir_all(path: &Path) {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .expect("create a private directory");
 }
 
 fn millis(duration: Duration) -> String {
