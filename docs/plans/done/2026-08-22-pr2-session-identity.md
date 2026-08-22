@@ -1,7 +1,7 @@
 ---
-status: active
+status: done
 class: C
-writes: [corral-core, corral-state, corrald]
+writes: [corral-core, corral-state, corrald, corral-rendezvous, canonical-docs]
 reads: [docs/adr/0002-resume-lineage.md, docs/decisions/2026-08-22-pr2-resume-lineage-acceptance.md]
 ---
 
@@ -78,7 +78,11 @@ owner rather than growing inside corrald.
 
 ## Interfaces or persistence changed
 
-First durable storage; no wire surface. `STORAGE_EPOCH` stays `dev`, so
+First durable storage; no wire surface. The registry lives at
+`<corral root>/state/registry.sqlite3`: the Corral root's layout has one
+owner, so `corral-rendezvous` derives that path as it does the run and log
+trees, and `ARCHITECTURE.md` §5 gains the `runs` and `session_lineage`
+projections the accepted event set implies. `STORAGE_EPOCH` stays `dev`, so
 databases stay disposable, but schema and event diffs need human merge
 plus `DURABLE-APPROVED-BY:` from the first write. Durable events used:
 `SessionCreated`, `BindingAdded`, `BindingConfirmed`, `RunStarted`,
