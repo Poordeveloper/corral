@@ -24,6 +24,8 @@ read_when:
 ---
 ```
 
-Numbers 0001–0004 are reserved for the decisions scheduled inside PR1–PR4
-(`ROADMAP.md` §3): corrald activation, resume lineage, terminal snapshot
-format, and hook delivery.
+Numbers 0001–0004 are reserved for the decisions `ROADMAP.md` §3 schedules
+alongside the implementation sequence: corrald activation, resume lineage,
+terminal snapshot format, and hook delivery. The phase each belongs to is
+the roadmap's to state, not this file's — resequencing there must not have
+to edit here.

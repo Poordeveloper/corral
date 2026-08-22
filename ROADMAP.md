@@ -9,7 +9,7 @@
 
 ## 1. Current phase
 
-**M0 — foundation. PR0 in progress.** Nothing beyond the PR0–PR8 sequence
+**M0 — foundation. PR1 landed.** Nothing beyond the PR0–PR9 sequence
 below is in scope; nothing in M2 or later is solved inside an M1 task.
 
 ## 2. What M1 must prove
@@ -48,30 +48,45 @@ PR3  PTY/process ownership in corrald; authoritative VT state;
      terminal snapshot + sequenced deltas; resize ⇒ snapshot epoch;
      advisory exclusive/shared lease seam;
      corral new -- bash; corral attach; detach / reattach (ADR 3)
-PR4  Claude managed sessions; launch-scoped hook injection;
+PR4  minimal TUI — list / new / attach / switch.
+     The first surface a person uses daily, and the first build that can
+     be dogfooded. Every session reads Unknown until PR5 supplies
+     attested evidence, which is the honest answer, not a gap
+PR5  Claude managed sessions; launch-scoped hook injection;
      NO global config mutation (ADR 4)
-PR5  Codex managed sessions; launch-scoped hooks;
+PR6  Codex managed sessions; launch-scoped hooks;
      the second provider validates the Provider abstraction
-PR6  externally launched Claude/Codex discovery;
+PR7  externally launched Claude/Codex discovery;
      managed global hook integration (merge/version/uninstall/lock;
      atomic backfill-before-overwrite writes);
      unsafe binding degrades to read-only
-PR7  daemon-side Attention Engine; versioned screen-detection manifests
+PR8  daemon-side Attention Engine; versioned screen-detection manifests
      + PTY-activity evidence;
      CLI/TUI surfacing the five-state model (PRODUCT.md §4) plus the
      recent-resumable list;
-     the full See → Know → Control loop provable without Desktop
-PR8  GPUI Desktop — the first graphical session/attention/control surface
+     the full See → Know → Control loop
+PR9  GPUI Desktop — the first graphical session/attention/control surface
      (entity-per-terminal; custom Element; embedded/standalone modes;
-     pinned gpui rev)
+     pinned gpui rev). May begin once PR5 lands; see the Desktop bar
+     below
 ```
 
-PR6 carries two release gates at once — discovery coverage and safe
+PR7 carries two release gates at once — discovery coverage and safe
 coexistence with the user's existing hooks — and is therefore the highest-
 risk point in the schedule.
 
-The core loop must be demonstrable at PR7 through CLI/TUI, before any
-Desktop work.
+**The Desktop bar.** No Desktop work begins before session identity,
+runtime ownership, terminal streaming, and control are demonstrable in the
+TUI, and before attested attention evidence exists (PR5). The bar protects
+one thing: the daemon's semantic model must not be shaped by a graphical
+surface. A TUI already exercising identity, streaming, and control proves
+that, so the bar does not additionally wait for the Attention Engine — but
+it does wait for PR5, because a Desktop opening onto a screen of Unknown
+would be rebuilt as every later phase adds meaning to render. Both surfaces
+gain the five-state rendering at PR8; the TUI pays that extension once
+cheaply, and the Desktop pays it once rather than at every phase.
+
+Accepted in `docs/decisions/2026-08-22-surface-sequencing.md`.
 
 ### Scheduled ADRs
 
@@ -81,7 +96,7 @@ ADR 1  corrald activation: endpoint location, singleton claim,
 ADR 2  resume lineage: Session outlives process              → PR2
 ADR 3  terminal snapshot format: ANSI replay + seq deltas    → PR3
 ADR 4  hook delivery: shim → endpoint → corrald;
-       versioning; fail-open budget                          → PR4
+       versioning; fail-open budget                          → PR5
 ADR 5  platform scope: Windows deferral + re-entry trigger   → PR0 (accepted)
 ADR 6  provider hook integration policy                      → PR0 (accepted)
 ```
@@ -100,17 +115,17 @@ S2  Hook payload verification — Claude/Codex session identity
     first-party against current CLI versions. Scope extended by the
     strategy grill: a real-world settings corpus including other tools'
     hooks, a merge-ambiguity taxonomy, and the fail-safe trigger set.
-                                                        → PR4, PR6
+                                                        → PR5, PR7
 S3  Per-provider live-join channel census — which channels can carry
     live synchronized or structured in-place control (Claude IDE/MCP
     channels, hook decision-hold, remote-control surfaces; Codex
     app-server, notify), including per-provider proof of reliable
     return-after-lease, the admission condition for structured in-place
-    control.                                            → PR6, PR7
+    control.                                            → PR7, PR8
 ```
 
 The GPUI integration spike is not on the critical path and runs shortly
-before PR8.
+before PR9.
 
 ## 4. M1 scope
 
@@ -139,8 +154,8 @@ Local Mode with no login service, no listener, no discovery broadcast.
 **Platform** — macOS and Linux; host-OS execution domain (`ARCHITECTURE.md`
 §9).
 
-After PR8, M1 completion work: tray, packaging, and one-command install.
-These are not part of PR0–PR8.
+After PR9, M1 completion work: tray, packaging, and one-command install.
+These are not part of PR0–PR9.
 
 ## 5. Release gate
 
