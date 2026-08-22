@@ -35,8 +35,10 @@ PR0  repository governance; canonical verify scripts; benchmark-ledger
 PR1  corrald walking skeleton; local IPC; lazy activation;
      singleton / stale-endpoint semantics;
      protocol hello / version / capabilities;
-     live-stream vs durable-event vocabulary (after-cursor replay);
      corral ping / list
+     (no ghost wire surface: the live-stream and durable-event
+     vocabulary stays ARCHITECTURE prose until the phase that serves
+     the behaviour gives it a wire representation)
 PR2  CorralSessionId; SessionBinding; evidence / assurance model;
      SQLite with durable semantic event log + command receipts;
      idempotent client-supplied command ids;
