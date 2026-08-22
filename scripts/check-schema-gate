@@ -2,6 +2,13 @@
 # Schema / durable-event human gate (docs/ENGINEERING_WORKFLOW.md Appendix A;
 # AGENTS.md §Durable state).
 #
+# The durable surface is matched by path: migrations and SQL, schema modules,
+# durable-event modules, and the whole registry-store crate. The crate is in
+# whole rather than by file because every module in it decides something
+# permanent — the event vocabulary, the token encoding a stored fact is read
+# back through, the projection writes — and a detector that had to guess which
+# ones matter would fail open on the next module added.
+#
 # When a diff touches durable schema, migration, or durable-event paths, the
 # PR body must carry a human-added approval marker line:
 #
@@ -38,7 +45,8 @@ git diff --name-only -z "$merge_base"...HEAD >"$listfile" 2>/dev/null || fail_cl
 touched=""
 while IFS= read -r -d '' f; do
     case "$f" in
-        *migrations/*|*.sql|*/schema.rs|*/schema/*|*/events.rs|*/event/*|*/session_events*)
+        *migrations/*|*.sql|*/schema.rs|*/schema/*|*/events.rs|*/event.rs|*/event/*|\
+        *session_events*|crates/corral-state/*)
             touched="$touched  - $f
 " ;;
     esac
