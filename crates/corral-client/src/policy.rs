@@ -28,29 +28,38 @@ impl Default for ClientActivationPolicy {
 impl ClientActivationPolicy {
     /// The policy a surface runs under.
     pub fn resolve() -> Self {
-        Self {
-            activation_deadline: test_activation_deadline().unwrap_or(DEFAULT_ACTIVATION_DEADLINE),
-        }
+        test_policy::resolve().unwrap_or_default()
     }
 }
 
 /// Test-support only (ADR 0001, "Test injection").
 ///
-/// A wedged rendezvous is only observable after the activation budget expires,
+/// A wedged rendezvous is only observable once the activation budget expires,
 /// and the merge gate cannot spend the production budget proving it. One typed
-/// scalar, compiled out of release builds, never a user configuration surface.
-#[cfg(debug_assertions)]
-fn test_activation_deadline() -> Option<Duration> {
-    std::env::var("CORRAL_TEST_ACTIVATION_DEADLINE_MS")
-        .ok()?
-        .parse()
-        .ok()
-        .map(Duration::from_millis)
-}
+/// scalar.
+///
+/// Normal production binaries do not recognize the variable at all; only
+/// explicit `test-support` builds do, and `test-support` is not a default
+/// feature.
+mod test_policy {
+    use super::ClientActivationPolicy;
 
-#[cfg(not(debug_assertions))]
-fn test_activation_deadline() -> Option<Duration> {
-    None
+    #[cfg(feature = "test-support")]
+    pub(super) fn resolve() -> Option<ClientActivationPolicy> {
+        let activation_deadline = std::env::var("CORRAL_TEST_ACTIVATION_DEADLINE_MS")
+            .ok()?
+            .parse()
+            .ok()
+            .map(std::time::Duration::from_millis)?;
+        Some(ClientActivationPolicy {
+            activation_deadline,
+        })
+    }
+
+    #[cfg(not(feature = "test-support"))]
+    pub(super) fn resolve() -> Option<ClientActivationPolicy> {
+        None
+    }
 }
 
 #[cfg(test)]

@@ -4,6 +4,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# The end-to-end suite drives real processes against a private Corral root,
+# which only a test-support build resolves. The feature is not on by default,
+# so every entry point that compiles test targets asks for it explicitly.
+TEST_SUPPORT="corral/test-support,corrald/test-support"
+
 echo "==> fmt"
 cargo fmt --all --check
 
@@ -11,6 +16,6 @@ echo "==> clippy"
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 echo "==> unit tests"
-cargo test --workspace --lib
+cargo test --workspace --lib --features "$TEST_SUPPORT"
 
 echo "verify-fast: OK"

@@ -10,13 +10,30 @@ cd "$(dirname "$0")/.."
 
 ./scripts/verify-fast
 
+# Test-only seams live behind this non-default feature; see
+# scripts/check-test-support-boundary for the other half of that boundary.
+TEST_SUPPORT="corral/test-support,corrald/test-support"
+
+# `cargo test --all-targets` compiles a bin as a unit-test harness under
+# deps/; it does not place the runnable binary at target/<profile>/<name>.
+# The end-to-end suite starts real `corral` and `corrald` processes and
+# resolves the daemon as its sibling, exactly as the product does, so the
+# gate has to build them rather than hope a previous command left them
+# there — a stale or missing daemon would otherwise decide what the suite
+# proves.
+echo "==> workspace binaries"
+cargo build --workspace --features "$TEST_SUPPORT"
+
 echo "==> full test suite"
-cargo test --workspace --all-targets
+cargo test --workspace --all-targets --features "$TEST_SUPPORT"
 
 # --all-targets does not include doctests; without this, documented contract
 # examples would never run anywhere in the verification map.
 echo "==> doctests"
-cargo test --workspace --doc
+cargo test --workspace --doc --features "$TEST_SUPPORT"
+
+echo "==> test-support boundary"
+./scripts/check-test-support-boundary
 
 echo "==> dependency direction"
 ./scripts/check-dependency-direction

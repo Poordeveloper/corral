@@ -878,6 +878,7 @@ permitted CI additions and are closed-listed here.
 | ownership boundaries (only state module opens DB; only runtime spawns PTYs; grows with owners) | `clippy.toml disallowed-methods` | verify-fast |
 | dependency direction (surfaces ↛ corral-core) | cargo-metadata check script | verify |
 | dependency hygiene (advisories/licenses/dupes) | cargo-deny | verify |
+| test-only seams absent from production binaries | `scripts/check-test-support-boundary` builds without dev-dependencies or the non-default `test-support` feature and scans the binaries for the seam's environment-variable prefix | verify |
 | protocol additive evolution | future-input fixture tests | verify |
 | full test truth | workspace test suite | verify |
 | release breadth (provider matrix, packaging, migrations, no release-critical quarantine) | verify-release | release |

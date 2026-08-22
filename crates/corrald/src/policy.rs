@@ -32,35 +32,51 @@ impl Default for DaemonPolicy {
 impl DaemonPolicy {
     /// The policy this process runs under.
     pub fn resolve() -> Self {
-        let defaults = Self::default();
-        Self {
-            idle_grace: test_duration("CORRAL_TEST_IDLE_GRACE_MS").unwrap_or(defaults.idle_grace),
-            pre_hello_deadline: test_duration("CORRAL_TEST_PRE_HELLO_DEADLINE_MS")
-                .unwrap_or(defaults.pre_hello_deadline),
-        }
+        test_policy::resolve().unwrap_or_default()
     }
 }
 
 /// Test-support only (ADR 0001, "Test injection").
 ///
-/// Lifecycle behaviour has to be proven against real processes, and no test can
-/// wait a production idle grace to watch an idle exit. Each knob is a single
-/// typed scalar rather than an open configuration map, and the whole mechanism
-/// is compiled out of release builds, so production packaging cannot reach it.
-/// It is not a user configuration surface and never participates in
-/// auto-activation.
-#[cfg(debug_assertions)]
-fn test_duration(variable: &str) -> Option<Duration> {
-    std::env::var(variable)
-        .ok()?
-        .parse()
-        .ok()
-        .map(Duration::from_millis)
-}
+/// Lifecycle behaviour has to be proven against real processes, and no test
+/// can wait a production idle grace to watch an idle exit. Each knob is a
+/// single typed scalar rather than an open configuration map.
+///
+/// Normal production binaries do not recognize these variables at all; only
+/// explicit `test-support` builds do, and `test-support` is not a default
+/// feature. This is daemon runtime policy, distinct from the rendezvous
+/// namespace seam in `corral-rendezvous`, which substitutes a whole Corral
+/// root rather than tuning behaviour.
+mod test_policy {
+    use super::DaemonPolicy;
 
-#[cfg(not(debug_assertions))]
-fn test_duration(_variable: &str) -> Option<Duration> {
-    None
+    #[cfg(feature = "test-support")]
+    pub(super) fn resolve() -> Option<DaemonPolicy> {
+        let defaults = DaemonPolicy::default();
+        let idle_grace = duration("CORRAL_TEST_IDLE_GRACE_MS");
+        let pre_hello_deadline = duration("CORRAL_TEST_PRE_HELLO_DEADLINE_MS");
+        if idle_grace.is_none() && pre_hello_deadline.is_none() {
+            return None;
+        }
+        Some(DaemonPolicy {
+            idle_grace: idle_grace.unwrap_or(defaults.idle_grace),
+            pre_hello_deadline: pre_hello_deadline.unwrap_or(defaults.pre_hello_deadline),
+        })
+    }
+
+    #[cfg(feature = "test-support")]
+    fn duration(variable: &str) -> Option<std::time::Duration> {
+        std::env::var(variable)
+            .ok()?
+            .parse()
+            .ok()
+            .map(std::time::Duration::from_millis)
+    }
+
+    #[cfg(not(feature = "test-support"))]
+    pub(super) fn resolve() -> Option<DaemonPolicy> {
+        None
+    }
 }
 
 #[cfg(test)]

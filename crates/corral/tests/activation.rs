@@ -39,8 +39,8 @@ fn the_empty_session_list_is_reported_as_a_fact() {
 #[test]
 fn the_environment_cannot_move_the_rendezvous() {
     let account = TestAccount::new("environment");
-    let decoy_home = account.root().join("decoy-home");
-    let decoy_runtime = account.root().join("decoy-runtime");
+    let decoy_home = account.scratch().join("decoy-home");
+    let decoy_runtime = account.scratch().join("decoy-runtime");
     std::fs::create_dir_all(&decoy_home).expect("create");
     std::fs::create_dir_all(&decoy_runtime).expect("create");
 
@@ -52,7 +52,7 @@ fn the_environment_cannot_move_the_rendezvous() {
     let second = run(account
         .corral()
         .arg("ping")
-        .env("HOME", account.root().join("another-home"))
+        .env("HOME", account.scratch().join("another-home"))
         .env_remove("XDG_RUNTIME_DIR"));
 
     assert!(first.status.success(), "{}", stderr(&first));
@@ -94,7 +94,7 @@ fn concurrent_cold_starts_converge_on_one_daemon() {
 #[test]
 fn an_endpoint_override_never_starts_a_daemon() {
     let account = TestAccount::new("override-dead");
-    let elsewhere = account.root().join("elsewhere.sock");
+    let elsewhere = account.scratch().join("elsewhere.sock");
 
     let output = run(account
         .corral()
@@ -122,7 +122,7 @@ fn an_override_does_not_fall_back_to_a_live_canonical_daemon() {
     let output = run(account
         .corral()
         .arg("ping")
-        .env("CORRAL_ENDPOINT", account.root().join("missing.sock")));
+        .env("CORRAL_ENDPOINT", account.scratch().join("missing.sock")));
 
     assert!(!output.status.success(), "{}", stdout(&output));
 }
@@ -221,16 +221,19 @@ fn a_permission_fault_is_never_reported_as_a_running_daemon() {
 #[test]
 fn only_the_sibling_daemon_may_be_started() {
     let account = TestAccount::new("sibling-only");
-    let install = account.root().join("install");
-    let decoys = account.root().join("decoys");
+    let install = account.scratch().join("install");
+    let decoys = account.scratch().join("decoys");
     std::fs::create_dir_all(&install).expect("create");
     std::fs::create_dir_all(&decoys).expect("create");
     std::fs::copy(support::CORRAL_BINARY, install.join("corral")).expect("copy corral");
-    write_decoy(&decoys.join("corrald"), &account.root().join("decoy-ran"));
+    write_decoy(
+        &decoys.join("corrald"),
+        &account.scratch().join("decoy-ran"),
+    );
 
     let output = run(std::process::Command::new(install.join("corral"))
         .arg("ping")
-        .env("CORRAL_TEST_ROOT", account.root())
+        .env("CORRAL_TEST_ROOT", account.corral_root())
         .env("CORRAL_TEST_ACTIVATION_DEADLINE_MS", "2000")
         .env_remove("CORRAL_ENDPOINT")
         .env("PATH", &decoys));
@@ -238,7 +241,7 @@ fn only_the_sibling_daemon_may_be_started() {
     assert!(!output.status.success());
     assert!(stderr(&output).contains("reinstall"), "{}", stderr(&output));
     assert!(
-        !account.root().join("decoy-ran").exists(),
+        !account.scratch().join("decoy-ran").exists(),
         "a daemon on PATH must never be started"
     );
 }
@@ -246,10 +249,9 @@ fn only_the_sibling_daemon_may_be_started() {
 #[test]
 fn an_unwritable_log_destination_does_not_stop_the_daemon() {
     let account = TestAccount::new("log-blocked");
-    std::fs::create_dir_all(account.root().join(".corral")).expect("create");
     // A regular file where the log directory belongs: creating the directory
     // fails, and logging is not a correctness authority.
-    std::fs::write(account.root().join(".corral/log"), b"blocked").expect("write");
+    std::fs::write(account.log_dir(), b"blocked").expect("write");
 
     let output = run(account.corral().arg("ping"));
 

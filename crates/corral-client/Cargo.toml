@@ -13,5 +13,9 @@ corral-rendezvous = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 
+[features]
+test-support = ["corral-rendezvous/test-support"]
+
+
 [lints]
 workspace = true
