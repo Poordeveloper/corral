@@ -90,6 +90,27 @@ Session A
 and are never collapsed into a generic "resume"; only NativeResume continues
 the same Session by definition. Fixed by ADR 2.
 
+Run existence, association assurance, and control eligibility are three
+separate facts:
+
+> A Run records a concrete runtime occurrence. Its RuntimeBinding relates
+> that runtime to a Session and carries the assurance of that association.
+> Run existence alone never grants control eligibility.
+
+A Run therefore carries no assurance of its own and has no grades: a
+runtime observed but only heuristically associated with a Session is a Run
+that exists, under a Heuristic binding, with control unavailable and
+semantic status possibly Unknown. Weak identity never erases the fact that
+the runtime exists. Control eligibility resolves through the binding's
+assurance and the Control facet policy above — never through the presence
+of a `session_id` on a Run.
+
+A Run is minted only from independent authoritative evidence that a
+concrete runtime occurrence exists or existed: Corral created the runtime,
+or the node's accepted runtime-observation mechanism observed it. Semantic
+evidence — a hook event, a transcript line, cwd/time correlation — proves
+identity, never live runtime truth, and never mints a Run on its own.
+
 ### Observed and Managed
 
 Observed sessions are launched outside Corral and discovered later: history,
@@ -281,13 +302,33 @@ registry store (authoritative)          history index (derived)
 
 The event log records only semantic facts Corral must order, replay, and
 keep consistent — `SessionCreated`, `BindingAdded`, `BindingConfirmed`,
-`RunAttached`, `RunDetached`, `CommandAccepted`. It records **none of**: PTY
-bytes, raw hook events, provider transcripts, derived status. Provider
-history files remain the provider's source of truth; live runtime state
-remains `corrald`'s live truth and is never persisted as fact.
+`RunStarted`, `RunEnded`, `RunAttached`, `RunDetached`,
+`SessionForkedFrom`, `CommandAccepted`. It records **none of**: PTY bytes,
+raw hook events, provider transcripts, derived status. Provider history
+files remain the provider's source of truth; live runtime state remains
+`corrald`'s live truth and is never persisted as fact.
+
+Two laws bound what may be written (ADR 2 D6):
+
+> The event log owns durable semantic facts. Projections may summarize
+> those facts; they may not silently acquire additional durable truth.
+
+Every persistent projection mutation is justified by an accepted durable
+event; a change the accepted vocabulary cannot express waits for the phase
+that extends the set. And durability follows fact assurance, not object
+existence: a fact asserting an association only heuristically supported
+stays out of the log. The log is append-only in seq order — event seq is
+when Corral accepted a fact, occurrence time is when it happened, and a
+later-accepted fact is never inserted into an earlier seq.
 
 Clients resume durable streams with a per-session `after` cursor. Mutating
-commands accept client-supplied ids; exact reuse returns the same receipt.
+commands accept client-supplied ids, unique within the node's durable
+command namespace across Sessions, clients, connections, and daemon
+restarts. Reuse with the same command fingerprint returns the original
+receipt without re-executing; reuse with a different fingerprint is a
+conflict that executes nothing. The fingerprint covers the command kind
+and its semantic inputs — never serialization, transport, or tracing
+detail.
 
 Rationale: retrofitting an event log under a CRUD store later is a full
 storage migration; adding it from the start is a small increment. A generic
@@ -469,7 +510,7 @@ terms: `PRODUCT.md` §8.
 |---|---|
 | **Session** | the logical unit of AI work; Corral's primary object and the only domain noun exposed to users |
 | **CorralSessionId** | Corral-minted UUID; the primary key. Never a provider id, pane id, cwd, or `(node, provider_session_id)` |
-| **Run** | one process/attachment episode of a Session. A Session outlives its runs |
+| **Run** | one concrete runtime occurrence of a Session, identified by a Corral-minted `RunId`. A Session outlives its runs; a Run carries no assurance and never by itself grants control |
 | **Facet** | an independently available aspect of a Session: history, runtime, control, artifacts, attention |
 | **Binding** | an edge from a Session to an external identity, carrying provenance, assurance, evidence source, and observation time |
 | **Assurance** | discrete binding trust: Deterministic, Attested, Manual, Heuristic. Heuristic never controls and never notifies |
@@ -488,6 +529,7 @@ terms: `PRODUCT.md` §8.
 | **Registry store / History index** | authoritative Corral-owned state versus derived rebuildable index. Never the same file |
 | **Durable semantic event log** | the per-session ordered record of Corral-owned facts. Not event sourcing, and not the system of record for all state |
 | **Storage epoch** | `dev`, `dogfood`, or `released`: which durability guarantees currently bind |
+| **Command fingerprint** | the semantic identity of a mutating command — kind plus the inputs that affect the mutation. Excludes serialization, transport, and tracing detail. One command id means one immutable semantic command, for the life of the node's durable state |
 | **Link / unlink** | attach or detach a binding. Corral never merges or destroys provider data |
 | **NativeResume / ContextHandoff / RuntimeMove** | distinct continuation operations, never collapsed into a generic resume |
 | **Live synchronized control** | joining the same live provider session as a second synchronized surface; the preferred control path |
