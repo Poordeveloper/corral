@@ -82,9 +82,11 @@ one thing: the daemon's semantic model must not be shaped by a graphical
 surface. A TUI already exercising identity, streaming, and control proves
 that, so the bar does not additionally wait for the Attention Engine — but
 it does wait for PR5, because a Desktop opening onto a screen of Unknown
-would be rebuilt as every later phase adds meaning to render. Both surfaces
-gain the five-state rendering at PR8; the TUI pays that extension once
-cheaply, and the Desktop pays it once rather than at every phase.
+would be rebuilt as every later phase adds meaning to render. The
+five-state projection lands in PR8, and the TUI renders it inside that
+phase; the in-flight Desktop workstream integrates the same projection
+before PR9 merges. Each surface pays the extension once, rather than at
+every phase.
 
 Accepted in `docs/decisions/2026-08-22-surface-sequencing.md`.
 
