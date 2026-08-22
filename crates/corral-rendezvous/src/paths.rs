@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::fs::DirBuilder;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use uzers::os::unix::UserExt;
@@ -26,6 +26,7 @@ const PRIVATE_DIR_MODE: u32 = 0o700;
 /// their shell, session type, cron or ssh environment looks like (ADR 0001 D1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RendezvousPaths {
+    root: PathBuf,
     run_dir: PathBuf,
     socket: PathBuf,
     lock: PathBuf,
@@ -56,6 +57,7 @@ impl RendezvousPaths {
         Ok(Self {
             lock: run_dir.join(LOCK_FILE),
             log_file: log_dir.join(LOG_FILE),
+            root: root.to_path_buf(),
             socket,
             run_dir,
             log_dir,
@@ -85,12 +87,22 @@ impl RendezvousPaths {
 
     /// Create the user-private runtime directory. Idempotent.
     pub fn ensure_run_dir(&self) -> Result<(), RendezvousError> {
-        ensure_private_dir(&self.run_dir)
+        self.ensure_private_tree(&self.run_dir)
     }
 
     /// Create the user-private log directory. Idempotent.
     pub fn ensure_log_dir(&self) -> Result<(), RendezvousError> {
-        ensure_private_dir(&self.log_dir)
+        self.ensure_private_tree(&self.log_dir)
+    }
+
+    /// Check every directory Corral owns on the way down, not just the leaf.
+    ///
+    /// A private `run` inside a world-writable root is not private: another
+    /// account can replace `run` with a symlink to somewhere it controls, and
+    /// the leaf check would happily report `0700` about the target.
+    fn ensure_private_tree(&self, leaf: &Path) -> Result<(), RendezvousError> {
+        ensure_private_dir(&self.root)?;
+        ensure_private_dir(leaf)
     }
 }
 
@@ -160,8 +172,24 @@ fn ensure_private_dir(path: &Path) -> Result<(), RendezvousError> {
         });
     }
 
+    let owner = metadata.uid();
+    let us = uzers::get_effective_uid();
+    if owner != us {
+        return Err(RendezvousError::RuntimeDirectoryNotOwned {
+            path: path.to_path_buf(),
+            owner,
+            expected: us,
+        });
+    }
+
+    // Exactly `0700`, not merely "no group or other bits": a directory the
+    // owner cannot search fails later with a bare EACCES from whatever
+    // touches it first, which is a worse answer than naming the mode here.
+    // The set-user/group and sticky bits are left out of the comparison
+    // because they say nothing about who can read this directory, and on BSD
+    // filesystems a child can inherit set-group from its parent.
     let mode = metadata.permissions().mode() & 0o777;
-    if mode & !PRIVATE_DIR_MODE != 0 {
+    if mode != PRIVATE_DIR_MODE {
         // Fail closed and name the fix rather than quietly re-tightening a
         // directory this run did not create.
         return Err(RendezvousError::RuntimeDirectoryNotPrivate {

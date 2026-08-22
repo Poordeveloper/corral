@@ -100,3 +100,97 @@ fn a_usable_override_is_returned_unchanged() {
     let path = validate_endpoint_path(OsStr::new("/tmp/corral-test.sock")).expect("usable");
     assert_eq!(path, Path::new("/tmp/corral-test.sock"));
 }
+
+mod private_directories {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+    use crate::test_scratch::scratch_dir;
+
+    fn root_at(dir: &Path, mode: u32) -> RendezvousPaths {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(mode)
+            .create(dir)
+            .expect("create the root");
+        RendezvousPaths::for_corral_root(dir).expect("derivable")
+    }
+
+    #[test]
+    fn a_freshly_created_tree_is_accepted() {
+        let dir = scratch_dir("private-fresh");
+        let paths = root_at(&dir.path().join("corral"), 0o700);
+
+        paths.ensure_run_dir().expect("accepted");
+        paths.ensure_log_dir().expect("accepted");
+    }
+
+    #[test]
+    fn a_root_readable_by_the_group_is_refused() {
+        let dir = scratch_dir("private-root");
+        let paths = root_at(&dir.path().join("corral"), 0o750);
+
+        let error = paths.ensure_run_dir().expect_err("refused");
+
+        assert!(matches!(
+            error,
+            RendezvousError::RuntimeDirectoryNotPrivate { mode: 0o750, .. }
+        ));
+    }
+
+    /// A private leaf inside an open root proves nothing: the root is what
+    /// keeps another account from replacing the leaf.
+    #[test]
+    fn an_open_root_is_refused_even_when_the_leaf_is_private() {
+        let dir = scratch_dir("private-leaf");
+        let root = dir.path().join("corral");
+        let paths = root_at(&root, 0o755);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(root.join("run"))
+            .expect("create the leaf");
+
+        let error = paths.ensure_run_dir().expect_err("refused");
+
+        assert!(matches!(
+            error,
+            RendezvousError::RuntimeDirectoryNotPrivate { mode: 0o755, .. }
+        ));
+    }
+
+    /// A directory the owner cannot search is not usable either, and saying
+    /// so beats the bare EACCES whatever touches it first would produce.
+    #[test]
+    fn a_directory_the_owner_cannot_search_is_refused() {
+        let dir = scratch_dir("private-nosearch");
+        let paths = root_at(&dir.path().join("corral"), 0o600);
+
+        let error = paths.ensure_run_dir().expect_err("refused");
+
+        assert!(matches!(
+            error,
+            RendezvousError::RuntimeDirectoryNotPrivate { mode: 0o600, .. }
+        ));
+    }
+
+    #[test]
+    fn the_log_directory_is_gated_too() {
+        let dir = scratch_dir("private-log");
+        let root = dir.path().join("corral");
+        let paths = root_at(&root, 0o700);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(root.join("log"))
+            .expect("create the log dir");
+
+        let error = paths.ensure_log_dir().expect_err("refused");
+
+        assert!(matches!(
+            error,
+            RendezvousError::RuntimeDirectoryNotPrivate { mode: 0o755, .. }
+        ));
+        let _ = std::fs::set_permissions(root.join("log"), PermissionsExt::from_mode(0o700));
+    }
+}
