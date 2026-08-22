@@ -93,6 +93,9 @@ CREATE TABLE runs (
 
 CREATE INDEX bindings_by_session ON bindings (session_id);
 CREATE INDEX runs_by_session ON runs (session_id);
+-- Every `RunStarted` asks whether this binding is already running an episode,
+-- under the writer lock, and the runs projection is never compacted.
+CREATE INDEX runs_by_binding ON runs (runtime_binding_id);
 
 CREATE TABLE session_lineage (
     child_session_id  TEXT PRIMARY KEY REFERENCES sessions(id),
@@ -131,6 +134,9 @@ pub(crate) fn open(path: &Path) -> Result<(Connection, NodeId), StateError> {
         detail,
     };
 
+    // This is the owner the lint names: the registry store is opened here and
+    // nowhere else, so one log has one writer.
+    #[allow(clippy::disallowed_methods)]
     let mut connection = Connection::open(path).map_err(|source| unopenable(source.to_string()))?;
     // Referential integrity is the store's own rule, enforced by the store:
     // duplicating it as Rust pre-checks would leave two owners of one
@@ -172,15 +178,15 @@ pub(crate) fn open(path: &Path) -> Result<(Connection, NodeId), StateError> {
 /// a shape neither branch below can interpret, and one no later start could
 /// repair.
 fn initialize(connection: &mut Connection) -> Result<NodeId, StateError> {
-    if let Some(version) = stored_version(connection)? {
-        if version != SCHEMA_VERSION {
-            return Err(FatalState::SchemaVersionMismatch {
-                expected: SCHEMA_VERSION,
-                found: Some(version),
-            }
-            .into());
-        }
-        return stored_node(connection);
+    let mismatch = |found| FatalState::SchemaVersionMismatch {
+        expected: SCHEMA_VERSION,
+        found,
+    };
+    match stored_schema(connection)? {
+        StoredSchema::Version(SCHEMA_VERSION) => return stored_node(connection),
+        StoredSchema::Version(found) => return Err(mismatch(Some(found)).into()),
+        StoredSchema::VersionLost => return Err(mismatch(None).into()),
+        StoredSchema::NeverWritten => {}
     }
 
     let node = NodeId::mint();
@@ -202,26 +208,28 @@ fn initialize(connection: &mut Connection) -> Result<NodeId, StateError> {
 ///
 /// Run before every read and every write, because a store that was replaced or
 /// rewritten underneath the daemon invalidates every fact read since — and a
-/// daemon holding durable state has no other moment to notice. Two indexed
-/// single-row lookups.
+/// daemon holding durable state has no other moment to notice.
+///
+/// Two cached single-row lookups. Whether the store *could* be initialized is a
+/// question only `open` asks: by the time anything vouches the answer is
+/// settled, and re-asking it here would recompile a `sqlite_schema` scan on
+/// every operation.
 pub(crate) fn vouch(connection: &Connection, node: NodeId) -> Result<(), StateError> {
-    match stored_version(connection)? {
-        Some(SCHEMA_VERSION) => {}
-        found => {
-            return Err(FatalState::SchemaVersionMismatch {
-                expected: SCHEMA_VERSION,
-                found,
-            }
-            .into());
+    let version: Option<u32> = connection
+        .prepare_cached("SELECT version FROM schema_version WHERE only_row = 0")?
+        .query_row([], |row| row.get(0))
+        .optional()?;
+    if version != Some(SCHEMA_VERSION) {
+        return Err(FatalState::SchemaVersionMismatch {
+            expected: SCHEMA_VERSION,
+            found: version,
         }
+        .into());
     }
 
     let found: Option<String> = connection
-        .query_row(
-            "SELECT node_id FROM node_identity WHERE only_row = 0",
-            [],
-            |row| row.get(0),
-        )
+        .prepare_cached("SELECT node_id FROM node_identity WHERE only_row = 0")?
+        .query_row([], |row| row.get(0))
         .optional()?;
     if found.as_deref() != Some(node.to_string().as_str()) {
         return Err(FatalState::StoreIdentityChanged {
@@ -233,10 +241,20 @@ pub(crate) fn vouch(connection: &Connection, node: NodeId) -> Result<(), StateEr
     Ok(())
 }
 
-/// `None` on a store that has never been written, which is the only case that
-/// may be initialized. A `schema_version` table that exists but cannot be read
-/// is a failure, never an empty store.
-fn stored_version(connection: &Connection) -> Result<Option<u32>, StateError> {
+/// What a store on disk says about its own schema.
+enum StoredSchema {
+    /// No `schema_version` table. Nothing has ever been written here, and this
+    /// is the only state that may be initialized.
+    NeverWritten,
+    Version(u32),
+    /// The table exists and states nothing — a store whose own version was
+    /// lost. Never an empty store: creating the schema over it would fail on a
+    /// table that is already there, and reinterpreting it would read facts
+    /// written under an unknown version as if they were this one.
+    VersionLost,
+}
+
+fn stored_schema(connection: &Connection) -> Result<StoredSchema, StateError> {
     let table: Option<String> = connection
         .query_row(
             "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'schema_version'",
@@ -245,15 +263,19 @@ fn stored_version(connection: &Connection) -> Result<Option<u32>, StateError> {
         )
         .optional()?;
     if table.is_none() {
-        return Ok(None);
+        return Ok(StoredSchema::NeverWritten);
     }
-    Ok(connection
+    let version: Option<u32> = connection
         .query_row(
             "SELECT version FROM schema_version WHERE only_row = 0",
             [],
             |row| row.get(0),
         )
-        .optional()?)
+        .optional()?;
+    Ok(match version {
+        Some(version) => StoredSchema::Version(version),
+        None => StoredSchema::VersionLost,
+    })
 }
 
 fn stored_node(connection: &Connection) -> Result<NodeId, StateError> {

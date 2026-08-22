@@ -36,7 +36,7 @@ macro_rules! external_name {
                         limit: Self::LIMIT,
                     }));
                 }
-                if raw.chars().any(char::is_control) {
+                if raw.chars().any(hides_or_reorders) {
                     return Err(refusal(NameRefusal::ControlCharacter));
                 }
                 Ok(Self(raw))
@@ -77,6 +77,22 @@ external_name!(
     "a tool name",
     128
 );
+
+/// Characters that change how the text around them reads without appearing in
+/// it.
+///
+/// `char::is_control` covers category Cc only. The bidirectional formatting
+/// characters are Cf, so the standard library does not call them control
+/// characters — but a right-to-left override reorders every id printed after
+/// it, which is exactly the "one name hiding inside another" this validation
+/// exists to prevent.
+pub(crate) fn hides_or_reorders(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}'
+        )
+}
 
 /// Why a name minted outside Corral was refused.
 #[derive(Clone, Debug, PartialEq, Eq)]

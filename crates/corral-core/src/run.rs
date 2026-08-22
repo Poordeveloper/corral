@@ -181,14 +181,6 @@ impl RunOrdinal {
     pub fn position(self) -> u32 {
         self.0
     }
-
-    /// The ordinal after this one, saturating rather than wrapping: a Session
-    /// with four billion Runs is a display problem, not a reason to reuse a
-    /// number that already names another Run on screen.
-    #[must_use]
-    pub fn next(self) -> Self {
-        Self(self.0.saturating_add(1))
-    }
 }
 
 #[cfg(test)]

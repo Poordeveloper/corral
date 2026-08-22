@@ -50,6 +50,9 @@ impl TestStore {
     /// A second connection to the same file, standing in for anything that
     /// touches the store behind the daemon's back.
     fn behind_the_daemons_back(&self, statement: &str) {
+        // Being the second opener is the whole point here: this stands in for
+        // whatever touches the store while the daemon holds it.
+        #[allow(clippy::disallowed_methods)]
         let connection = rusqlite::Connection::open(self.path()).expect("open");
         connection.execute(statement, []).expect("execute");
     }
@@ -560,7 +563,7 @@ fn native_resume_opens_a_new_run_under_the_same_session() {
     let runs = store.runs_of(session).expect("readable");
     assert_eq!(runs.len(), 2);
     assert_eq!(runs[0].ordinal(), Some(RunOrdinal::FIRST));
-    assert_eq!(runs[1].ordinal(), Some(RunOrdinal::FIRST.next()));
+    assert_eq!(runs[1].ordinal(), Some(RunOrdinal::from_position(2)));
     assert_eq!(runs[0].end(), Some(RunEnd::Exited(ExitCause::Completed)));
     assert!(runs[1].is_live());
 }
@@ -670,13 +673,77 @@ fn an_observed_fork_records_no_edge() {
     assert_eq!(store.lineage_of(child).expect("readable"), None);
 }
 
-/// A Session's origin is recorded once. The second attempt fails on the
-/// store's own integrity rule after its event was already written into the
-/// transaction — so the rollback is what proves the fact and the projection
-/// share one.
+/// A binding names a Session the store does not hold, so the projection write
+/// fails on the store's own referential integrity — after its event was
+/// already written into the transaction. The rollback is what proves the fact
+/// and the projection share one.
 #[test]
 fn a_fact_and_the_projection_it_justifies_commit_together() {
     let mut store = TestStore::new("atomic");
+    let node = store.node();
+    let ghost = CorralSessionId::mint();
+    let identity = key(node, BindingKind::ProviderSession, "sess-1");
+
+    let refusal = store
+        .bind(
+            ghost,
+            identity.clone(),
+            Provenance::Discovered,
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+            instant(10),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::Constraint { .. })
+    ));
+    assert_eq!(
+        store.events_of(ghost).expect("readable"),
+        Vec::new(),
+        "the rolled-back fact left no trace in the log"
+    );
+    assert!(
+        matches!(
+            store
+                .resolve_or_create_session(
+                    identity,
+                    Provenance::Discovered,
+                    evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+                    instant(20),
+                )
+                .expect("resolved"),
+            SessionResolution::Created { .. }
+        ),
+        "the external identity was never bound"
+    );
+}
+
+/// Re-recording the same origin is a retry, not a conflict — every other write
+/// in the store resolves its own repeat rather than leaving a caller to read a
+/// constraint message.
+#[test]
+fn recording_the_same_origin_twice_records_it_once() {
+    let mut store = TestStore::new("fork-retry");
+    let (parent, _) = managed_session(&mut store, "run-a");
+    let (child, _) = managed_session(&mut store, "run-b");
+    let edge = SessionLineage::record(child, parent, Assurance::Deterministic).expect("recordable");
+
+    store.record_fork(edge).expect("recorded");
+    store.record_fork(edge).expect("a retry is not a conflict");
+
+    let forks = kinds(&store.events_of(child).expect("readable"))
+        .into_iter()
+        .filter(|kind| *kind == "session-forked-from")
+        .count();
+    assert_eq!(forks, 1);
+}
+
+/// A Session's origin is recorded once. A different parent would replace a
+/// fact rather than add one, and the refusal says so by name.
+#[test]
+fn a_second_origin_is_refused_by_name() {
+    let mut store = TestStore::new("fork-conflict");
     let (first_parent, _) = managed_session(&mut store, "run-a");
     let (other_parent, _) = managed_session(&mut store, "run-b");
     let (child, _) = managed_session(&mut store, "run-c");
@@ -696,13 +763,9 @@ fn a_fact_and_the_projection_it_justifies_commit_together() {
 
     assert!(matches!(
         refusal,
-        StateError::Refused(Refusal::Constraint { .. })
+        StateError::Refused(Refusal::LineageAlreadyRecorded { parent, .. })
+            if parent == first_parent
     ));
-    let forks = kinds(&store.events_of(child).expect("readable"))
-        .into_iter()
-        .filter(|kind| *kind == "session-forked-from")
-        .count();
-    assert_eq!(forks, 1, "the rolled-back fact left no trace");
     assert_eq!(
         store
             .lineage_of(child)
@@ -711,6 +774,67 @@ fn a_fact_and_the_projection_it_justifies_commit_together() {
             .parent(),
         first_parent
     );
+}
+
+/// Attachment is a fact about a live episode. Appending one after the end
+/// would record a runtime that exited and then became available — and the log
+/// is never rewritten to take it back.
+#[test]
+fn attachment_cannot_follow_an_end() {
+    let mut store = TestStore::new("attach-after-end");
+    let (session, binding) = managed_session(&mut store, "run-a");
+    let run = store
+        .record_run_started(
+            binding,
+            EvidenceSource::CorralConstructed,
+            OccurrenceTime::Authoritative(instant(20)),
+        )
+        .expect("recorded");
+    store
+        .record_run_ended(
+            run.run(),
+            RunEnd::Exited(ExitCause::Completed),
+            OccurrenceTime::Authoritative(instant(30)),
+        )
+        .expect("recorded");
+
+    let refusal = store
+        .record_run_attached(run.run(), instant(31))
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::RunAlreadyEnded(_))
+    ));
+    assert!(
+        !kinds(&store.events_of(session).expect("readable")).contains(&"run-attached"),
+        "no fact was appended after the end"
+    );
+}
+
+/// A Run the log never held, under a binding strong enough that it would have,
+/// is a caller naming something this store was never told about. Answering
+/// "withheld" would make that indistinguishable from a Run deliberately kept
+/// out of the log.
+#[test]
+fn a_fact_about_a_run_the_log_never_held_is_refused() {
+    let mut store = TestStore::new("unknown-run");
+    let (_, binding) = managed_session(&mut store, "run-a");
+    let stranger = Run::started(
+        RunId::mint(),
+        CorralSessionId::mint(),
+        binding,
+        OccurrenceTime::Unknown,
+    );
+
+    let refusal = store
+        .record_run_ended(&stranger, RunEnd::Unverifiable, OccurrenceTime::Unknown)
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::UnknownRun(_))
+    ));
 }
 
 #[test]

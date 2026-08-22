@@ -17,6 +17,21 @@ fn a_control_character_is_refused() {
     assert_eq!(error.reason, NameRefusal::ControlCharacter);
 }
 
+/// A right-to-left override is category Cf, so the standard library does not
+/// call it a control character — and it reorders every id printed after it.
+#[test]
+fn a_character_that_reorders_what_follows_is_refused() {
+    for hidden in ['\u{202e}', '\u{200b}', '\u{2066}', '\u{feff}'] {
+        assert_eq!(
+            ExternalId::new(format!("sess-{hidden}exe"))
+                .expect_err("refused")
+                .reason,
+            NameRefusal::ControlCharacter,
+            "{hidden:?} was accepted"
+        );
+    }
+}
+
 #[test]
 fn an_empty_name_is_refused() {
     let error = ProviderId::new("").expect_err("refused");

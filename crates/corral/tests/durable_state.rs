@@ -87,6 +87,9 @@ fn a_store_replaced_underneath_the_daemon_stops_it_serving() {
 
     // Another process rewriting the store's identity is an invariant
     // violation: every fact the daemon has read from it is now suspect.
+    // Deliberately the second opener: the daemon is holding this store, and
+    // something else writing to it is the condition under test.
+    #[allow(clippy::disallowed_methods)]
     let connection = rusqlite::Connection::open(account.registry()).expect("open the registry");
     connection
         .execute(

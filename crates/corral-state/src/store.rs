@@ -436,6 +436,9 @@ impl Store {
                 }));
             }
 
+            // Saturating rather than wrapping: past four billion Runs the
+            // number stops being useful, and a wrapped one would name a Run at
+            // the top of the list.
             let ordinal = RunOrdinal::from_position(
                 projection::run_count(transaction, session)?.saturating_add(1),
             );
@@ -470,17 +473,11 @@ impl Store {
         let at = as_stored_occurrence(at)?;
         let id = run.id();
 
+        let binding = run.runtime_binding();
         self.write(move |transaction| {
-            let Some(recorded) = projection::recorded_run(transaction, id)? else {
+            let Some(recorded) = live_run_to_record(transaction, id, binding)? else {
                 return Ok(Written::nothing_to_record(Durability::Withheld));
             };
-            // An episode ends once. Recording a second end would overwrite a
-            // fact the log already states, and "exited" quietly becoming
-            // "unverifiable" is exactly the rewriting the log exists to
-            // prevent.
-            if !recorded.is_live() {
-                return Err(Refusal::RunAlreadyEnded(id).into());
-            }
             Ok(Written::recording(
                 Durability::Recorded,
                 vec![SessionEvent::RunEnded {
@@ -500,8 +497,8 @@ impl Store {
         at: SystemTime,
     ) -> Result<Durability, StateError> {
         let at = encoding::as_stored(at)?;
-        let id = run.id();
-        self.record_run_fact(id, move |session| SessionEvent::RunAttached {
+        let (id, binding) = (run.id(), run.runtime_binding());
+        self.record_run_fact(id, binding, move |session| SessionEvent::RunAttached {
             session,
             run: id,
             at,
@@ -516,8 +513,8 @@ impl Store {
         at: SystemTime,
     ) -> Result<Durability, StateError> {
         let at = encoding::as_stored(at)?;
-        let id = run.id();
-        self.record_run_fact(id, move |session| SessionEvent::RunDetached {
+        let (id, binding) = (run.id(), run.runtime_binding());
+        self.record_run_fact(id, binding, move |session| SessionEvent::RunDetached {
             session,
             run: id,
             at,
@@ -530,7 +527,22 @@ impl Store {
     /// similarity cannot produce a `SessionLineage` at all, so no guessed
     /// edge can reach the log (ADR 0002 D4).
     pub fn record_fork(&mut self, lineage: SessionLineage) -> Result<(), StateError> {
-        self.write(move |_| {
+        self.write(move |transaction| {
+            // A Session's origin is recorded once. Re-recording the same one is
+            // a retry and does nothing; a different one is a conflict named as
+            // such, rather than a primary-key message a caller has to read a
+            // second time to interpret.
+            if let Some(recorded) = projection::lineage_of(transaction, lineage.child())? {
+                if recorded == lineage {
+                    return Ok(Written::nothing_to_record(()));
+                }
+                return Err(Refusal::LineageAlreadyRecorded {
+                    child: recorded.child(),
+                    parent: recorded.parent(),
+                    assurance: recorded.assurance(),
+                }
+                .into());
+            }
             Ok(Written::recording(
                 (),
                 vec![SessionEvent::SessionForkedFrom(lineage)],
@@ -552,7 +564,8 @@ impl Store {
         })
     }
 
-    /// Record a fact about a Run, if the log knows the Run at all.
+    /// Record a fact about a Run, if the log holds a live Run to record it
+    /// against.
     ///
     /// The Session comes from the log's own record of the Run rather than from
     /// the caller's copy, so a fact can never be filed under a Session the
@@ -560,10 +573,11 @@ impl Store {
     fn record_run_fact(
         &mut self,
         run: RunId,
+        binding: BindingId,
         event: impl FnOnce(CorralSessionId) -> SessionEvent,
     ) -> Result<Durability, StateError> {
         self.write(move |transaction| {
-            let Some(recorded) = projection::recorded_run(transaction, run)? else {
+            let Some(recorded) = live_run_to_record(transaction, run, binding)? else {
                 return Ok(Written::nothing_to_record(Durability::Withheld));
             };
             Ok(Written::recording(
@@ -658,6 +672,36 @@ fn append(transaction: &Transaction<'_>, facts: &[SessionEvent]) -> Result<(), S
         projection::apply(transaction, event)?;
     }
     Ok(())
+}
+
+/// The live Run this fact belongs to, or `None` when the store deliberately
+/// keeps no Run for it.
+///
+/// Three different situations reach here and only one of them is silence. The
+/// log holds a live Run — record. The log holds none and the association is
+/// only heuristic — the Run is the caller's live state and its facts stay out
+/// of the log. The log holds none and the association is strong enough that it
+/// would have — the caller is naming a Run this store was never told about,
+/// which is a refusal rather than a quiet success.
+fn live_run_to_record(
+    connection: &Connection,
+    run: RunId,
+    binding: BindingId,
+) -> Result<Option<Run>, StateError> {
+    match projection::recorded_run(connection, run)? {
+        Some(recorded) if recorded.is_live() => Ok(Some(recorded)),
+        // An episode ends once, and attachment cannot follow it. A second fact
+        // here would contradict the outcome the log already states, and the log
+        // is never rewritten.
+        Some(_) => Err(Refusal::RunAlreadyEnded(run).into()),
+        None if require_binding(connection, binding)?
+            .assurance()
+            .may_assert_durable_fact() =>
+        {
+            Err(Refusal::UnknownRun(run).into())
+        }
+        None => Ok(None),
+    }
 }
 
 fn require_binding(connection: &Connection, id: BindingId) -> Result<Binding, StateError> {

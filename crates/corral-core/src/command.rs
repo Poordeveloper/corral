@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::SystemTime;
 
+use crate::external_name::hides_or_reorders;
 use crate::id::CorralSessionId;
 
 /// A client-supplied id for one mutating command.
@@ -217,7 +218,10 @@ fn bounded_token(raw: String, limit: usize) -> Result<String, MalformedCommandId
             limit,
         });
     }
-    if raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    if raw
+        .chars()
+        .any(|c| c.is_whitespace() || hides_or_reorders(c))
+    {
         return Err(MalformedCommandId::UnusableCharacter);
     }
     Ok(raw)

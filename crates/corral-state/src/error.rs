@@ -1,7 +1,9 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use corral_core::{BindingId, CommandId, CorralSessionId, EvidenceSource, NodeId, RunId};
+use corral_core::{
+    Assurance, BindingId, CommandId, CorralSessionId, EvidenceSource, NodeId, RunId,
+};
 
 /// Everything the registry store can answer with other than the fact asked
 /// for.
@@ -36,6 +38,18 @@ pub enum Refusal {
         detail: String,
     },
     UnknownBinding(BindingId),
+    /// A Run the log has never held, under a binding strong enough that it
+    /// would have. Distinct from a Run deliberately withheld as heuristic:
+    /// that one is a Run the store chose not to keep, this one is a Run it was
+    /// never told about.
+    UnknownRun(RunId),
+    /// A Session's origin is recorded once. Recording a different parent would
+    /// replace a fact rather than add one.
+    LineageAlreadyRecorded {
+        child: CorralSessionId,
+        parent: CorralSessionId,
+        assurance: Assurance,
+    },
     /// A Run's association is its runtime binding; no other kind of binding
     /// can carry one.
     NotARuntimeBinding(BindingId),
@@ -169,6 +183,15 @@ impl fmt::Display for Refusal {
                 write!(f, "the store was held by another writer: {detail}")
             }
             Self::UnknownBinding(binding) => write!(f, "binding {binding} is not recorded"),
+            Self::UnknownRun(run) => write!(f, "run {run} is not recorded"),
+            Self::LineageAlreadyRecorded {
+                child,
+                parent,
+                assurance,
+            } => write!(
+                f,
+                "session {child} already continues {parent} on {assurance:?} evidence"
+            ),
             Self::NotARuntimeBinding(binding) => {
                 write!(f, "binding {binding} is not a runtime binding")
             }

@@ -8,4 +8,5 @@ allow-expect-in-tests = true
 disallowed-methods = [
     { path = "std::env::set_var", reason = "process-global mutation; pass configuration explicitly (AGENTS.md §Rust)" },
     { path = "std::env::remove_var", reason = "process-global mutation; pass configuration explicitly (AGENTS.md §Rust)" },
+    { path = "rusqlite::Connection::open", reason = "corral-state owns the registry store; a second opener is a second writer to one log (ARCHITECTURE.md §5)" },
 ]

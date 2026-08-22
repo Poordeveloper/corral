@@ -91,6 +91,11 @@ fn a_command_id_with_whitespace_is_refused() {
         CommandId::new("").expect_err("refused"),
         MalformedCommandId::Empty
     );
+    assert_eq!(
+        CommandId::new("cmd-\u{202e}txt.exe").expect_err("refused"),
+        MalformedCommandId::UnusableCharacter,
+        "an id that reorders the text it is printed into is an id that hides"
+    );
     assert!(CommandId::new("019a4f1e-4a9b-7c2d-9f3e-2b6a1c0d5e77").is_ok());
 }
 

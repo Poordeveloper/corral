@@ -200,6 +200,15 @@ pub(crate) fn encode(event: &SessionEvent) -> Result<Value, FatalState> {
     Ok(payload)
 }
 
+/// Read a stored fact back.
+///
+/// Two kinds of future input, two defined answers. An unknown *kind* is
+/// unreadable: a fact this build cannot interpret would leave every projection
+/// derived from the log silently incomplete, so it fails closed. An unknown
+/// *field* inside a kind this build knows is ignored: a payload may gain a
+/// field without the fact changing meaning, and refusing one would make a
+/// store unreadable by the build that wrote it the moment anything is added.
+/// A field whose meaning does change is a new kind, not a new field.
 pub(crate) fn decode(
     session: CorralSessionId,
     kind: &str,

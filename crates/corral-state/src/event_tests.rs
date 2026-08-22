@@ -63,7 +63,7 @@ fn every_event(session: CorralSessionId) -> Vec<SessionEvent> {
             session,
             run,
             runtime_binding: binding.id(),
-            ordinal: RunOrdinal::FIRST.next(),
+            ordinal: RunOrdinal::from_position(2),
             started_at: None,
         },
         SessionEvent::RunAttached {
@@ -196,6 +196,28 @@ fn an_unknown_kind_of_fact_is_unreadable_rather_than_skipped() {
     let error = decode(session(), "session-archived", &json!({})).expect_err("unreadable");
 
     assert!(matches!(error, FatalState::Unreadable { .. }));
+}
+
+/// A payload may gain a field without the fact changing meaning, so an older
+/// build reads what it knows and ignores the rest. Refusing would make a store
+/// unreadable by the build that wrote it the moment anything is added.
+#[test]
+fn an_unknown_payload_field_is_ignored() {
+    let session = session();
+
+    for event in every_event(session) {
+        let mut payload = encode(&event).expect("encodable");
+        payload["a_field_a_later_build_added"] = json!({"nested": [1, 2, 3]});
+
+        let decoded = decode(event.session(), event.kind(), &payload).expect("decodable");
+
+        assert_eq!(
+            decoded,
+            event,
+            "{} did not survive an added field",
+            event.kind()
+        );
+    }
 }
 
 #[test]

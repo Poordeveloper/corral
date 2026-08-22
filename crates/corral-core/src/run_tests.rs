@@ -83,11 +83,8 @@ fn a_run_arrives_without_a_position() {
 }
 
 #[test]
-fn ordinals_count_from_one_and_do_not_wrap() {
+fn ordinals_count_from_one() {
     assert_eq!(RunOrdinal::FIRST.position(), 1);
-    assert_eq!(RunOrdinal::FIRST.next().position(), 2);
-    assert_eq!(
-        RunOrdinal::from_position(u32::MAX).next().position(),
-        u32::MAX
-    );
+    assert_eq!(RunOrdinal::from_position(2).position(), 2);
+    assert!(RunOrdinal::FIRST < RunOrdinal::from_position(2));
 }
