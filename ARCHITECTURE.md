@@ -226,13 +226,23 @@ Mixed client/daemon versions are normal (AGENTS.md §Protocol). The hello
 handshake carries, both ways, from PR1:
 
 ```text
-PROTOCOL_VERSION · MIN_COMPATIBLE_CLIENT_VERSION ·
-MIN_COMPATIBLE_SERVER_VERSION · capabilities   # flat string set
+PROTOCOL_VERSION · MIN_COMPATIBLE_PEER_VERSION ·
+capabilities   # flat string set
 ```
 
-- An absent compatibility field means **unknown**, never a known negative;
-  the evaluator treats it as protocol 0 with documented kill-switch
-  semantics.
+- Compatibility is one symmetric predicate, evaluated independently by
+  both sides: `remote.protocol_version >= local.min_compatible_peer_version`
+  and vice versa. Divergent verdicts are an internal protocol bug; the
+  connection fails rather than continue ambiguously compatible.
+- Absence policy splits by field class
+  (`docs/decisions/2026-08-22-pr1-activation-grill.md` S3): a required
+  bootstrap identity field (`protocol_version`,
+  `min_compatible_peer_version`) missing or type-invalid makes the hello
+  malformed — a protocol violation, never an inferred version, because the
+  peer's version is simply unknown. An absent optional/additive field
+  means **unknown**, never a known negative: each defines its documented
+  default (capabilities ⇒ empty set), and unknown future fields are
+  ignored.
 - Unknown-input policy is defined per kind: unknown method → explicit error;
   unknown notification → ignore and count; unknown binary opcode → drop and
   count, because silent drops otherwise present as hangs.
