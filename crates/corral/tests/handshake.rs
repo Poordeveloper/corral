@@ -51,7 +51,7 @@ fn an_incompatible_peer_is_told_both_sides_and_closed() {
     let response = client.say_hello(99, 99);
 
     let hello = &response["outcome"]["result"];
-    assert_eq!(hello["compatibility"], "incompatible");
+    assert_eq!(hello["compatibility_result"], "incompatible");
     assert_eq!(hello["protocol_version"], 1);
     assert_eq!(hello["min_compatible_peer_version"], 1);
     assert!(
@@ -150,7 +150,10 @@ fn unknown_additive_fields_are_tolerated() {
 
     let response = client.receive().expect("the daemon answered");
 
-    assert_eq!(response["outcome"]["result"]["compatibility"], "compatible");
+    assert_eq!(
+        response["outcome"]["result"]["compatibility_result"],
+        "compatible"
+    );
 }
 
 /// Protocol 1 daemons answer; they never originate. A response frame therefore
@@ -187,6 +190,37 @@ fn an_unknown_frame_kind_closes_the_connection() {
     let mut client = RawClient::connect(&account.socket());
 
     client.send(&json!({"type": "subscribe", "id": 1, "topic": "sessions"}));
+
+    assert!(client.receive().is_none());
+}
+
+/// A pending connection has a bounded life of its own; the daemon closes it at
+/// the deadline rather than holding a transport peer forever.
+#[test]
+fn a_pending_connection_is_closed_at_the_deadline() {
+    let account = TestAccount::new("pre-hello")
+        .with_pre_hello_deadline(std::time::Duration::from_millis(300))
+        .with_idle_grace(std::time::Duration::from_secs(30));
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+
+    // Say nothing at all, and wait.
+    assert!(
+        client.receive().is_none(),
+        "the daemon must close a connection that never says hello"
+    );
+}
+
+/// The frame-size limit is a safety limit, and reaching it means the byte
+/// stream is no longer trustworthy: no typed reply, just a close.
+#[test]
+fn an_oversize_frame_closes_the_connection() {
+    let account = TestAccount::new("oversize");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+
+    let oversize = vec![b'x'; corral_protocol::MAX_FRAME_BYTES + 4096];
+    client.send_raw(&oversize);
 
     assert!(client.receive().is_none());
 }

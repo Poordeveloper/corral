@@ -18,6 +18,22 @@ pub enum ActivationContext {
     ActivationAttempted,
 }
 
+/// What a client actually established about a canonical primary owner.
+///
+/// Kept as evidence rather than inferred from "did we spawn": an activation
+/// that runs out of budget before it probes has observed nothing, and
+/// reporting an owner it never saw would be inventing a runtime fact
+/// (AGENTS.md §Runtime truth).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerEvidence {
+    /// No probe ran.
+    NotProbed,
+    /// A probe found the singleton lock held.
+    Present,
+    /// A probe found no owner.
+    Absent,
+}
+
 /// What became of a daemon this client started.
 #[derive(Clone, Copy, Debug)]
 pub struct SpawnOutcome {
@@ -66,6 +82,14 @@ pub enum ActivationError {
     Endpoint {
         endpoint: PathBuf,
         source: io::Error,
+    },
+    /// The overall budget ran out before the rendezvous could be assessed.
+    /// Distinct from `OwnerPresentButUnreachable`, which requires having seen
+    /// an owner.
+    ActivationBudgetExpired {
+        endpoint: PathBuf,
+        deadline: Duration,
+        owner: OwnerEvidence,
     },
     /// A primary daemon holds the lock and its endpoint never became usable.
     OwnerPresentButUnreachable {
@@ -126,6 +150,19 @@ impl fmt::Display for ActivationContext {
     }
 }
 
+impl fmt::Display for OwnerEvidence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            Self::NotProbed => {
+                "the budget ran out before this command could tell whether a corrald is running"
+            }
+            Self::Present => "a corrald holds the singleton lock",
+            Self::Absent => "no corrald held the singleton lock",
+        };
+        f.write_str(text)
+    }
+}
+
 impl fmt::Display for HandshakeFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -154,13 +191,23 @@ impl fmt::Display for ActivationError {
             Self::Rendezvous(error) => write!(f, "{error}"),
             Self::ExplicitEndpointUnavailable { endpoint, source } => write!(
                 f,
-                "CORRAL_ENDPOINT points at {} and nothing is listening there: {source}. An \
+                "CORRAL_ENDPOINT points at {} and it did not become usable: {source}. An \
                  endpoint override redirects this command; it never starts a daemon of its own",
                 endpoint.display()
             ),
             Self::Endpoint { endpoint, source } => {
                 write!(f, "{} could not be reached: {source}", endpoint.display())
             }
+            Self::ActivationBudgetExpired {
+                endpoint,
+                deadline,
+                owner,
+            } => write!(
+                f,
+                "{} did not become usable within {:.0?}, and {owner}",
+                endpoint.display(),
+                deadline
+            ),
             Self::OwnerPresentButUnreachable {
                 lock_path,
                 endpoint,

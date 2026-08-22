@@ -86,9 +86,10 @@ transport reachability → handshake/protocol):
 | `CORRAL_ENDPOINT` empty / relative / over socket-path limit | InvalidExplicitEndpoint — terminal, no fallback, no spawn |
 | account home unresolvable | ConfigurationError — terminal |
 | canonical path over socket-path limit | ConfigurationError (may suggest `CORRAL_ENDPOINT` for externally managed use) |
-| run-dir create/open failure (EACCES/ENOSPC/non-directory/…) | filesystem/permission error — no spawn |
+| run-dir create/open failure (EACCES/ENOSPC/non-directory/not user-private/…) | filesystem/permission error — no spawn |
 | lock open/flock error other than NB contention | filesystem/permission error — never owner-present |
 | lock held + endpoint never usable before deadline | `OwnerPresentButUnreachable { lock_path, endpoint, deadline }` |
+| deadline expires before any probe established whether an owner exists | `ActivationBudgetExpired { endpoint, deadline, owner }` — the three facts stay unconflated, so an owner that was never observed is never reported |
 | spawn permitted + no usable daemon before deadline | `SpawnedDaemonDidNotBecomeReady { endpoint, deadline, spawn_result }` |
 | handshake: valid but incompatible peer | `IncompatibleDaemon { ours, theirs, endpoint, activation_context }` — terminal-immediate, no retry/fallback/spawn/kill |
 | non-socket object at socket pathname | filesystem/corruption error — no deletion |

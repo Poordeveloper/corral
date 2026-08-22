@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::fs::DirBuilder;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use uzers::os::unix::UserExt;
@@ -127,6 +127,18 @@ fn socket_address_length_exceeded(path: &Path) -> bool {
     std::os::unix::net::SocketAddr::from_pathname(path).is_err()
 }
 
+/// Create a user-private directory, or confirm the existing one is private.
+///
+/// `mode` applies only to components this call creates, so an existing
+/// directory has to be checked rather than assumed: S6(d) makes user-private
+/// runtime and log directories PR1 correctness, and a directory left open to
+/// the group would silently widen the transport fence.
+///
+/// A symlinked directory is followed deliberately. The rule the grill froze is
+/// that *lock and socket creation* must not follow an unexpected substitution
+/// — enforced at those final components with `O_NOFOLLOW` and
+/// `symlink_metadata` — not that a person may never point `~/.corral` at
+/// another volume.
 fn ensure_private_dir(path: &Path) -> Result<(), RendezvousError> {
     DirBuilder::new()
         .recursive(true)
@@ -137,8 +149,6 @@ fn ensure_private_dir(path: &Path) -> Result<(), RendezvousError> {
             source,
         })?;
 
-    // `recursive` accepts an existing path without inspecting it, so confirm
-    // what is actually there before anything binds or locks inside it.
     let metadata = std::fs::metadata(path).map_err(|source| RendezvousError::RuntimeDirectory {
         path: path.to_path_buf(),
         source,
@@ -147,6 +157,16 @@ fn ensure_private_dir(path: &Path) -> Result<(), RendezvousError> {
         return Err(RendezvousError::RuntimeDirectory {
             path: path.to_path_buf(),
             source: std::io::Error::from(std::io::ErrorKind::NotADirectory),
+        });
+    }
+
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & !PRIVATE_DIR_MODE != 0 {
+        // Fail closed and name the fix rather than quietly re-tightening a
+        // directory this run did not create.
+        return Err(RendezvousError::RuntimeDirectoryNotPrivate {
+            path: path.to_path_buf(),
+            mode,
         });
     }
     Ok(())
@@ -247,107 +267,5 @@ mod test_namespace {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn derives_every_artifact_from_the_account_home() {
-        let paths = RendezvousPaths::for_account_home("/home/example").expect("derivable");
-
-        assert_eq!(
-            paths.socket(),
-            Path::new("/home/example/.corral/run/corrald.sock")
-        );
-        assert_eq!(
-            paths.lock(),
-            Path::new("/home/example/.corral/run/corrald.lock")
-        );
-        assert_eq!(paths.run_dir(), Path::new("/home/example/.corral/run"));
-        assert_eq!(
-            paths.log_file(),
-            Path::new("/home/example/.corral/log/corrald.log")
-        );
-    }
-
-    /// The account home only supplies the root; the layout under it is one
-    /// rule, so a test namespace differs from a real account in nothing else.
-    #[test]
-    fn the_account_home_only_supplies_the_root() {
-        let from_home = RendezvousPaths::for_account_home("/home/example").expect("derivable");
-        let from_root = RendezvousPaths::for_corral_root("/home/example/.corral").expect("ok");
-
-        assert_eq!(from_home, from_root);
-    }
-
-    #[test]
-    fn derivation_depends_on_nothing_but_the_root() {
-        let a = RendezvousPaths::for_account_home("/home/example").expect("derivable");
-        let b = RendezvousPaths::for_account_home("/home/example/").expect("derivable");
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn a_canonical_path_too_long_for_a_socket_is_a_configuration_error() {
-        let deep = format!("/{}", "d".repeat(200));
-        let error = RendezvousPaths::for_account_home(&deep).expect_err("too long");
-        assert!(matches!(
-            error,
-            RendezvousError::CanonicalEndpointTooLong { .. }
-        ));
-    }
-
-    /// A test namespace is subject to the same limits as a real root: the seam
-    /// substitutes the root and nothing else.
-    #[test]
-    fn a_test_namespace_gets_the_same_validation_as_a_real_root() {
-        let deep = format!("/{}", "d".repeat(200));
-        let error = RendezvousPaths::for_corral_root(&deep).expect_err("too long");
-        assert!(matches!(
-            error,
-            RendezvousError::CanonicalEndpointTooLong { .. }
-        ));
-    }
-
-    #[test]
-    fn an_empty_override_is_rejected_without_falling_back() {
-        let error = validate_endpoint_path(OsStr::new("")).expect_err("empty");
-        assert!(matches!(
-            error,
-            RendezvousError::InvalidExplicitEndpoint {
-                reason: InvalidEndpointReason::Empty,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn a_relative_override_is_rejected_without_falling_back() {
-        let error = validate_endpoint_path(OsStr::new("run/corrald.sock")).expect_err("relative");
-        assert!(matches!(
-            error,
-            RendezvousError::InvalidExplicitEndpoint {
-                reason: InvalidEndpointReason::Relative,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn an_oversized_override_is_rejected_without_falling_back() {
-        let raw = format!("/{}", "x".repeat(400));
-        let error = validate_endpoint_path(OsStr::new(&raw)).expect_err("too long");
-        assert!(matches!(
-            error,
-            RendezvousError::InvalidExplicitEndpoint {
-                reason: InvalidEndpointReason::TooLong,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn a_usable_override_is_returned_unchanged() {
-        let path = validate_endpoint_path(OsStr::new("/tmp/corral-test.sock")).expect("usable");
-        assert_eq!(path, Path::new("/tmp/corral-test.sock"));
-    }
-}
+#[path = "paths_tests.rs"]
+mod tests;

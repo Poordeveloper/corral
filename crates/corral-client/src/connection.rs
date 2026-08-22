@@ -183,7 +183,7 @@ pub(crate) async fn handshake(
     // Both sides run the same symmetric predicate. Trusting the daemon's
     // verdict instead would make one peer's bug the other peer's behaviour.
     let our_verdict = compatible(ours, theirs);
-    let their_verdict = matches!(peer.compatibility, Compatibility::Compatible);
+    let their_verdict = matches!(peer.compatibility_result, Compatibility::Compatible);
     if our_verdict != their_verdict {
         return Err(ActivationError::Handshake {
             endpoint: endpoint.to_path_buf(),

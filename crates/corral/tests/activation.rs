@@ -10,6 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
+use support::wire::spawn_silent_daemon;
 use support::{SETTLE, TestAccount, lock_is_held, run, stderr, stdout, wait_until};
 
 #[test]
@@ -144,7 +145,7 @@ fn a_malformed_override_is_terminal() {
 #[test]
 fn a_stale_socket_left_by_a_dead_daemon_is_replaced() {
     let account = TestAccount::new("stale-socket");
-    std::fs::create_dir_all(account.socket().parent().expect("run dir")).expect("create");
+    support::create_private_dir_all(account.socket().parent().expect("run dir"));
     let listener = std::os::unix::net::UnixListener::bind(account.socket()).expect("bind");
     drop(listener);
     assert!(account.socket().exists());
@@ -159,7 +160,7 @@ fn a_stale_socket_left_by_a_dead_daemon_is_replaced() {
 fn a_regular_file_at_the_endpoint_is_never_deleted() {
     let account =
         TestAccount::new("occupied-endpoint").with_activation_deadline(Duration::from_secs(3));
-    std::fs::create_dir_all(account.socket().parent().expect("run dir")).expect("create");
+    support::create_private_dir_all(account.socket().parent().expect("run dir"));
     std::fs::write(account.socket(), b"not a socket").expect("write");
 
     let output = run(account.corral().arg("ping"));
@@ -176,7 +177,7 @@ fn a_regular_file_at_the_endpoint_is_never_deleted() {
 #[test]
 fn a_wedged_rendezvous_reports_the_owner_rather_than_starting_a_rival() {
     let account = TestAccount::new("wedged").with_activation_deadline(Duration::from_millis(400));
-    std::fs::create_dir_all(account.lock().parent().expect("run dir")).expect("create");
+    support::create_private_dir_all(account.lock().parent().expect("run dir"));
     let held = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -274,7 +275,7 @@ fn write_decoy(path: &Path, marker: &Path) {
 #[test]
 fn a_client_waits_out_a_departing_owner_and_then_starts_one() {
     let account = TestAccount::new("departing").with_activation_deadline(Duration::from_secs(10));
-    std::fs::create_dir_all(account.lock().parent().expect("run dir")).expect("create");
+    support::create_private_dir_all(account.lock().parent().expect("run dir"));
     let held = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -299,4 +300,96 @@ fn a_client_waits_out_a_departing_owner_and_then_starts_one() {
 
     let output = client.wait_with_output().expect("wait for corral");
     assert!(output.status.success(), "{}", stderr(&output));
+}
+
+/// The overall budget covers connect and handshake, not just probe and spawn.
+/// A peer that accepts and never answers is exactly what it exists for.
+#[test]
+fn a_peer_that_never_answers_expires_the_budget() {
+    let account = TestAccount::new("silent").with_activation_deadline(Duration::from_millis(500));
+    let _silent = spawn_silent_daemon(&account.socket());
+
+    let started = std::time::Instant::now();
+    let output = run(account.corral().arg("ping"));
+
+    assert!(!output.status.success());
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the client waited past its own budget"
+    );
+    assert!(
+        stderr(&output).contains("did not become usable"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn an_override_to_a_peer_that_never_answers_expires_the_budget() {
+    let account = TestAccount::new("silent-o").with_activation_deadline(Duration::from_millis(500));
+    let elsewhere = account.scratch().join("silent.sock");
+    let _silent = spawn_silent_daemon(&elsewhere);
+
+    let started = std::time::Instant::now();
+    let output = run(account
+        .corral()
+        .arg("ping")
+        .env("CORRAL_ENDPOINT", &elsewhere));
+
+    assert!(!output.status.success());
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert!(
+        stderr(&output).contains("CORRAL_ENDPOINT"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// Reporting an owner requires having seen one. An activation that runs out of
+/// budget before it probes has observed nothing.
+#[test]
+fn an_expired_budget_never_claims_an_owner_it_did_not_see() {
+    let account = TestAccount::new("no-probe").with_activation_deadline(Duration::from_millis(0));
+
+    let output = run(account.corral().arg("ping"));
+
+    let message = stderr(&output);
+    assert!(!output.status.success());
+    assert!(
+        !message.contains("holds"),
+        "no probe ran, so no owner may be claimed: {message}"
+    );
+    assert!(!account.lock().exists(), "{message}");
+}
+
+/// An override redirects a client, which is only half proven by the failures.
+#[test]
+fn an_override_reaches_a_live_daemon() {
+    let account = TestAccount::new("override-live");
+    let _daemon = account.start_daemon();
+
+    let output = run(account
+        .corral()
+        .arg("ping")
+        .env("CORRAL_ENDPOINT", account.socket()));
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("protocol"), "{}", stdout(&output));
+}
+
+#[test]
+fn a_runtime_directory_open_to_others_fails_closed() {
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let account = TestAccount::new("wide-dir");
+    let run_dir = account.socket().parent().expect("run dir").to_path_buf();
+    std::fs::create_dir_all(&run_dir).expect("create");
+    std::fs::set_permissions(&run_dir, PermissionsExt::from_mode(0o755)).expect("chmod");
+
+    let output = run(account.corral().arg("ping"));
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("private"), "{}", stderr(&output));
+    assert!(!account.socket().exists());
 }

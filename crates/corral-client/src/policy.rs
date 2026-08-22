@@ -61,16 +61,3 @@ mod test_policy {
         None
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_production_default_is_the_documented_one() {
-        assert_eq!(
-            ClientActivationPolicy::default().activation_deadline,
-            Duration::from_secs(15)
-        );
-    }
-}

@@ -22,5 +22,7 @@ mod spawn;
 pub use activation::activate;
 pub use connection::Connection;
 pub use endpoint::{ENDPOINT_OVERRIDE, EndpointSelection};
-pub use error::{ActivationContext, ActivationError, HandshakeFault, RequestError, SpawnOutcome};
+pub use error::{
+    ActivationContext, ActivationError, HandshakeFault, OwnerEvidence, RequestError, SpawnOutcome,
+};
 pub use policy::ClientActivationPolicy;
