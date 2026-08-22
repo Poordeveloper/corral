@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 read_when:
   - changing how clients locate, start, or attach to corrald
   - touching the canonical endpoint, singleton lock, daemon lifecycle, or shutdown
@@ -262,5 +262,6 @@ exists; future idle-policy configuration surfaces; CLI exit-code taxonomy.
   security boundary.
 
 Acceptance evidence: `docs/decisions/2026-08-22-pr1-activation-grill.md`
-(S1–S6). Status flips to `accepted` when the founder confirms this
-materialization.
+(S1–S6), materialized here and accepted by the founder on merge of this
+change — which precedes the PR1 implementation in history, so no
+implementation commit crosses this decision boundary before acceptance.
