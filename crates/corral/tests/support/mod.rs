@@ -96,7 +96,10 @@ impl TestAccount {
             PathBuf::from("/tmp").join(format!("crl-{}-{unique}-{short}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let corral_root = base.join("corral");
-        std::fs::create_dir_all(&corral_root).expect("create the test Corral root");
+        // Private, like the product's own root: Corral refuses a runtime tree
+        // that anyone else can reach into, and a harness that ignored that
+        // would be testing something the product never does.
+        create_private_dir_all(&corral_root);
 
         Self {
             base,

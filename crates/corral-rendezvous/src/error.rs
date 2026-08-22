@@ -27,9 +27,15 @@ pub enum RendezvousError {
     /// A user-private runtime directory could not be created or is not a
     /// directory.
     RuntimeDirectory { path: PathBuf, source: io::Error },
-    /// A runtime directory exists but is readable or writable beyond its
-    /// owner. Corral's runtime state is user-private by construction.
+    /// A runtime directory exists but is not exactly user-private. Corral's
+    /// runtime state is private to its owner by construction.
     RuntimeDirectoryNotPrivate { path: PathBuf, mode: u32 },
+    /// A runtime directory belongs to another account.
+    RuntimeDirectoryNotOwned {
+        path: PathBuf,
+        owner: u32,
+        expected: u32,
+    },
     /// The singleton lock could not be opened or locked for a reason other
     /// than contention. Never evidence that a daemon exists.
     Lock { path: PathBuf, source: io::Error },
@@ -112,6 +118,16 @@ impl fmt::Display for RendezvousError {
                 "the runtime directory {} is mode {mode:04o}; Corral keeps its runtime state \
                  private to the account that owns it (chmod 700 {})",
                 path.display(),
+                path.display()
+            ),
+            Self::RuntimeDirectoryNotOwned {
+                path,
+                owner,
+                expected,
+            } => write!(
+                f,
+                "the runtime directory {} belongs to uid {owner}, not to uid {expected}; Corral \
+                 keeps its runtime state private to the account that owns it",
                 path.display()
             ),
             Self::Lock { path, source } => write!(

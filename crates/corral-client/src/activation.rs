@@ -111,7 +111,10 @@ async fn activate_canonical(
             };
         }
 
-        tokio::time::sleep(RETRY_INTERVAL).await;
+        // Clamped, so the deadline the failure reports is the one the caller
+        // actually waited.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        tokio::time::sleep(RETRY_INTERVAL.min(remaining)).await;
     }
 }
 
@@ -181,12 +184,15 @@ fn give_up(
             endpoint: paths.socket().to_path_buf(),
             deadline: policy.activation_deadline,
         },
-        // The budget ran out before the rendezvous could be assessed. Claiming
-        // an owner here would invent a fact nothing observed.
-        evidence => ActivationError::ActivationBudgetExpired {
-            endpoint: paths.socket().to_path_buf(),
-            deadline: policy.activation_deadline,
-            owner: evidence,
-        },
+        // The budget ran out before the rendezvous could be assessed, or
+        // after a probe found it free. Claiming an owner in either case
+        // would invent a fact nothing observed.
+        evidence @ (OwnerEvidence::NotProbed | OwnerEvidence::Absent) => {
+            ActivationError::ActivationBudgetExpired {
+                endpoint: paths.socket().to_path_buf(),
+                deadline: policy.activation_deadline,
+                owner: evidence,
+            }
+        }
     }
 }
