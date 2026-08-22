@@ -1,5 +1,5 @@
 [package]
-name = "corral-protocol"
+name = "corral-client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,10 +8,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-serde = { workspace = true }
+corral-protocol = { workspace = true }
+corral-rendezvous = { workspace = true }
 serde_json = { workspace = true }
-# Only the async read/write traits and helpers the framing uses. Both peers
-# share this codec so a frame boundary can never mean two different things.
 tokio = { workspace = true }
 
 [lints]

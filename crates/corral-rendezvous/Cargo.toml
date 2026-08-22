@@ -1,0 +1,20 @@
+[package]
+name = "corral-rendezvous"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# O_NOFOLLOW opens, which the standard library's `OpenOptions` cannot express
+# portably. File locking and socket-address validation come from `std`
+# (ADR 0001 D2/D3).
+rustix = { workspace = true }
+# Safe getpwuid_r. The canonical rendezvous follows the OS account, never
+# `$HOME` (ADR 0001 D1), and no standard-library API reads the account database.
+uzers = { workspace = true }
+
+[lints]
+workspace = true

@@ -11,11 +11,19 @@ version = 2
 allow = [
     "Apache-2.0",
     "MIT",
+    # unicode-ident, reached through the serde/clap/tokio derive macros. The
+    # Unicode License v3 is permissive; the clause applies to the Unicode data
+    # tables the crate embeds, and nothing of it ships in Corral's binaries.
+    "Unicode-3.0",
 ]
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace crates depend on each other by path and are never published, so
+# they carry no meaningful version requirement. The rule still closes over
+# every third-party dependency, which is what it is for.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
