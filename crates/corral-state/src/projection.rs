@@ -11,16 +11,17 @@
 //! runtime truth as a durable fact (AGENTS.md §Durable state).
 
 use corral_core::{
-    Binding, BindingId, BindingKey, CommandFingerprint, CommandId, CommandOutcome, CommandReceipt,
-    CorralSessionId, Evidence, ExternalId, ProviderId, Run, RunId, RunOrdinal, Session,
-    SessionLineage,
+    Binding, BindingId, BindingKey, BindingKind, CommandFingerprint, CommandId, CommandOutcome,
+    CommandReceipt, CorralSessionId, Evidence, ExternalId, ProviderId, Run, RunId, RunOrdinal,
+    Session, SessionLineage,
 };
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 
 use crate::encoding::{
     assurance_from_token, assurance_token, binding_kind_from_token, binding_kind_token,
-    evidence_source_from_token, evidence_source_token, from_millis, millis, provenance_from_token,
-    provenance_token, run_end_from_token, run_end_token, unreadable,
+    command_outcome_is, command_outcome_token, evidence_source_from_token, evidence_source_token,
+    from_millis, millis, provenance_from_token, provenance_token, run_end_from_token,
+    run_end_token, unreadable,
 };
 use crate::error::{FatalState, StateError};
 use crate::event::SessionEvent;
@@ -134,7 +135,7 @@ pub(crate) fn apply(tx: &Transaction<'_>, event: &SessionEvent) -> Result<(), St
                 params![
                     command.as_str(),
                     fingerprint.as_str(),
-                    "session-created",
+                    command_outcome_token(*outcome),
                     created.to_string(),
                     millis(*accepted_at)?,
                 ],
@@ -199,6 +200,37 @@ pub(crate) fn binding_by_key(
             binding_kind_token(key.kind()),
         ],
     )
+}
+
+/// The binding this Session may currently drive control through, if any.
+///
+/// Answers the at-most-one rule without materializing every binding the
+/// Session has: the check looks at kind and assurance, and never at the names
+/// a full decode would re-validate.
+pub(crate) fn control_capable_runtime_binding(
+    connection: &Connection,
+    session: CorralSessionId,
+    excluding: BindingId,
+) -> Result<Option<BindingId>, StateError> {
+    let mut statement = connection.prepare_cached(
+        "SELECT id, assurance FROM bindings
+          WHERE session_id = ?1 AND kind = ?2 AND id != ?3",
+    )?;
+    let rows = statement.query_map(
+        params![
+            session.to_string(),
+            binding_kind_token(BindingKind::Runtime),
+            excluding.to_string(),
+        ],
+        |row| Ok((text(row, 0)?, text(row, 1)?)),
+    )?;
+    for row in rows {
+        let (id, assurance) = row?;
+        if assurance_from_token(&assurance)?.permits_control() {
+            return Ok(Some(id.parse().map_err(FatalState::from)?));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn bindings_of(
@@ -371,9 +403,7 @@ pub(crate) fn receipt(
     let Some((fingerprint, outcome_kind, outcome_target, accepted_at_ms)) = row else {
         return Ok(None);
     };
-    if outcome_kind != "session-created" {
-        return Err(unreadable("a command outcome", &outcome_kind).into());
-    }
+    command_outcome_is(&outcome_kind)?;
     Ok(Some(CommandReceipt::new(
         command.clone(),
         CommandFingerprint::from_canonical(fingerprint),

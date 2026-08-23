@@ -81,16 +81,40 @@ external_name!(
 /// Characters that change how the text around them reads without appearing in
 /// it.
 ///
-/// `char::is_control` covers category Cc only. The bidirectional formatting
-/// characters are Cf, so the standard library does not call them control
-/// characters — but a right-to-left override reorders every id printed after
-/// it, which is exactly the "one name hiding inside another" this validation
-/// exists to prevent.
+/// `char::is_control` covers category Cc only. The format characters are Cf,
+/// which the standard library exposes no test for — and a right-to-left
+/// override reorders every id printed after it, while a tag character carries
+/// invisible ASCII inside a visible string. Both are exactly the "one name
+/// hiding inside another" this validation exists to prevent, and for a command
+/// id two names that render identically are two idempotency keys.
+///
+/// The ranges below are Cf, the line and paragraph separators, and the tag
+/// block, enumerated because nothing in `std` answers the category question.
+/// Deliberately wide: a character Corral cannot render honestly has no business
+/// in a name it stores, logs, or displays.
 pub(crate) fn hides_or_reorders(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
-            '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}'
+            '\u{00ad}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061c}'
+                | '\u{06dd}'
+                | '\u{070f}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08e2}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}'
+                | '\u{110bd}'
+                | '\u{110cd}'
+                | '\u{13430}'..='\u{1343f}'
+                | '\u{1bca0}'..='\u{1bca3}'
+                | '\u{1d173}'..='\u{1d17a}'
+                | '\u{e0000}'..='\u{e0fff}'
         )
 }
 

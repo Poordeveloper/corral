@@ -20,8 +20,9 @@ use serde_json::{Value, json};
 
 use crate::encoding::{
     assurance_from_token, assurance_token, binding_kind_from_token, binding_kind_token,
-    evidence_source_from_token, evidence_source_token, from_millis, millis, provenance_from_token,
-    provenance_token, run_end_from_token, run_end_token, unreadable,
+    command_outcome_is, command_outcome_token, evidence_source_from_token, evidence_source_token,
+    from_millis, millis, provenance_from_token, provenance_token, run_end_from_token,
+    run_end_token, unreadable,
 };
 use crate::error::FatalState;
 
@@ -191,7 +192,7 @@ pub(crate) fn encode(event: &SessionEvent) -> Result<Value, FatalState> {
             json!({
                 "command_id": command.as_str(),
                 "fingerprint": fingerprint.as_str(),
-                "outcome_kind": "session-created",
+                "outcome_kind": command_outcome_token(*outcome),
                 "outcome_target": created.to_string(),
                 "accepted_at_ms": millis(*accepted_at)?,
             })
@@ -282,10 +283,7 @@ pub(crate) fn decode(
             })?,
         ),
         "command-accepted" => {
-            let outcome_kind = text(payload, "outcome_kind")?;
-            if outcome_kind != "session-created" {
-                return Err(unreadable("a command outcome", outcome_kind));
-            }
+            command_outcome_is(text(payload, "outcome_kind")?)?;
             SessionEvent::CommandAccepted {
                 command: CommandId::new(text(payload, "command_id")?).map_err(|error| {
                     FatalState::Unreadable {

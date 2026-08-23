@@ -157,6 +157,17 @@ impl Store {
         self.node
     }
 
+    /// Whether this store has concluded it can no longer vouch for durable
+    /// truth. Once true, never false.
+    ///
+    /// The conclusion outlives whichever caller reached it: a task cancelled
+    /// mid-shutdown cannot take it with it, which is what makes this the thing
+    /// an exit status is read from.
+    #[must_use]
+    pub fn stopped_vouching(&self) -> bool {
+        self.fatal.is_some()
+    }
+
     /// Confirm the store can still vouch for durable truth.
     ///
     /// What every other operation does first, on its own — for a caller whose
@@ -205,7 +216,7 @@ impl Store {
         &mut self,
         session: CorralSessionId,
     ) -> Result<Vec<RecordedEvent>, StateError> {
-        self.read(|connection| read_events(connection, Some(session)))
+        self.read(|connection| read_events(connection, session))
     }
 
     /// Create a Session under a client-supplied command id.
@@ -219,17 +230,20 @@ impl Store {
         command: &Command,
         at: SystemTime,
     ) -> Result<CommandAcceptance, StateError> {
-        let at = encoding::as_stored(at)?;
-        let length = command.fingerprint().as_str().len();
-        if length > FINGERPRINT_LIMIT {
-            return Err(Refusal::FingerprintTooLarge {
-                length,
-                limit: FINGERPRINT_LIMIT,
-            }
-            .into());
-        }
-
+        // Inside the write, not before it: a store that has already concluded
+        // it cannot vouch must answer that, not a refusal a caller would read
+        // as "still fine, try again".
         self.write(|transaction| {
+            let at = encoding::as_stored(at)?;
+            let length = command.fingerprint().as_str().len();
+            if length > FINGERPRINT_LIMIT {
+                return Err(Refusal::FingerprintTooLarge {
+                    length,
+                    limit: FINGERPRINT_LIMIT,
+                }
+                .into());
+            }
+
             if let Some(receipt) = projection::receipt(transaction, command.id())? {
                 if receipt.fingerprint() == command.fingerprint() {
                     return Ok(Written::nothing_to_record(CommandAcceptance::Replayed(
@@ -280,10 +294,9 @@ impl Store {
         evidence: Evidence,
         at: SystemTime,
     ) -> Result<SessionResolution, StateError> {
-        let at = encoding::as_stored(at)?;
-        let evidence = as_stored_evidence(evidence)?;
-
         self.write(move |transaction| {
+            let at = encoding::as_stored(at)?;
+            let evidence = as_stored_evidence(evidence)?;
             if let Some(binding) = projection::binding_by_key(transaction, &key)? {
                 let session =
                     projection::session(transaction, binding.session())?.ok_or_else(|| {
@@ -335,10 +348,9 @@ impl Store {
         evidence: Evidence,
         at: SystemTime,
     ) -> Result<BindingResolution, StateError> {
-        let at = encoding::as_stored(at)?;
-        let evidence = as_stored_evidence(evidence)?;
-
-        self.write(move |transaction| {
+        let outcome = self.write(move |transaction| {
+            let at = encoding::as_stored(at)?;
+            let evidence = as_stored_evidence(evidence)?;
             if let Some(binding) = projection::binding_by_key(transaction, &key)? {
                 return Ok(Written::nothing_to_record(BindingResolution::Existing(
                     binding,
@@ -351,7 +363,8 @@ impl Store {
                 BindingResolution::Created(binding.clone()),
                 vec![SessionEvent::BindingAdded(binding)],
             ))
-        })
+        });
+        self.name_unknown_session(outcome, session)
     }
 
     /// Replace the evidence supporting a binding.
@@ -364,9 +377,8 @@ impl Store {
         binding: BindingId,
         evidence: Evidence,
     ) -> Result<Binding, StateError> {
-        let evidence = as_stored_evidence(evidence)?;
-
         self.write(move |transaction| {
+            let evidence = as_stored_evidence(evidence)?;
             let confirmed = require_binding(transaction, binding)?.with_evidence(evidence);
             refuse_second_control_capable_runtime_binding(transaction, &confirmed)?;
             Ok(Written::recording(
@@ -398,9 +410,8 @@ impl Store {
         occurrence: EvidenceSource,
         started: OccurrenceTime,
     ) -> Result<RecordedRun, StateError> {
-        let started = as_stored_occurrence(started)?;
-
         self.write(move |transaction| {
+            let started = as_stored_occurrence(started)?;
             let binding = require_binding(transaction, runtime_binding)?;
             if binding.kind() != BindingKind::Runtime {
                 return Err(Refusal::NotARuntimeBinding(runtime_binding).into());
@@ -470,12 +481,11 @@ impl Store {
         end: RunEnd,
         at: OccurrenceTime,
     ) -> Result<Durability, StateError> {
-        let at = as_stored_occurrence(at)?;
         let id = run.id();
 
-        let binding = run.runtime_binding();
         self.write(move |transaction| {
-            let Some(recorded) = live_run_to_record(transaction, id, binding)? else {
+            let at = as_stored_occurrence(at)?;
+            let Some(recorded) = live_run_to_record(transaction, id)? else {
                 return Ok(Written::nothing_to_record(Durability::Withheld));
             };
             Ok(Written::recording(
@@ -496,12 +506,13 @@ impl Store {
         run: &Run,
         at: SystemTime,
     ) -> Result<Durability, StateError> {
-        let at = encoding::as_stored(at)?;
-        let (id, binding) = (run.id(), run.runtime_binding());
-        self.record_run_fact(id, binding, move |session| SessionEvent::RunAttached {
-            session,
-            run: id,
-            at,
+        let id = run.id();
+        self.record_run_fact(id, move |session| {
+            Ok(SessionEvent::RunAttached {
+                session,
+                run: id,
+                at: encoding::as_stored(at)?,
+            })
         })
     }
 
@@ -512,12 +523,13 @@ impl Store {
         run: &Run,
         at: SystemTime,
     ) -> Result<Durability, StateError> {
-        let at = encoding::as_stored(at)?;
-        let (id, binding) = (run.id(), run.runtime_binding());
-        self.record_run_fact(id, binding, move |session| SessionEvent::RunDetached {
-            session,
-            run: id,
-            at,
+        let id = run.id();
+        self.record_run_fact(id, move |session| {
+            Ok(SessionEvent::RunDetached {
+                session,
+                run: id,
+                at: encoding::as_stored(at)?,
+            })
         })
     }
 
@@ -527,7 +539,8 @@ impl Store {
     /// similarity cannot produce a `SessionLineage` at all, so no guessed
     /// edge can reach the log (ADR 0002 D4).
     pub fn record_fork(&mut self, lineage: SessionLineage) -> Result<(), StateError> {
-        self.write(move |transaction| {
+        let outcome = self.write(move |transaction| {
+            refuse_lineage_cycle(transaction, lineage)?;
             // A Session's origin is recorded once. Re-recording the same one is
             // a retry and does nothing; a different one is a conflict named as
             // such, rather than a primary-key message a caller has to read a
@@ -547,7 +560,8 @@ impl Store {
                 (),
                 vec![SessionEvent::SessionForkedFrom(lineage)],
             ))
-        })
+        });
+        self.name_unknown_session(outcome, lineage.child())
     }
 
     /// Rebuild every projection from the log.
@@ -573,16 +587,15 @@ impl Store {
     fn record_run_fact(
         &mut self,
         run: RunId,
-        binding: BindingId,
-        event: impl FnOnce(CorralSessionId) -> SessionEvent,
+        event: impl FnOnce(CorralSessionId) -> Result<SessionEvent, StateError>,
     ) -> Result<Durability, StateError> {
         self.write(move |transaction| {
-            let Some(recorded) = live_run_to_record(transaction, run, binding)? else {
+            let Some(recorded) = live_run_to_record(transaction, run)? else {
                 return Ok(Written::nothing_to_record(Durability::Withheld));
             };
             Ok(Written::recording(
                 Durability::Recorded,
-                vec![event(recorded.session())],
+                vec![event(recorded.session())?],
             ))
         })
     }
@@ -594,8 +607,7 @@ impl Store {
         if let Some(fatal) = &self.fatal {
             return Err(StateError::Fatal(fatal.clone()));
         }
-        let outcome =
-            schema::vouch(&self.connection, self.node).and_then(|()| work(&self.connection));
+        let outcome = read_under_one_vouch(&mut self.connection, self.node, work);
         self.guard(outcome)
     }
 
@@ -610,6 +622,28 @@ impl Store {
         self.guard(outcome)
     }
 
+    /// Give a rolled-back referential-integrity failure the name it deserves.
+    ///
+    /// The store's own foreign keys are what reject a Session that is not
+    /// there. A Rust pre-check would give one invariant two owners, and the
+    /// rollback the constraint triggers is what proves a fact and the
+    /// projection it justifies share a transaction. Naming it afterwards costs
+    /// one lookup, on a path that has already failed.
+    fn name_unknown_session<T>(
+        &mut self,
+        outcome: Result<T, StateError>,
+        session: CorralSessionId,
+    ) -> Result<T, StateError> {
+        if matches!(
+            &outcome,
+            Err(StateError::Refused(Refusal::Constraint { .. }))
+        ) && self.session(session)?.is_none()
+        {
+            return Err(Refusal::UnknownSession(session).into());
+        }
+        outcome
+    }
+
     /// Remember a fatal conclusion, so nothing after it is answered normally.
     ///
     /// Only a fatal one: a refusal leaves the store exactly as it was, and
@@ -620,6 +654,52 @@ impl Store {
         }
         outcome
     }
+}
+
+/// Vouch and read inside one transaction.
+///
+/// Deferred rather than immediate: a read takes no writer lock. It does take a
+/// transaction, so the store cannot be replaced between the vouch and the read
+/// it authorizes — which is the only thing vouching is for.
+fn read_under_one_vouch<T>(
+    connection: &mut Connection,
+    node: NodeId,
+    work: impl FnOnce(&Connection) -> Result<T, StateError>,
+) -> Result<T, StateError> {
+    let transaction = connection.transaction()?;
+    schema::vouch(&transaction, node)?;
+    let answer = work(&transaction)?;
+    transaction.commit()?;
+    Ok(answer)
+}
+
+/// Refuse lineage that would close a loop.
+///
+/// The log is append-only and PR2 accepts no correction event, so a cycle
+/// written once could never be removed, and every consumer walking ancestry
+/// would have to invent its own depth cap. `SessionLineage::record` already
+/// refuses the one-step case for exactly this reason; only the store can see
+/// the longer ones.
+fn refuse_lineage_cycle(connection: &Connection, edge: SessionLineage) -> Result<(), StateError> {
+    let cycle = || {
+        StateError::from(Refusal::LineageWouldCycle {
+            child: edge.child(),
+            parent: edge.parent(),
+        })
+    };
+    let mut ancestor = edge.parent();
+    let mut seen = std::collections::HashSet::new();
+    while seen.insert(ancestor) {
+        if ancestor == edge.child() {
+            return Err(cycle());
+        }
+        match projection::lineage_of(connection, ancestor)? {
+            Some(edge) => ancestor = edge.parent(),
+            None => return Ok(()),
+        }
+    }
+    // The stored chain already loops, so nothing may be hung off it.
+    Err(cycle())
 }
 
 /// Decide and record in one transaction.
@@ -674,32 +754,22 @@ fn append(transaction: &Transaction<'_>, facts: &[SessionEvent]) -> Result<(), S
     Ok(())
 }
 
-/// The live Run this fact belongs to, or `None` when the store deliberately
-/// keeps no Run for it.
+/// The live Run this fact belongs to, or `None` when the log holds no Run to
+/// record it against.
 ///
-/// Three different situations reach here and only one of them is silence. The
-/// log holds a live Run — record. The log holds none and the association is
-/// only heuristic — the Run is the caller's live state and its facts stay out
-/// of the log. The log holds none and the association is strong enough that it
-/// would have — the caller is naming a Run this store was never told about,
-/// which is a refusal rather than a quiet success.
-fn live_run_to_record(
-    connection: &Connection,
-    run: RunId,
-    binding: BindingId,
-) -> Result<Option<Run>, StateError> {
+/// The store keeps no record of a Run it withheld, so it cannot tell one from
+/// a Run it was never told about — and must not try. The binding's assurance
+/// now says nothing about what it was when that Run started, so consulting it
+/// here would refuse the ordinary discover → confirm → exit sequence, where a
+/// Run whose start was withheld quite correctly keeps its later facts out of
+/// the log too (ADR 0002 D6).
+fn live_run_to_record(connection: &Connection, run: RunId) -> Result<Option<Run>, StateError> {
     match projection::recorded_run(connection, run)? {
         Some(recorded) if recorded.is_live() => Ok(Some(recorded)),
         // An episode ends once, and attachment cannot follow it. A second fact
         // here would contradict the outcome the log already states, and the log
         // is never rewritten.
         Some(_) => Err(Refusal::RunAlreadyEnded(run).into()),
-        None if require_binding(connection, binding)?
-            .assurance()
-            .may_assert_durable_fact() =>
-        {
-            Err(Refusal::UnknownRun(run).into())
-        }
         None => Ok(None),
     }
 }
@@ -720,16 +790,16 @@ fn refuse_second_control_capable_runtime_binding(
     if !candidate.is_control_capable_runtime_binding() {
         return Ok(());
     }
-    let existing = projection::bindings_of(connection, candidate.session())?
-        .into_iter()
-        .find(|binding| {
-            binding.id() != candidate.id() && binding.is_control_capable_runtime_binding()
-        });
+    let existing = projection::control_capable_runtime_binding(
+        connection,
+        candidate.session(),
+        candidate.id(),
+    )?;
     match existing {
         None => Ok(()),
         Some(existing) => Err(Refusal::ControlCapableRuntimeBindingExists {
             session: candidate.session(),
-            existing: existing.id(),
+            existing,
         }
         .into()),
     }
@@ -788,16 +858,12 @@ impl RecordedEvent {
 /// order alone would not place the two.
 fn read_events(
     connection: &Connection,
-    session: Option<CorralSessionId>,
+    session: CorralSessionId,
 ) -> Result<Vec<RecordedEvent>, StateError> {
-    let (filter, parameters): (&str, Vec<String>) = match session {
-        Some(session) => ("WHERE session_id = ?1", vec![session.to_string()]),
-        None => ("", Vec::new()),
-    };
-    let mut statement = connection.prepare(&format!(
-        "SELECT session_id, seq, kind, payload FROM session_events {filter} ORDER BY global_seq"
+    let mut statement = connection.prepare_cached(&format!(
+        "{EVENT_COLUMNS} WHERE session_id = ?1 ORDER BY global_seq"
     ))?;
-    let rows = statement.query_map(rusqlite::params_from_iter(parameters), decode_row)?;
+    let rows = statement.query_map(rusqlite::params![session.to_string()], decode_row)?;
 
     let mut events = Vec::new();
     for row in rows {
@@ -814,8 +880,7 @@ fn read_events(
 /// with the account's whole history — on the one operation whose purpose is
 /// recovery.
 fn replay(transaction: &Transaction<'_>) -> Result<(), StateError> {
-    let mut statement = transaction
-        .prepare("SELECT session_id, seq, kind, payload FROM session_events ORDER BY global_seq")?;
+    let mut statement = transaction.prepare(&format!("{EVENT_COLUMNS} ORDER BY global_seq"))?;
     let rows = statement.query_map([], decode_row)?;
     for row in rows {
         let (session, seq, kind, payload) = row?;
@@ -824,6 +889,9 @@ fn replay(transaction: &Transaction<'_>) -> Result<(), StateError> {
     }
     Ok(())
 }
+
+/// One shape for the log's rows, so a column added later is added once.
+const EVENT_COLUMNS: &str = "SELECT session_id, seq, kind, payload FROM session_events";
 
 type EventRow = (String, i64, String, String);
 

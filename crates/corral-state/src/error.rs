@@ -38,11 +38,15 @@ pub enum Refusal {
         detail: String,
     },
     UnknownBinding(BindingId),
-    /// A Run the log has never held, under a binding strong enough that it
-    /// would have. Distinct from a Run deliberately withheld as heuristic:
-    /// that one is a Run the store chose not to keep, this one is a Run it was
-    /// never told about.
-    UnknownRun(RunId),
+    UnknownSession(CorralSessionId),
+    /// Lineage that would close a loop. The log is append-only and PR2 accepts
+    /// no correction event, so a cycle written once could never be removed,
+    /// and every consumer walking ancestry would have to invent its own depth
+    /// cap.
+    LineageWouldCycle {
+        child: CorralSessionId,
+        parent: CorralSessionId,
+    },
     /// A Session's origin is recorded once. Recording a different parent would
     /// replace a fact rather than add one.
     LineageAlreadyRecorded {
@@ -183,7 +187,11 @@ impl fmt::Display for Refusal {
                 write!(f, "the store was held by another writer: {detail}")
             }
             Self::UnknownBinding(binding) => write!(f, "binding {binding} is not recorded"),
-            Self::UnknownRun(run) => write!(f, "run {run} is not recorded"),
+            Self::UnknownSession(session) => write!(f, "session {session} is not recorded"),
+            Self::LineageWouldCycle { child, parent } => write!(
+                f,
+                "recording session {child} as continuing {parent} would close a loop"
+            ),
             Self::LineageAlreadyRecorded {
                 child,
                 parent,

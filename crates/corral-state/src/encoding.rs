@@ -8,7 +8,8 @@
 use std::time::{Duration, SystemTime};
 
 use corral_core::{
-    Assurance, BindingKind, EvidenceSource, ExitCause, MalformedId, Provenance, RunEnd,
+    Assurance, BindingKind, CommandOutcome, EvidenceSource, ExitCause, MalformedId, Provenance,
+    RunEnd,
 };
 
 use crate::error::FatalState;
@@ -115,6 +116,25 @@ pub(crate) fn run_end_from_token(token: &str) -> Result<RunEnd, FatalState> {
         "exited-cause-unknown" => Ok(RunEnd::Exited(ExitCause::Unknown)),
         "unverifiable" => Ok(RunEnd::Unverifiable),
         other => Err(unreadable("a run end", other)),
+    }
+}
+
+/// What a command produced.
+///
+/// Deliberately not spelled the same as the `SessionCreated` *event* kind: one
+/// names a fact in the log, the other names a receipt's outcome, and a shared
+/// spelling would make a change to either look safe for both.
+pub(crate) fn command_outcome_token(outcome: CommandOutcome) -> &'static str {
+    match outcome {
+        CommandOutcome::SessionCreated(_) => "created-session",
+    }
+}
+
+pub(crate) fn command_outcome_is(token: &str) -> Result<(), FatalState> {
+    if token == "created-session" {
+        Ok(())
+    } else {
+        Err(unreadable("a command outcome", token))
     }
 }
 

@@ -26,7 +26,7 @@ struct TestStore {
 impl TestStore {
     fn new(name: &str) -> Self {
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let directory = PathBuf::from("/tmp").join(format!(
+        let directory = std::env::temp_dir().join(format!(
             "corral-state-{}-{unique}-{name}",
             std::process::id()
         ));
@@ -696,7 +696,7 @@ fn a_fact_and_the_projection_it_justifies_commit_together() {
 
     assert!(matches!(
         refusal,
-        StateError::Refused(Refusal::Constraint { .. })
+        StateError::Refused(Refusal::UnknownSession(_))
     ));
     assert_eq!(
         store.events_of(ghost).expect("readable"),
@@ -812,28 +812,100 @@ fn attachment_cannot_follow_an_end() {
     );
 }
 
-/// A Run the log never held, under a binding strong enough that it would have,
-/// is a caller naming something this store was never told about. Answering
-/// "withheld" would make that indistinguishable from a Run deliberately kept
-/// out of the log.
+/// Discover heuristically, confirm, then watch the runtime exit. The Run whose
+/// start was withheld keeps its end out of the log too — confirming an
+/// association later never promotes earlier heuristic runtime metadata into
+/// durable truth, and the store keeps no record of a withheld Run to change
+/// its mind about.
 #[test]
-fn a_fact_about_a_run_the_log_never_held_is_refused() {
-    let mut store = TestStore::new("unknown-run");
-    let (_, binding) = managed_session(&mut store, "run-a");
-    let stranger = Run::started(
-        RunId::mint(),
-        CorralSessionId::mint(),
-        binding,
-        OccurrenceTime::Unknown,
-    );
+fn confirming_an_association_does_not_make_an_earlier_run_recordable() {
+    let mut store = TestStore::new("withheld-then-confirmed");
+    let node = store.node();
+    let SessionResolution::Created { session, binding } = store
+        .resolve_or_create_session(
+            key(node, BindingKind::Runtime, "pid-77"),
+            Provenance::Discovered,
+            suspected_runtime(),
+            instant(10),
+        )
+        .expect("resolved")
+    else {
+        panic!("a new external identity is a new Session");
+    };
+    let withheld = store
+        .record_run_started(
+            binding.id(),
+            EvidenceSource::NodeRuntimeObservation,
+            OccurrenceTime::Unknown,
+        )
+        .expect("a Run exists");
+    store
+        .confirm_binding(
+            binding.id(),
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+        )
+        .expect("confirmed");
+
+    let ended = store
+        .record_run_ended(
+            withheld.run(),
+            RunEnd::Exited(ExitCause::Completed),
+            OccurrenceTime::Authoritative(instant(50)),
+        )
+        .expect("an ordinary sequence, not a refusal");
+
+    assert_eq!(ended, Durability::Withheld);
+    assert_eq!(store.runs_of(session.id()).expect("readable"), Vec::new());
+}
+
+/// A lineage cycle can never be removed from an append-only log with no
+/// correction event, and every consumer walking ancestry would have to invent
+/// its own depth cap.
+#[test]
+fn lineage_that_would_close_a_loop_is_refused() {
+    let mut store = TestStore::new("cycle");
+    let (a, _) = managed_session(&mut store, "run-a");
+    let (b, _) = managed_session(&mut store, "run-b");
+    let (c, _) = managed_session(&mut store, "run-c");
+    store
+        .record_fork(SessionLineage::record(b, a, Assurance::Deterministic).expect("recordable"))
+        .expect("recorded");
+    store
+        .record_fork(SessionLineage::record(c, b, Assurance::Deterministic).expect("recordable"))
+        .expect("recorded");
 
     let refusal = store
-        .record_run_ended(&stranger, RunEnd::Unverifiable, OccurrenceTime::Unknown)
+        .record_fork(SessionLineage::record(a, c, Assurance::Deterministic).expect("recordable"))
         .expect_err("refused");
 
     assert!(matches!(
         refusal,
-        StateError::Refused(Refusal::UnknownRun(_))
+        StateError::Refused(Refusal::LineageWouldCycle { .. })
+    ));
+    assert_eq!(store.lineage_of(a).expect("readable"), None);
+}
+
+/// The store's own foreign keys reject a Session that is not there, and the
+/// refusal says which Session rather than handing back an engine message.
+#[test]
+fn naming_a_session_the_store_does_not_hold_is_refused_by_name() {
+    let mut store = TestStore::new("unknown-session");
+    let node = store.node();
+    let ghost = CorralSessionId::mint();
+
+    let refusal = store
+        .bind(
+            ghost,
+            key(node, BindingKind::ProviderSession, "sess-9"),
+            Provenance::Discovered,
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+            instant(10),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::UnknownSession(named)) if named == ghost
     ));
 }
 
@@ -1245,6 +1317,23 @@ fn a_store_held_by_another_writer_is_waited_for() {
 
     assert_eq!(sessions, Vec::new());
     released.join().expect("the other writer finished");
+}
+
+/// The conclusion has to outlive whoever reached it: a daemon reads its exit
+/// status from here, and a task cancelled mid-shutdown must not be able to
+/// take the answer with it.
+#[test]
+fn a_store_that_stopped_vouching_says_so_afterwards() {
+    let mut store = TestStore::new("stopped-vouching");
+    assert!(!store.stopped_vouching());
+    let replacement = NodeId::mint();
+    store.behind_the_daemons_back(&format!(
+        "UPDATE node_identity SET node_id = '{replacement}'"
+    ));
+
+    store.sessions().expect_err("fatal");
+
+    assert!(store.stopped_vouching());
 }
 
 /// A store that is not the schema this build knows is refused rather than

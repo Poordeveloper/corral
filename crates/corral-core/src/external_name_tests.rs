@@ -21,7 +21,16 @@ fn a_control_character_is_refused() {
 /// call it a control character — and it reorders every id printed after it.
 #[test]
 fn a_character_that_reorders_what_follows_is_refused() {
-    for hidden in ['\u{202e}', '\u{200b}', '\u{2066}', '\u{feff}'] {
+    for hidden in [
+        '\u{202e}',
+        '\u{200b}',
+        '\u{2066}',
+        '\u{feff}',
+        '\u{061c}',
+        '\u{00ad}',
+        '\u{e0041}',
+        '\u{2028}',
+    ] {
         assert_eq!(
             ExternalId::new(format!("sess-{hidden}exe"))
                 .expect_err("refused")
