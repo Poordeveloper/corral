@@ -1,7 +1,7 @@
 ---
 status: done
 class: C
-writes: [corral-core, corral-state, corrald, corral-rendezvous, canonical-docs]
+writes: [corral-core, corral-state, corrald, corral-rendezvous, corral-protocol, canonical-docs]
 reads: [docs/adr/0002-resume-lineage.md, docs/decisions/2026-08-22-pr2-resume-lineage-acceptance.md]
 ---
 
@@ -18,11 +18,16 @@ receipts — the substrate PR3 and PR4 attach to (ROADMAP §3).
 No PTY (PR3), TUI (PR4), providers or hooks (PR5+), discovery (PR7),
 attention behaviour (PR8), history index (M2), remote.
 
-**Zero wire change.** No RPC, no `session.list` fields, no session wire
-shape, no mutating method, no stream/event vocabulary. `session.list`
-keeps returning what it can truthfully provide; if that is `[]`, it stays
-`[]`. `corral-protocol` is not in `writes:` — nothing is pre-staged for
-PR3 (acceptance record Q4).
+**Zero wire change, with one accepted exception.** No RPC, no
+`session.list` fields, no session wire shape, no mutating method, no
+stream/event vocabulary. `session.list` keeps returning what it can
+truthfully provide; if that is `[]`, it stays `[]`. Nothing is pre-staged
+for PR3 (acceptance record Q4).
+
+The exception, ruled 2026-08-23: one additive `ErrorCode` discriminant,
+`busy`, so a transient store refusal is answered rather than dropping the
+connection. Decision:
+`docs/decisions/2026-08-23-pr2-transient-state-error-code.md`.
 
 Also out of scope, each awaiting the phase with a real producer *and*
 consumer: lineage proposals and manual-confirmation flows (Q5); binding
@@ -139,5 +144,6 @@ rather than returning trusted-looking state.
   adversarial — and their fix reviewed too. PR1 shipped a hang and a
   fabricated runtime fact by reviewing after merge.
 - `DURABLE-APPROVED-BY:` present for the schema and event diff.
-- No wire diff: `crates/corral-protocol` untouched.
+- No wire diff beyond the accepted `busy` error code; `corral-protocol`
+  gains nothing else.
 - Plan moves to done/ on land.
