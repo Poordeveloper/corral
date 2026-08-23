@@ -520,6 +520,10 @@ terms: `PRODUCT.md` §8.
 | **Facet** | an independently available aspect of a Session: history, runtime, control, artifacts, attention |
 | **Binding** | an edge from a Session to an external identity, carrying provenance, assurance, evidence source, and observation time |
 | **Assurance** | discrete binding trust: Deterministic, Attested, Manual, Heuristic. Heuristic never controls and never notifies |
+| **Provenance** | how a binding came to exist — Corral created it, discovered it, or the user linked it. Never re-evaluated, unlike the evidence supporting it |
+| **Control eligibility** | whether control may be driven through a binding. Resolved from that binding's assurance and nowhere else — never from a Run |
+| **Occurrence time** | when a runtime fact happened, as against the event sequence, which is when Corral accepted it. Recorded only when authoritative runtime evidence supports it; a first-observed time is never one |
+| **Withheld fact** | a fact deliberately kept out of the durable log because the association it would assert is only heuristically supported. The thing it describes still exists |
 | **Evidence** | a status observation with source, `observed_at`, and assurance. Authority is qualified by freshness |
 | **AttentionItem** | a structured reason a Session needs the user, with source, freshness, and optional action |
 | **NeedsInputRequest** | a reserved answerable entity: a specific blocked interaction with provider/tool context and allowed actions |
