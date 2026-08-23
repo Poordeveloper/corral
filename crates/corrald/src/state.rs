@@ -1,7 +1,8 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use corral_state::{FatalState, Refusal, StateError, Store};
+use corral_state::{FatalState, StateError, Store};
 
 /// What the registry said when asked whether it can still vouch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,6 +24,10 @@ pub enum Vouched {
 /// other connection, the idle watchdog, and the signal handler along with it.
 pub struct DaemonState {
     store: Mutex<Store>,
+    /// Set when a store call could not complete at all. The store latches its
+    /// own conclusions, but it never saw this one, and the exit status is read
+    /// from here.
+    unreachable: AtomicBool,
 }
 
 impl DaemonState {
@@ -34,6 +39,7 @@ impl DaemonState {
     pub fn open(registry: &Path) -> Result<Self, StateError> {
         Ok(Self {
             store: Mutex::new(Store::open(registry)?),
+            unreachable: AtomicBool::new(false),
         })
     }
 
@@ -43,16 +49,19 @@ impl DaemonState {
     /// Protocol 1 assigns no session encoding, so nothing this build serves
     /// carries a fact out of the store — but an empty list is still a claim
     /// about it, and this is the question behind that claim.
+    /// Contention is the only refusal this call can produce, and a refusal
+    /// leaves the store intact either way — so no refusal ends the daemon.
+    /// Only a store that cannot vouch does.
+    ///
+    /// The mapping is this call's, not a shared one: a mutating method's
+    /// refusals are mostly permanent, and telling a client to retry one of
+    /// those would be worse than saying nothing. The phase that serves one
+    /// writes its own.
     pub async fn vouch(self: &Arc<Self>) -> Result<Vouched, StateError> {
         match self.off_the_reactor(Store::vouch).await {
             Ok(()) => Ok(Vouched::Yes),
-            Err(StateError::Refused(Refusal::Busy { .. })) => Ok(Vouched::NotNow),
-            // Contention is the only refusal this call can produce. Any other
-            // means this build's understanding of the store is wrong, which is
-            // not a state to answer normally from — and it keeps the caller
-            // from inheriting a catch-all that would tell a client to retry a
-            // request that can never succeed.
-            Err(other) => Err(other),
+            Err(StateError::Refused(_)) => Ok(Vouched::NotNow),
+            Err(fatal) => Err(fatal),
         }
     }
 
@@ -64,7 +73,7 @@ impl DaemonState {
     /// dropped mid-shutdown, or a daemon that stopped over an untrusted store
     /// could still exit as though nothing happened.
     pub fn stopped_vouching(&self) -> bool {
-        self.lock().stopped_vouching()
+        self.unreachable.load(Ordering::SeqCst) || self.lock().stopped_vouching()
     }
 
     /// Run one store call on the blocking pool.
@@ -77,9 +86,14 @@ impl DaemonState {
             Ok(outcome) => outcome,
             // The call did not complete, so nothing can be said about the
             // store — which is the same position as a store that cannot vouch.
-            Err(source) => Err(StateError::Fatal(FatalState::Storage {
-                detail: format!("a registry call did not complete: {source}"),
-            })),
+            // The store never saw this, so it is recorded here instead; an exit
+            // status read from the store alone would report a clean stop.
+            Err(source) => {
+                self.unreachable.store(true, Ordering::SeqCst);
+                Err(StateError::Fatal(FatalState::Storage {
+                    detail: format!("a registry call did not complete: {source}"),
+                }))
+            }
         }
     }
 

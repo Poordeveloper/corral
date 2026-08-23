@@ -17,8 +17,6 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
-# The daemon owns shared session truth, so it speaks the domain directly.
-corral-core = { workspace = true }
 corral-protocol = { workspace = true }
 corral-rendezvous = { workspace = true }
 corral-state = { workspace = true }

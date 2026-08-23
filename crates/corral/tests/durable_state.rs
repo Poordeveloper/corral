@@ -68,6 +68,46 @@ fn a_ready_daemon_has_already_opened_its_registry() {
     assert!(stdout(&output).contains("protocol"));
 }
 
+/// The one behaviour the zero-wire exception was granted for: a transient
+/// refusal is answered rather than dropping the caller, and the connection
+/// stays usable (`docs/decisions/2026-08-23-pr2-transient-state-error-code.md`).
+///
+/// Holding the store costs the daemon its whole busy timeout by construction,
+/// so this test is deliberately one of the slow ones.
+#[test]
+fn a_registry_held_by_another_writer_is_answered_not_dropped() {
+    let account = TestAccount::new("held");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+
+    // Deliberately the second opener: something else holding the store is the
+    // condition under test.
+    #[allow(clippy::disallowed_methods)]
+    let holder = rusqlite::Connection::open(account.registry()).expect("open the registry");
+    holder
+        .execute_batch("BEGIN EXCLUSIVE")
+        .expect("hold the registry");
+    let answer = client
+        .request(1, "session.list", None)
+        .expect("the daemon answered rather than closing");
+    holder
+        .execute_batch("COMMIT")
+        .expect("release the registry");
+
+    assert_eq!(
+        answer["outcome"]["error"]["code"], "busy",
+        "expected a retryable answer, got {answer}"
+    );
+    let after = client
+        .request(2, "session.list", None)
+        .expect("the connection is still usable");
+    assert_eq!(
+        after["outcome"]["result"],
+        serde_json::json!({"sessions": []})
+    );
+}
+
 /// Once the store stops being the one the daemon validated, the daemon stops
 /// serving rather than answering from it. The caller sees the connection go,
 /// never a normal-looking empty list.
