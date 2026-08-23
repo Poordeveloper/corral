@@ -5,7 +5,21 @@ use super::*;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-fn registry(name: &str) -> (Arc<DaemonState>, PathBuf) {
+/// A registry on a real file, cleaned up however the test ends — one of these
+/// tests is about a panic, and a scratch directory left behind by a failing
+/// run is the one nobody goes back for.
+struct Registry {
+    state: Arc<DaemonState>,
+    directory: PathBuf,
+}
+
+impl Drop for Registry {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn registry(name: &str) -> Registry {
     let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
     let directory = std::env::temp_dir().join(format!(
         "corrald-state-{}-{unique}-{name}",
@@ -14,7 +28,10 @@ fn registry(name: &str) -> (Arc<DaemonState>, PathBuf) {
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("create the scratch directory");
     let state = DaemonState::open(&directory.join("registry.sqlite3")).expect("open");
-    (Arc::new(state), directory)
+    Registry {
+        state: Arc::new(state),
+        directory,
+    }
 }
 
 /// A registry call that never returns leaves nothing recorded in the store, so
@@ -22,27 +39,27 @@ fn registry(name: &str) -> (Arc<DaemonState>, PathBuf) {
 /// remembers it itself.
 #[tokio::test]
 async fn a_registry_call_that_cannot_complete_stops_the_daemon_vouching() {
-    let (state, directory) = registry("panicking-call");
-    assert!(!state.stopped_vouching());
+    let registry = registry("panicking-call");
+    assert!(!registry.state.stopped_vouching());
 
-    let outcome: Result<(), StateError> =
-        state.off_the_reactor(|_| panic!("a store call died")).await;
+    let outcome: Result<(), StateError> = registry
+        .state
+        .off_the_reactor(|_| panic!("a store call died"))
+        .await;
 
     assert!(outcome.expect_err("fatal").is_fatal());
     assert!(
-        state.stopped_vouching(),
+        registry.state.stopped_vouching(),
         "the conclusion outlives the call that could not reach the store"
     );
-    let _ = std::fs::remove_dir_all(&directory);
 }
 
 /// The ordinary path leaves it alone.
 #[tokio::test]
 async fn a_healthy_registry_keeps_vouching() {
-    let (state, directory) = registry("healthy");
+    let registry = registry("healthy");
 
-    assert_eq!(state.vouch().await.expect("vouched"), Vouched::Yes);
+    assert_eq!(registry.state.vouch().await.expect("vouched"), Vouched::Yes);
 
-    assert!(!state.stopped_vouching());
-    let _ = std::fs::remove_dir_all(&directory);
+    assert!(!registry.state.stopped_vouching());
 }
