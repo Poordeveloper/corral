@@ -21,13 +21,23 @@ use crate::encoding::{
     assurance_from_token, assurance_token, binding_kind_from_token, binding_kind_token,
     command_outcome_is, command_outcome_token, evidence_source_from_token, evidence_source_token,
     from_millis, millis, provenance_from_token, provenance_token, run_end_from_token,
-    run_end_token, unreadable,
+    run_end_token,
 };
 use crate::error::{FatalState, StateError};
 use crate::event::SessionEvent;
 use crate::schema;
 
-pub(crate) fn apply(tx: &Transaction<'_>, event: &SessionEvent) -> Result<(), StateError> {
+/// Apply one fact, at the log position that holds it.
+///
+/// `accepted_seq` is the log's own `global_seq` for this fact — a durable
+/// number, and the only ordering a projection may lean on: an implicit rowid
+/// is renumbered by a VACUUM and reused after a delete, so a position derived
+/// from one would stop matching what a replay produces.
+pub(crate) fn apply(
+    tx: &Transaction<'_>,
+    event: &SessionEvent,
+    accepted_seq: i64,
+) -> Result<(), StateError> {
     match event {
         SessionEvent::SessionCreated {
             session,
@@ -82,12 +92,14 @@ pub(crate) fn apply(tx: &Transaction<'_>, event: &SessionEvent) -> Result<(), St
             started_at,
         } => {
             tx.execute(
-                "INSERT INTO runs (id, session_id, runtime_binding_id, started_at_ms)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO runs
+                     (id, session_id, runtime_binding_id, accepted_seq, started_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     run.to_string(),
                     session.to_string(),
                     runtime_binding.to_string(),
+                    accepted_seq,
                     started_at.map(millis).transpose()?,
                 ],
             )?;
@@ -252,21 +264,27 @@ pub(crate) fn bindings_of(
 /// within the Session (ADR 0002 D1), so a Run whose start is learned late
 /// takes the place its occurrence earns instead of the place its acceptance
 /// happened to fall in. Runs whose start the runtime could not state come
-/// last, in acceptance order, because nothing better is known about them.
+/// last, ordered by when the log accepted them, because nothing better is
+/// known about them.
 pub(crate) fn runs_of(
     connection: &Connection,
     session: CorralSessionId,
 ) -> Result<Vec<Run>, StateError> {
     let mut statement = connection.prepare(&format!(
         "{RUN_COLUMNS} WHERE session_id = ?1
-         ORDER BY started_at_ms IS NULL, started_at_ms, rowid"
+         ORDER BY started_at_ms IS NULL, started_at_ms, accepted_seq"
     ))?;
     let rows = statement.query_map(params![session.to_string()], run_row)?;
     let mut runs = Vec::new();
     for (position, row) in rows.enumerate() {
-        let position = u32::try_from(position.saturating_add(1))
-            .map_err(|_| unreadable("a run position", "more Runs than can be numbered"))?;
-        runs.push(run_from(row?)?.with_ordinal(RunOrdinal::from_position(position)));
+        let run = run_from(row?)?;
+        // A number too large to hold leaves the Run unnumbered. The ordinal is
+        // display data (ADR 0002 D1); a Session with four billion Runs is a
+        // presentation problem, not a reason to stop vouching for the store.
+        runs.push(match u32::try_from(position.saturating_add(1)) {
+            Ok(position) => run.with_ordinal(RunOrdinal::from_position(position)),
+            Err(_) => run,
+        });
     }
     Ok(runs)
 }

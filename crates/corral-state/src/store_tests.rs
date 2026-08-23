@@ -902,11 +902,7 @@ fn a_withheld_run_becomes_durable_under_its_own_identity() {
         )
         .expect("confirmed");
     let recorded = store
-        .record_withheld_run_started(
-            withheld.run(),
-            EvidenceSource::NodeRuntimeObservation,
-            OccurrenceTime::Authoritative(instant(20)),
-        )
+        .record_withheld_run_started(withheld.run(), EvidenceSource::NodeRuntimeObservation)
         .expect("appended now");
 
     assert_eq!(recorded.durability(), Durability::Recorded);
@@ -940,6 +936,73 @@ fn a_withheld_run_becomes_durable_under_its_own_identity() {
     );
 }
 
+/// Q10's own example: the Run started and ended while the binding was still
+/// heuristic, and the association was confirmed afterwards — by which time a
+/// new episode is normally running. Both of its facts append together, and the
+/// live episode does not block a past one.
+#[test]
+fn a_withheld_run_that_already_ended_appends_whole() {
+    let mut store = TestStore::new("ended-backfill");
+    let node = store.node();
+    let SessionResolution::Created { session, binding } = store
+        .resolve_or_create_session(
+            key(node, BindingKind::Runtime, "pid-77"),
+            Provenance::Discovered,
+            suspected_runtime(),
+            instant(10),
+        )
+        .expect("resolved")
+    else {
+        panic!("a new external identity is a new Session");
+    };
+    let past = store
+        .record_run_started(
+            binding.id(),
+            EvidenceSource::NodeRuntimeObservation,
+            OccurrenceTime::Authoritative(instant(20)),
+        )
+        .expect("a Run exists");
+    let past = past.run().clone().ended(
+        RunEnd::Exited(ExitCause::Completed),
+        OccurrenceTime::Authoritative(instant(30)),
+    );
+    store
+        .confirm_binding(
+            binding.id(),
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+        )
+        .expect("confirmed");
+    let live = store
+        .record_run_started(
+            binding.id(),
+            EvidenceSource::NodeRuntimeObservation,
+            OccurrenceTime::Authoritative(instant(40)),
+        )
+        .expect("recorded");
+
+    let appended = store
+        .record_withheld_run_started(&past, EvidenceSource::NodeRuntimeObservation)
+        .expect("a past episode is not blocked by the present one");
+
+    assert_eq!(appended.durability(), Durability::Recorded);
+    assert_eq!(
+        appended.run().end(),
+        Some(RunEnd::Exited(ExitCause::Completed)),
+        "the end came back with the start"
+    );
+    let runs = store.runs_of(session.id()).expect("readable");
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].id(), past.id(), "the earlier episode is first");
+    assert!(!runs[0].is_live(), "and it is not left running");
+    assert_eq!(runs[1].id(), live.run().id());
+    let stream = kinds(&store.events_of(session.id()).expect("readable"));
+    assert_eq!(
+        &stream[stream.len() - 2..],
+        ["run-started", "run-ended"],
+        "one transaction, both facts"
+    );
+}
+
 /// A Run the log already holds has no start still waiting to be appended.
 #[test]
 fn a_recorded_run_cannot_have_its_start_appended_again() {
@@ -954,11 +1017,7 @@ fn a_recorded_run_cannot_have_its_start_appended_again() {
         .expect("recorded");
 
     let refusal = store
-        .record_withheld_run_started(
-            run.run(),
-            EvidenceSource::CorralConstructed,
-            OccurrenceTime::Authoritative(instant(21)),
-        )
+        .record_withheld_run_started(run.run(), EvidenceSource::CorralConstructed)
         .expect_err("refused");
 
     assert!(matches!(
@@ -1118,11 +1177,7 @@ fn a_backfilled_run_takes_the_position_its_occurrence_earns() {
         .expect("recorded");
 
     store
-        .record_withheld_run_started(
-            early.run(),
-            EvidenceSource::NodeRuntimeObservation,
-            OccurrenceTime::Authoritative(instant(20)),
-        )
+        .record_withheld_run_started(early.run(), EvidenceSource::NodeRuntimeObservation)
         .expect("appended now");
 
     let runs = store.runs_of(session.id()).expect("readable");
@@ -1153,16 +1208,13 @@ fn a_withheld_run_cannot_be_filed_under_an_association_it_does_not_claim() {
     );
 
     let refusal = store
-        .record_withheld_run_started(
-            &misfiled,
-            EvidenceSource::CorralConstructed,
-            OccurrenceTime::Authoritative(instant(20)),
-        )
+        .record_withheld_run_started(&misfiled, EvidenceSource::CorralConstructed)
         .expect_err("refused");
 
     assert!(matches!(
         refusal,
-        StateError::Refused(Refusal::UnknownSession(named)) if named == stranger
+        StateError::Refused(Refusal::RunClaimsAnotherSession { claimed, .. })
+            if claimed == stranger
     ));
 }
 
@@ -1437,6 +1489,49 @@ fn every_durable_transition(store: &mut Store) -> Vec<CommandId> {
             OccurrenceTime::Unknown,
         )
         .expect("recorded");
+
+    // A Session whose read order differs from its acceptance order, so the
+    // replay above proves the position rule and not just the row count.
+    let SessionResolution::Created {
+        binding: suspected, ..
+    } = store
+        .resolve_or_create_session(
+            key(node, BindingKind::Runtime, "pid-77"),
+            Provenance::Discovered,
+            suspected_runtime(),
+            instant(30),
+        )
+        .expect("resolved")
+    else {
+        panic!("a new external identity is a new Session");
+    };
+    let withheld = store
+        .record_run_started(
+            suspected.id(),
+            EvidenceSource::NodeRuntimeObservation,
+            OccurrenceTime::Authoritative(instant(31)),
+        )
+        .expect("a Run exists");
+    let withheld = withheld.run().clone().ended(
+        RunEnd::Exited(ExitCause::Failed),
+        OccurrenceTime::Authoritative(instant(32)),
+    );
+    store
+        .confirm_binding(
+            suspected.id(),
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+        )
+        .expect("confirmed");
+    store
+        .record_run_started(
+            suspected.id(),
+            EvidenceSource::NodeRuntimeObservation,
+            OccurrenceTime::Authoritative(instant(60)),
+        )
+        .expect("recorded");
+    store
+        .record_withheld_run_started(&withheld, EvidenceSource::NodeRuntimeObservation)
+        .expect("appended after the Run that started later");
 
     let SessionResolution::Created {
         session: observed,

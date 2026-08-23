@@ -58,6 +58,14 @@ pub enum Refusal {
     /// The log already holds this Run, so its start is not a fact still
     /// waiting to be appended.
     RunAlreadyRecorded(RunId),
+    /// A Run brought back for appending names a Session its runtime binding
+    /// does not. Distinct from an unknown Session: both may exist, and the
+    /// problem is that they disagree.
+    RunClaimsAnotherSession {
+        run: RunId,
+        claimed: CorralSessionId,
+        binds: CorralSessionId,
+    },
     /// Lineage that would close a loop. The log is append-only and PR2 accepts
     /// no correction event, so a cycle written once could never be removed,
     /// and every consumer walking ancestry would have to invent its own depth
@@ -216,6 +224,14 @@ impl fmt::Display for Refusal {
                 "{assurance:?} evidence does not confirm binding {binding}"
             ),
             Self::RunAlreadyRecorded(run) => write!(f, "run {run} is already recorded"),
+            Self::RunClaimsAnotherSession {
+                run,
+                claimed,
+                binds,
+            } => write!(
+                f,
+                "run {run} claims session {claimed}, but its runtime binding names {binds}"
+            ),
             Self::LineageWouldCycle { child, parent } => write!(
                 f,
                 "recording session {child} as continuing {parent} would close a loop"

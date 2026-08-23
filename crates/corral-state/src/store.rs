@@ -50,6 +50,16 @@ pub enum Durability {
     Withheld,
 }
 
+/// What the caller knows about a Run the store withheld.
+///
+/// Not the `Run` itself: the closure that records it outlives the borrow, and
+/// these are the only parts of one the store may act on.
+struct WithheldRun {
+    id: RunId,
+    session: CorralSessionId,
+    end: Option<(RunEnd, OccurrenceTime)>,
+}
+
 /// A Run, and whether the log took its start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordedRun {
@@ -444,32 +454,46 @@ impl Store {
         self.start_run(runtime_binding, None, occurrence, started)
     }
 
-    /// Append the start of a Run the store withheld while its association was
+    /// Append the facts of a Run the store withheld while its association was
     /// only heuristic.
     ///
-    /// This is D6's other half: the facts become durable when the association
-    /// does, appended then and never inserted into an earlier seq, carrying
-    /// the occurrence the runtime still supports.
+    /// This is D6's other half: they become durable when the association does,
+    /// appended then and never inserted into an earlier seq, carrying the
+    /// occurrences the runtime still supports. A Run that already ended is
+    /// appended whole — start and end in one transaction — because Q10 speaks
+    /// of both, and a start committed without its end would leave the log
+    /// holding an episode that never finishes.
     ///
-    /// The caller brings the Run back whole rather than as a bare id, because
-    /// the store kept no record of it and has nothing else to check it
-    /// against. What it can check, it does: the Run names the binding the fact
-    /// will be filed under, and the Session that binding names — so a Run
-    /// cannot be attached to an association it does not itself claim.
+    /// The caller brings the Run back rather than a bare id, because the store
+    /// kept no record of it and has nothing else to check it against. What it
+    /// can check, it does: the Run names the binding the facts are filed
+    /// under, and the Session that binding names, so a Run cannot be attached
+    /// to an association it does not itself claim. Its own occurrence times
+    /// are used, so there is no second source to disagree with it.
     pub fn record_withheld_run_started(
         &mut self,
         run: &Run,
         occurrence: EvidenceSource,
-        started: OccurrenceTime,
     ) -> Result<RecordedRun, StateError> {
-        let (id, binding, session) = (run.id(), run.runtime_binding(), run.session());
-        self.start_run(binding, Some((id, session)), occurrence, started)
+        let withheld = WithheldRun {
+            id: run.id(),
+            session: run.session(),
+            end: run
+                .end()
+                .map(|end| (end, run.ended_at().unwrap_or(OccurrenceTime::Unknown))),
+        };
+        self.start_run(
+            run.runtime_binding(),
+            Some(withheld),
+            occurrence,
+            run.started_at(),
+        )
     }
 
     fn start_run(
         &mut self,
         runtime_binding: BindingId,
-        withheld: Option<(RunId, CorralSessionId)>,
+        withheld: Option<WithheldRun>,
         occurrence: EvidenceSource,
         started: OccurrenceTime,
     ) -> Result<RecordedRun, StateError> {
@@ -486,24 +510,33 @@ impl Store {
                 }
                 .into());
             }
-            let id = match withheld {
-                None => RunId::mint(),
-                Some((id, claimed)) => {
-                    if projection::recorded_run(transaction, id)?.is_some() {
-                        return Err(Refusal::RunAlreadyRecorded(id).into());
+
+            let session = binding.session();
+            let (id, ending) = match withheld {
+                None => (RunId::mint(), None),
+                Some(withheld) => {
+                    if projection::recorded_run(transaction, withheld.id)?.is_some() {
+                        return Err(Refusal::RunAlreadyRecorded(withheld.id).into());
                     }
-                    if claimed != binding.session() {
-                        return Err(Refusal::UnknownSession(claimed).into());
+                    if withheld.session != session {
+                        return Err(Refusal::RunClaimsAnotherSession {
+                            run: withheld.id,
+                            claimed: withheld.session,
+                            binds: session,
+                        }
+                        .into());
                     }
-                    id
+                    (withheld.id, withheld.end)
                 }
             };
 
-            // One runtime runs one episode at a time. The log can only speak
-            // for the Runs it holds — a Run withheld as heuristic is the
-            // caller's live state, and staying out of this question is the
-            // same reason it stays out of the log.
-            if let Some(live) = projection::live_run_of_binding(transaction, runtime_binding)? {
+            // One runtime runs one episode at a time — a rule about episodes
+            // that overlap. An episode that already ended overlaps nothing, so
+            // appending a past one is not blocked by the present one; that is
+            // the ordinary shape after a heuristic discovery is confirmed.
+            if ending.is_none()
+                && let Some(live) = projection::live_run_of_binding(transaction, runtime_binding)?
+            {
                 return Err(Refusal::RunAlreadyLive {
                     binding: runtime_binding,
                     run: live,
@@ -511,36 +544,38 @@ impl Store {
                 .into());
             }
 
-            let session = binding.session();
-            let run = Run::started(id, session, runtime_binding, started);
+            let mut run = Run::started(id, session, runtime_binding, started);
+            let mut facts = vec![SessionEvent::RunStarted {
+                session,
+                run: id,
+                runtime_binding,
+                started_at: started.authoritative(),
+            }];
+            if let Some((end, at)) = ending {
+                let at = as_stored_occurrence(at)?;
+                run = run.ended(end, at);
+                facts.push(SessionEvent::RunEnded {
+                    session,
+                    run: id,
+                    end,
+                    ended_at: at.authoritative(),
+                });
+            }
+
             if !binding.assurance().may_assert_durable_fact() {
-                // Unnumbered on purpose: the store numbers the Runs it keeps,
-                // and a number it has not kept would name a position another
-                // Run already occupies.
+                // Unnumbered on purpose: a Run's position is read off the Runs
+                // its Session holds, and the store holds none for this one.
                 return Ok(Written::nothing_to_record(RecordedRun {
                     run,
                     durability: Durability::Withheld,
                 }));
             }
-
-            // Saturating rather than wrapping: past four billion Runs the
-            // number stops being useful, and a wrapped one would name a Run at
-            // the top of the list.
-            // No ordinal here. A Run's position is read off the Runs its
-            // Session has, in the order they happened — one owner, and a Run
-            // whose start is learned late takes the place its occurrence
-            // earns rather than the place its acceptance fell in.
             Ok(Written::recording(
                 RecordedRun {
-                    run: run.clone(),
+                    run,
                     durability: Durability::Recorded,
                 },
-                vec![SessionEvent::RunStarted {
-                    session,
-                    run: run.id(),
-                    runtime_binding,
-                    started_at: started.authoritative(),
-                }],
+                facts,
             ))
         })
     }
@@ -832,7 +867,10 @@ fn append(transaction: &Transaction<'_>, facts: &[SessionEvent]) -> Result<(), S
                 recorded_at,
             ],
         )?;
-        projection::apply(transaction, event)?;
+        // The log position this fact just took. The projection orders by it,
+        // so what a live write produces and what a replay produces are the
+        // same number rather than two guesses at the same idea.
+        projection::apply(transaction, event, transaction.last_insert_rowid())?;
     }
     Ok(())
 }
@@ -952,7 +990,7 @@ fn read_events(
 
     let mut events = Vec::new();
     for row in rows {
-        let (session, seq, kind, payload) = row?;
+        let (_, session, seq, kind, payload) = row?;
         events.push(recorded_event(session, seq, &kind, &payload)?);
     }
     Ok(events)
@@ -968,20 +1006,26 @@ fn replay(transaction: &Transaction<'_>) -> Result<(), StateError> {
     let mut statement = transaction.prepare(&format!("{EVENT_COLUMNS} ORDER BY global_seq"))?;
     let rows = statement.query_map([], decode_row)?;
     for row in rows {
-        let (session, seq, kind, payload) = row?;
+        let (accepted_seq, session, seq, kind, payload) = row?;
         let recorded = recorded_event(session, seq, &kind, &payload)?;
-        projection::apply(transaction, &recorded.event)?;
+        projection::apply(transaction, &recorded.event, accepted_seq)?;
     }
     Ok(())
 }
 
 /// One shape for the log's rows, so a column added later is added once.
-const EVENT_COLUMNS: &str = "SELECT session_id, seq, kind, payload FROM session_events";
+const EVENT_COLUMNS: &str = "SELECT global_seq, session_id, seq, kind, payload FROM session_events";
 
-type EventRow = (String, i64, String, String);
+type EventRow = (i64, String, i64, String, String);
 
 fn decode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
-    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
 }
 
 fn recorded_event(

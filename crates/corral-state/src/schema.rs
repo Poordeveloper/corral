@@ -20,7 +20,7 @@ use crate::error::{FatalState, StateError};
 /// No migration exists yet: `STORAGE_EPOCH` is `dev`, development databases
 /// are disposable, and the first migration is written by the change that
 /// needs one. A store at any other version is refused rather than guessed at.
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 
 /// How long an operation waits for another writer before giving up.
 ///
@@ -85,6 +85,11 @@ CREATE TABLE runs (
     id                 TEXT PRIMARY KEY,
     session_id         TEXT NOT NULL REFERENCES sessions(id),
     runtime_binding_id TEXT NOT NULL REFERENCES bindings(id),
+    -- The log position that put this row here. A Run's place in its Session is
+    -- read off occurrence time, and this settles ties between Runs whose start
+    -- the runtime could not state — from a fact the log holds, not from an
+    -- implicit rowid a VACUUM may renumber.
+    accepted_seq       INTEGER NOT NULL,
     started_at_ms      INTEGER,
     ended_at_ms        INTEGER,
     end_state          TEXT
@@ -288,8 +293,13 @@ fn stored_schema(connection: &Connection) -> Result<StoredSchema, StateError> {
         // Corral's own tables without its version row is a damaged registry,
         // not a stranger's file. Telling an operator to look at the wrong file
         // is the worst answer available on a fail-closed startup path.
+        // `session_events` and nothing else: `sessions` is one of the most
+        // common table names there is, and mistaking a web framework's session
+        // store for a damaged registry points an operator at the wrong file
+        // just as surely as the reverse.
         let ours: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('session_events', 'sessions')",
+            "SELECT COUNT(*) FROM sqlite_schema
+              WHERE type = 'table' AND name = 'session_events'",
             [],
             |row| row.get(0),
         )?;
