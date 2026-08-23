@@ -35,25 +35,12 @@ pub enum IdleCheck {
     Wait(Duration),
 }
 
-/// How the daemon stopped, as far as its exit status is concerned.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExitDisposition {
-    Clean,
-    /// The daemon stopped serving because it could not trust durable state.
-    ///
-    /// Recorded separately from the shutdown reason: whichever cause commits
-    /// the shutdown first wins the reason, and a signal arriving in the same
-    /// moment must not turn an untrusted store into a clean exit.
-    UntrustedState,
-}
-
 struct State {
     phase: Phase,
     established: usize,
     /// `Some` exactly while there are no established clients.
     idle_since: Option<Instant>,
     reason: Option<ShutdownReason>,
-    untrusted_state: bool,
 }
 
 /// The single serialization point for "may this daemon exit".
@@ -86,7 +73,6 @@ impl Lifecycle {
                 established: 0,
                 idle_since: Some(now),
                 reason: None,
-                untrusted_state: false,
             }),
             changed: Notify::new(),
             shutdown,
@@ -111,19 +97,6 @@ impl Lifecycle {
 
     pub fn established_clients(&self) -> usize {
         self.lock().established
-    }
-
-    /// Record that durable state can no longer be trusted. Never cleared.
-    pub fn note_untrusted_state(&self) {
-        self.lock().untrusted_state = true;
-    }
-
-    pub fn exit_disposition(&self) -> ExitDisposition {
-        if self.lock().untrusted_state {
-            ExitDisposition::UntrustedState
-        } else {
-            ExitDisposition::Clean
-        }
     }
 
     /// Promote a handshaken connection to an established client.

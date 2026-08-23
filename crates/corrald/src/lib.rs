@@ -29,7 +29,6 @@ use corral_rendezvous::{RendezvousError, RendezvousPaths, SingletonClaim, remove
 use corral_state::StateError;
 use tracing::{error, info};
 
-use crate::lifecycle::ExitDisposition;
 use crate::policy::{DaemonPolicy, SINGLETON_CLAIM_WAIT};
 use crate::state::DaemonState;
 
@@ -100,8 +99,8 @@ fn start() -> Result<ExitCode, StartupError> {
         .enable_all()
         .build()
         .map_err(StartupError::Runtime)?;
-    let disposition = runtime
-        .block_on(server::serve(paths.socket(), policy, state))
+    runtime
+        .block_on(server::serve(paths.socket(), policy, Arc::clone(&state)))
         .map_err(StartupError::Serve)?;
 
     // Order matters and is stated rather than left to drop order: the runtime
@@ -116,13 +115,14 @@ fn start() -> Result<ExitCode, StartupError> {
     drop(claim);
 
     // A daemon that stopped because it could not trust its own durable state
-    // says so in its exit status, whatever else committed the shutdown first.
-    // The next activation retries initialization; if the cause persists it
+    // says so in its exit status, whatever else committed the shutdown first
+    // and whichever task reached the conclusion. The store is what remembers
+    // it. The next activation retries initialization; if the cause persists it
     // still cannot become ready.
-    match disposition {
-        ExitDisposition::UntrustedState => Ok(ExitCode::FAILURE),
-        ExitDisposition::Clean => Ok(ExitCode::SUCCESS),
+    if state.stopped_vouching() {
+        return Ok(ExitCode::FAILURE);
     }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Diagnostics go to standard error. An auto-started daemon has had its

@@ -9,7 +9,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tracing::{debug, error, info};
 
 use crate::connection;
-use crate::lifecycle::{ExitDisposition, Lifecycle, Phase, ShutdownReason, watch_idle};
+use crate::lifecycle::{Lifecycle, Phase, ShutdownReason, watch_idle};
 use crate::policy::DaemonPolicy;
 use crate::state::DaemonState;
 
@@ -22,11 +22,7 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 /// between the last client closing and the process exiting still reads as
 /// "owner present" to anyone probing — which is what stops a second daemon
 /// from starting into a half-dismantled rendezvous.
-pub async fn serve(
-    socket: &Path,
-    policy: DaemonPolicy,
-    state: Arc<DaemonState>,
-) -> io::Result<ExitDisposition> {
+pub async fn serve(socket: &Path, policy: DaemonPolicy, state: Arc<DaemonState>) -> io::Result<()> {
     let listener = UnixListener::bind(socket)?;
     // The run directory is already user-private; the socket says so too rather
     // than inheriting whatever the umask happened to be.
@@ -71,7 +67,7 @@ pub async fn serve(
     );
     lifecycle.mark_exited();
     debug_assert_eq!(lifecycle.phase(), Phase::Exited);
-    Ok(lifecycle.exit_disposition())
+    Ok(())
 }
 
 /// SIGTERM and SIGINT enter the same committed path as an idle exit; the only

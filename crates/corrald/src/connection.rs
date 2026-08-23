@@ -12,7 +12,7 @@ use tracing::{debug, error, warn};
 
 use crate::lifecycle::{EstablishedGuard, Lifecycle, ShutdownReason};
 use crate::policy::DaemonPolicy;
-use crate::state::DaemonState;
+use crate::state::{DaemonState, Vouched};
 
 /// What a dispatched request produced.
 enum Dispatch {
@@ -221,10 +221,6 @@ async fn serve_established(
             Dispatch::ReplyThenClose(frame) => (frame, true),
             Dispatch::FailClosed(error) => {
                 error!(%error, "the registry store can no longer be trusted");
-                // Noted before the shutdown is committed, and separately from
-                // it: a signal committing first must not turn this into a
-                // clean exit.
-                lifecycle.note_untrusted_state();
                 lifecycle.commit_shutdown(ShutdownReason::FatalState);
                 return;
             }
@@ -262,12 +258,16 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             // caller learns it may try the same request again, which a closed
             // connection could not have told it.
             Ok(()) => match state.vouch().await {
-                Ok(()) => Dispatch::Reply(Frame::result(id, SessionListResult::empty_wire_value())),
-                Err(error) if error.is_fatal() => Dispatch::FailClosed(error),
-                Err(error) => Dispatch::Reply(Frame::error(
+                Ok(Vouched::Yes) => {
+                    Dispatch::Reply(Frame::result(id, SessionListResult::empty_wire_value()))
+                }
+                // A fixed message: the engine's own text names tables, columns
+                // and paths, and a protocol error crosses the socket.
+                Ok(Vouched::NotNow) => Dispatch::Reply(Frame::error(
                     id,
-                    ProtocolError::new(ErrorCode::Busy, error.to_string()),
+                    ProtocolError::new(ErrorCode::Busy, "the registry is held by another writer"),
                 )),
+                Err(error) => Dispatch::FailClosed(error),
             },
             Err(error) => Dispatch::Reply(Frame::error(id, error)),
         },
