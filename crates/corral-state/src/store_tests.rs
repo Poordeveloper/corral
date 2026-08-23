@@ -205,8 +205,13 @@ fn re_discovery_never_duplicates_a_session() {
 }
 
 /// A Session may hold one control-capable runtime binding at a time.
-/// Supersession has no producer and no accepted event, so the second
-/// acquisition fails closed rather than quietly displacing the first.
+///
+/// Supersession has no producer and no accepted event (Q15), so the second
+/// acquisition fails closed rather than quietly displacing the first — and
+/// nothing in PR2 can end the first either. D5's "the previous binding ends or
+/// is explicitly superseded before the new one is acquired" therefore has no
+/// implementation here: a resumed process cannot yet acquire its own runtime
+/// binding, and the phase that owns runtimes brings the event that lets it.
 #[test]
 fn a_session_holds_at_most_one_control_capable_runtime_binding() {
     let mut store = TestStore::new("one-runtime");
@@ -295,6 +300,7 @@ fn a_run_exists_under_a_heuristic_binding_and_grants_no_control() {
     let recorded = store
         .record_run_started(
             binding.id(),
+            RunIdentity::New,
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Unknown,
         )
@@ -330,6 +336,7 @@ fn a_heuristically_bound_run_writes_no_durable_lifecycle_fact() {
     let recorded = store
         .record_run_started(
             binding.id(),
+            RunIdentity::New,
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Unknown,
         )
@@ -377,6 +384,7 @@ fn confirmation_makes_later_facts_durable_without_rewriting_earlier_ones() {
     let withheld = store
         .record_run_started(
             binding.id(),
+            RunIdentity::New,
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Unknown,
         )
@@ -392,6 +400,7 @@ fn confirmation_makes_later_facts_durable_without_rewriting_earlier_ones() {
     let recorded = store
         .record_run_started(
             binding.id(),
+            RunIdentity::New,
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Authoritative(observed_start),
         )
@@ -431,6 +440,7 @@ fn a_late_fact_may_carry_an_earlier_occurrence_time() {
     store
         .record_run_started(
             binding,
+            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(long_ago),
         )
@@ -458,6 +468,7 @@ fn a_first_observed_time_is_never_stored_as_a_start_time() {
     store
         .record_run_started(
             binding,
+            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::FirstObserved(instant(500)),
         )
@@ -489,6 +500,7 @@ fn semantic_evidence_cannot_mint_a_run() {
     let refusal = store
         .record_run_started(
             binding.id(),
+            RunIdentity::New,
             EvidenceSource::ProviderHook,
             OccurrenceTime::Unknown,
         )
@@ -519,6 +531,7 @@ fn only_a_runtime_binding_can_carry_a_run() {
     let refusal = store
         .record_run_started(
             binding.id(),
+            RunIdentity::New,
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Unknown,
         )
@@ -531,6 +544,11 @@ fn only_a_runtime_binding_can_carry_a_run() {
 }
 
 /// Resuming a provider session is the same Session with a new Run.
+///
+/// The identity half of D3/D5, which is the half PR2 owns. The binding half —
+/// a new process means a new runtime binding, so the previous one ends or is
+/// explicitly superseded — has no producer here and no accepted event; see
+/// `a_session_holds_at_most_one_control_capable_runtime_binding`.
 #[test]
 fn native_resume_opens_a_new_run_under_the_same_session() {
     let mut store = TestStore::new("resume");
@@ -538,6 +556,7 @@ fn native_resume_opens_a_new_run_under_the_same_session() {
     let first = store
         .record_run_started(
             binding,
+            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
         )
@@ -553,6 +572,7 @@ fn native_resume_opens_a_new_run_under_the_same_session() {
     let second = store
         .record_run_started(
             binding,
+            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(40)),
         )
@@ -577,6 +597,7 @@ fn a_run_ends_once() {
     let run = store
         .record_run_started(
             binding,
+            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
         )
@@ -612,6 +633,7 @@ fn attachment_is_recorded_without_touching_the_projection() {
     let run = store
         .record_run_started(
             binding,
+            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
         )
@@ -786,6 +808,7 @@ fn attachment_cannot_follow_an_end() {
     let run = store
         .record_run_started(
             binding,
+            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
         )
@@ -835,6 +858,7 @@ fn confirming_an_association_does_not_make_an_earlier_run_recordable() {
     let withheld = store
         .record_run_started(
             binding.id(),
+            RunIdentity::New,
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Unknown,
         )
@@ -856,6 +880,214 @@ fn confirming_an_association_does_not_make_an_earlier_run_recordable() {
 
     assert_eq!(ended, Durability::Withheld);
     assert_eq!(store.runs_of(session.id()).expect("readable"), Vec::new());
+}
+
+/// A Run withheld while its association was heuristic keeps its identity, so
+/// once the association is established its facts can be appended — the
+/// sequence D6 describes, gated on the runtime evidence still supporting them.
+#[test]
+fn a_withheld_run_becomes_durable_under_its_own_identity() {
+    let mut store = TestStore::new("backfill");
+    let node = store.node();
+    let SessionResolution::Created { session, binding } = store
+        .resolve_or_create_session(
+            key(node, BindingKind::Runtime, "pid-77"),
+            Provenance::Discovered,
+            suspected_runtime(),
+            instant(10),
+        )
+        .expect("resolved")
+    else {
+        panic!("a new external identity is a new Session");
+    };
+    let withheld = store
+        .record_run_started(
+            binding.id(),
+            RunIdentity::New,
+            EvidenceSource::NodeRuntimeObservation,
+            OccurrenceTime::Authoritative(instant(20)),
+        )
+        .expect("a Run exists");
+    assert_eq!(withheld.durability(), Durability::Withheld);
+
+    store
+        .confirm_binding(
+            binding.id(),
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+        )
+        .expect("confirmed");
+    let recorded = store
+        .record_run_started(
+            binding.id(),
+            RunIdentity::Withheld(withheld.run().id()),
+            EvidenceSource::NodeRuntimeObservation,
+            OccurrenceTime::Authoritative(instant(20)),
+        )
+        .expect("appended now");
+
+    assert_eq!(recorded.durability(), Durability::Recorded);
+    assert_eq!(recorded.run().id(), withheld.run().id());
+    let runs = store.runs_of(session.id()).expect("readable");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].started_at(),
+        OccurrenceTime::Authoritative(instant(20)),
+        "the occurrence the runtime supports, not the moment it was accepted"
+    );
+    assert_eq!(
+        kinds(&store.events_of(session.id()).expect("readable")),
+        [
+            "session-created",
+            "binding-added",
+            "binding-confirmed",
+            "run-started"
+        ],
+        "appended after the confirmation, never inserted before it"
+    );
+    assert_eq!(
+        store
+            .record_run_ended(
+                recorded.run(),
+                RunEnd::Exited(ExitCause::Completed),
+                OccurrenceTime::Authoritative(instant(30)),
+            )
+            .expect("recorded"),
+        Durability::Recorded
+    );
+}
+
+/// A Run the log already holds has no start still waiting to be appended.
+#[test]
+fn a_recorded_run_cannot_have_its_start_appended_again() {
+    let mut store = TestStore::new("backfill-twice");
+    let (_, binding) = managed_session(&mut store, "run-a");
+    let run = store
+        .record_run_started(
+            binding,
+            RunIdentity::New,
+            EvidenceSource::CorralConstructed,
+            OccurrenceTime::Authoritative(instant(20)),
+        )
+        .expect("recorded");
+
+    let refusal = store
+        .record_run_started(
+            binding,
+            RunIdentity::Withheld(run.run().id()),
+            EvidenceSource::CorralConstructed,
+            OccurrenceTime::Authoritative(instant(21)),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::RunAlreadyRecorded(_))
+    ));
+}
+
+/// Confirmation strengthens. Persisting a weakening would be the
+/// assurance-change write Q15 deferred, and an append-only log could never
+/// take it back.
+#[test]
+fn a_confirmation_may_not_weaken_a_binding() {
+    let mut store = TestStore::new("weakening");
+    let (session, binding) = managed_session(&mut store, "run-a");
+
+    let refusal = store
+        .confirm_binding(
+            binding,
+            evidence(EvidenceSource::Correlation, Assurance::Heuristic),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::ConfirmationWouldWeaken { .. })
+    ));
+    assert_eq!(
+        store.bindings_of(session).expect("readable")[0].assurance(),
+        Assurance::Deterministic
+    );
+}
+
+/// Corral links and unlinks, never merges. A caller that names a Session is
+/// told when the identity belongs to another one, rather than handed somebody
+/// else's binding as though the link had happened.
+#[test]
+fn an_identity_another_session_holds_is_not_this_callers_binding() {
+    let mut store = TestStore::new("claimed");
+    let node = store.node();
+    let (owner, _) = managed_session(&mut store, "run-a");
+    let (other, _) = managed_session(&mut store, "run-b");
+    let identity = key(node, BindingKind::ProviderSession, "sess-1");
+    store
+        .bind(
+            owner,
+            identity.clone(),
+            Provenance::Discovered,
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+            instant(20),
+        )
+        .expect("bound");
+
+    let refusal = store
+        .bind(
+            other,
+            identity,
+            Provenance::Discovered,
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+            instant(21),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::BindingClaimedByAnotherSession { session, .. })
+            if session == owner
+    ));
+}
+
+/// D8 keeps an edge whose target is deleted later. An edge that never had a
+/// target is a producer bug, and the log cannot take it back.
+#[test]
+fn lineage_naming_a_parent_the_store_does_not_hold_is_refused() {
+    let mut store = TestStore::new("ghost-parent");
+    let (child, _) = managed_session(&mut store, "run-a");
+    let ghost = CorralSessionId::mint();
+
+    let refusal = store
+        .record_fork(SessionLineage::record(child, ghost, Assurance::Deterministic).expect("ok"))
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::UnknownSession(named)) if named == ghost
+    ));
+    assert_eq!(store.lineage_of(child).expect("readable"), None);
+}
+
+/// A perfectly good database that is not Corral's registry is not an unwritten
+/// one: creating the registry inside it would put the authoritative store and
+/// something unrelated in one file.
+#[test]
+fn a_database_that_is_not_the_registry_is_refused() {
+    let store = TestStore::new("foreign");
+    let path = store.directory.join("someone-elses.sqlite3");
+    #[allow(clippy::disallowed_methods)]
+    let foreign = rusqlite::Connection::open(&path).expect("open");
+    foreign
+        .execute_batch("CREATE TABLE notes (id INTEGER PRIMARY KEY)")
+        .expect("write a foreign table");
+    drop(foreign);
+
+    let Err(error) = Store::open(&path) else {
+        panic!("a foreign database is not an empty registry");
+    };
+
+    assert!(matches!(
+        error,
+        StateError::Fatal(FatalState::Unopenable { .. })
+    ));
 }
 
 /// A lineage cycle can never be removed from an append-only log with no
@@ -1063,6 +1295,7 @@ fn every_durable_transition(store: &mut Store) -> Vec<CommandId> {
     let run = store
         .record_run_started(
             runtime.id(),
+            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(12)),
         )
@@ -1083,6 +1316,7 @@ fn every_durable_transition(store: &mut Store) -> Vec<CommandId> {
     store
         .record_run_started(
             runtime.id(),
+            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Unknown,
         )
@@ -1184,6 +1418,7 @@ fn one_runtime_binding_runs_one_episode_at_a_time() {
     let first = store
         .record_run_started(
             binding,
+            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
         )
@@ -1192,6 +1427,7 @@ fn one_runtime_binding_runs_one_episode_at_a_time() {
     let refusal = store
         .record_run_started(
             binding,
+            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(21)),
         )

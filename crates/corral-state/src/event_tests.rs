@@ -56,14 +56,12 @@ fn every_event(session: CorralSessionId) -> Vec<SessionEvent> {
             session,
             run,
             runtime_binding: binding.id(),
-            ordinal: RunOrdinal::FIRST,
             started_at: Some(instant(41)),
         },
         SessionEvent::RunStarted {
             session,
             run,
             runtime_binding: binding.id(),
-            ordinal: RunOrdinal::from_position(2),
             started_at: None,
         },
         SessionEvent::RunAttached {
@@ -172,7 +170,6 @@ fn an_absent_occurrence_time_decodes_as_absent() {
         session,
         run: RunId::mint(),
         runtime_binding: BindingId::mint(),
-        ordinal: RunOrdinal::FIRST,
         started_at: None,
     };
 

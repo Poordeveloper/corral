@@ -112,8 +112,9 @@ CREATE TABLE command_receipts (
 ) STRICT;
 ";
 
-/// The projections, in an order that satisfies their references both when
-/// clearing and, reversed, when replaying.
+/// The projections, in an order that lets them be emptied without tripping a
+/// foreign key. Replay does not use this order — it follows `global_seq`,
+/// which already places a row after whatever it references.
 pub(crate) const PROJECTIONS: [&str; 5] = [
     "session_lineage",
     "runs",
@@ -186,6 +187,12 @@ fn initialize(connection: &mut Connection) -> Result<NodeId, StateError> {
         StoredSchema::Version(SCHEMA_VERSION) => return stored_node(connection),
         StoredSchema::Version(found) => return Err(mismatch(Some(found)).into()),
         StoredSchema::VersionLost => return Err(mismatch(None).into()),
+        StoredSchema::NotARegistry => {
+            return Err(FatalState::Storage {
+                detail: "the file is a database, but not Corral's registry".to_owned(),
+            }
+            .into());
+        }
         StoredSchema::NeverWritten => {}
     }
 
@@ -243,9 +250,11 @@ pub(crate) fn vouch(connection: &Connection, node: NodeId) -> Result<(), StateEr
 
 /// What a store on disk says about its own schema.
 enum StoredSchema {
-    /// No `schema_version` table. Nothing has ever been written here, and this
-    /// is the only state that may be initialized.
+    /// No `schema_version` table and nothing else either. Nothing has ever
+    /// been written here, and this is the only state that may be initialized.
     NeverWritten,
+    /// A perfectly good database that is not Corral's registry.
+    NotARegistry,
     Version(u32),
     /// The table exists and states nothing — a store whose own version was
     /// lost. Never an empty store: creating the schema over it would fail on a
@@ -263,6 +272,18 @@ fn stored_schema(connection: &Connection) -> Result<StoredSchema, StateError> {
         )
         .optional()?;
     if table.is_none() {
+        // A file with tables but no `schema_version` is not an unwritten
+        // registry — it is somebody else's database. Creating the registry
+        // inside it would put the authoritative store and something unrelated
+        // in one file, which `ARCHITECTURE.md` §5 forbids outright.
+        let foreign: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+            [],
+            |row| row.get(0),
+        )?;
+        if foreign > 0 {
+            return Ok(StoredSchema::NotARegistry);
+        }
         return Ok(StoredSchema::NeverWritten);
     }
     let version: Option<u32> = connection

@@ -79,9 +79,13 @@ pub(crate) fn apply(tx: &Transaction<'_>, event: &SessionEvent) -> Result<(), St
             session,
             run,
             runtime_binding,
-            ordinal,
             started_at,
         } => {
+            // Derived here rather than carried by the fact: a replay applies
+            // events in acceptance order, so counting the Runs already
+            // projected reproduces the same numbering — and the number stays
+            // renumberable, which a value frozen in the log would not be.
+            let ordinal = run_count(tx, *session)?.saturating_add(1);
             tx.execute(
                 "INSERT INTO runs (id, session_id, runtime_binding_id, ordinal, started_at_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -89,7 +93,7 @@ pub(crate) fn apply(tx: &Transaction<'_>, event: &SessionEvent) -> Result<(), St
                     run.to_string(),
                     session.to_string(),
                     runtime_binding.to_string(),
-                    ordinal.position(),
+                    ordinal,
                     started_at.map(millis).transpose()?,
                 ],
             )?;

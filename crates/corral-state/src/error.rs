@@ -39,6 +39,23 @@ pub enum Refusal {
     },
     UnknownBinding(BindingId),
     UnknownSession(CorralSessionId),
+    /// The external identity is already bound to a different Session. Corral
+    /// links and unlinks, never merges, so the caller is told rather than
+    /// handed somebody else's binding as though the link had happened.
+    BindingClaimedByAnotherSession {
+        binding: BindingId,
+        session: CorralSessionId,
+    },
+    /// Evidence that cannot assert a durable fact is not a confirmation.
+    /// Persisting a weakening is an assurance-change write, which has no
+    /// accepted event and no producer (acceptance record, Q15).
+    ConfirmationWouldWeaken {
+        binding: BindingId,
+        assurance: Assurance,
+    },
+    /// The log already holds this Run, so its start is not a fact still
+    /// waiting to be appended.
+    RunAlreadyRecorded(RunId),
     /// Lineage that would close a loop. The log is append-only and PR2 accepts
     /// no correction event, so a cycle written once could never be removed,
     /// and every consumer walking ancestry would have to invent its own depth
@@ -188,6 +205,15 @@ impl fmt::Display for Refusal {
             }
             Self::UnknownBinding(binding) => write!(f, "binding {binding} is not recorded"),
             Self::UnknownSession(session) => write!(f, "session {session} is not recorded"),
+            Self::BindingClaimedByAnotherSession { binding, session } => write!(
+                f,
+                "that external identity is binding {binding}, which belongs to session {session}"
+            ),
+            Self::ConfirmationWouldWeaken { binding, assurance } => write!(
+                f,
+                "{assurance:?} evidence does not confirm binding {binding}"
+            ),
+            Self::RunAlreadyRecorded(run) => write!(f, "run {run} is already recorded"),
             Self::LineageWouldCycle { child, parent } => write!(
                 f,
                 "recording session {child} as continuing {parent} would close a loop"

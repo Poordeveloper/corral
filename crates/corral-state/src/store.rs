@@ -46,6 +46,21 @@ pub enum Durability {
     Withheld,
 }
 
+/// Which Run a start records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunIdentity {
+    /// A runtime occurrence Corral has not recorded before.
+    New,
+    /// A Run the store withheld while its association was only heuristic, and
+    /// which the caller has held as live state since.
+    ///
+    /// Its facts become durable when the association does — appended then,
+    /// never inserted into an earlier seq, and only while authoritative
+    /// runtime evidence still supports them (ADR 0002 D6). The caller brings
+    /// the identity back because the store kept no record of it.
+    Withheld(RunId),
+}
+
 /// A Run, and whether the log took its start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordedRun {
@@ -70,6 +85,12 @@ impl RecordedRun {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionResolution {
     /// The identity was already known, and this is the Session it names.
+    ///
+    /// The evidence the call carried is not written over the binding's. Every
+    /// durable projection change needs an accepted event behind it (ADR 0002
+    /// D6), and a rescan is not one — re-evaluating evidence in live state is
+    /// unrestricted, and strengthening the recorded binding is
+    /// `confirm_binding`, said out loud.
     Existing {
         session: Session,
         binding: Binding,
@@ -352,6 +373,13 @@ impl Store {
             let at = encoding::as_stored(at)?;
             let evidence = as_stored_evidence(evidence)?;
             if let Some(binding) = projection::binding_by_key(transaction, &key)? {
+                if binding.session() != session {
+                    return Err(Refusal::BindingClaimedByAnotherSession {
+                        binding: binding.id(),
+                        session: binding.session(),
+                    }
+                    .into());
+                }
                 return Ok(Written::nothing_to_record(BindingResolution::Existing(
                     binding,
                 )));
@@ -379,6 +407,17 @@ impl Store {
     ) -> Result<Binding, StateError> {
         self.write(move |transaction| {
             let evidence = as_stored_evidence(evidence)?;
+            // Confirmation strengthens. Persisting a weakening would be the
+            // assurance-change write Q15 deferred: no accepted event expresses
+            // it, and in an append-only log with no correction event it could
+            // never be undone.
+            if !evidence.assurance().may_assert_durable_fact() {
+                return Err(Refusal::ConfirmationWouldWeaken {
+                    binding,
+                    assurance: evidence.assurance(),
+                }
+                .into());
+            }
             let confirmed = require_binding(transaction, binding)?.with_evidence(evidence);
             refuse_second_control_capable_runtime_binding(transaction, &confirmed)?;
             Ok(Written::recording(
@@ -407,6 +446,7 @@ impl Store {
     pub fn record_run_started(
         &mut self,
         runtime_binding: BindingId,
+        identity: RunIdentity,
         occurrence: EvidenceSource,
         started: OccurrenceTime,
     ) -> Result<RecordedRun, StateError> {
@@ -423,6 +463,16 @@ impl Store {
                 }
                 .into());
             }
+            let id = match identity {
+                RunIdentity::New => RunId::mint(),
+                RunIdentity::Withheld(id) => {
+                    if projection::recorded_run(transaction, id)?.is_some() {
+                        return Err(Refusal::RunAlreadyRecorded(id).into());
+                    }
+                    id
+                }
+            };
+
             // One runtime runs one episode at a time. The log can only speak
             // for the Runs it holds — a Run withheld as heuristic is the
             // caller's live state, and staying out of this question is the
@@ -436,7 +486,7 @@ impl Store {
             }
 
             let session = binding.session();
-            let run = Run::started(RunId::mint(), session, runtime_binding, started);
+            let run = Run::started(id, session, runtime_binding, started);
             if !binding.assurance().may_assert_durable_fact() {
                 // Unnumbered on purpose: the store numbers the Runs it keeps,
                 // and a number it has not kept would name a position another
@@ -450,6 +500,9 @@ impl Store {
             // Saturating rather than wrapping: past four billion Runs the
             // number stops being useful, and a wrapped one would name a Run at
             // the top of the list.
+            // The position this Run will hold once the fact is applied. The
+            // projection derives the same number from the same rows; this copy
+            // exists only so the caller is handed a complete Run.
             let ordinal = RunOrdinal::from_position(
                 projection::run_count(transaction, session)?.saturating_add(1),
             );
@@ -463,7 +516,6 @@ impl Store {
                     session,
                     run: run.id(),
                     runtime_binding,
-                    ordinal,
                     started_at: started.authoritative(),
                 }],
             ))
@@ -540,6 +592,13 @@ impl Store {
     /// edge can reach the log (ADR 0002 D4).
     pub fn record_fork(&mut self, lineage: SessionLineage) -> Result<(), StateError> {
         let outcome = self.write(move |transaction| {
+            // The parent is checked at record time, not enforced by a foreign
+            // key: D8 keeps an edge whose target is deleted later, but an edge
+            // that never had a target is a producer bug, and an append-only
+            // log with no correction event cannot take it back.
+            if projection::session(transaction, lineage.parent())?.is_none() {
+                return Err(Refusal::UnknownSession(lineage.parent()).into());
+            }
             refuse_lineage_cycle(transaction, lineage)?;
             // A Session's origin is recorded once. Re-recording the same one is
             // a retry and does nothing; a different one is a conflict named as

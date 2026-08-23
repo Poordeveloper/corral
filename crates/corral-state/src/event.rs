@@ -13,8 +13,7 @@ use std::time::SystemTime;
 
 use corral_core::{
     Assurance, Binding, BindingId, BindingKey, CommandFingerprint, CommandId, CommandOutcome,
-    CorralSessionId, Evidence, ExternalId, MalformedId, ProviderId, RunEnd, RunId, RunOrdinal,
-    SessionLineage,
+    CorralSessionId, Evidence, ExternalId, MalformedId, ProviderId, RunEnd, RunId, SessionLineage,
 };
 use serde_json::{Value, json};
 
@@ -46,11 +45,17 @@ pub enum SessionEvent {
         evidence: Evidence,
     },
     /// The process episode began.
+    /// The process episode began.
+    ///
+    /// No ordinal: a Run's position is display data derived from the Runs its
+    /// Session already has, and a derived number frozen into an immutable log
+    /// could never be renumbered — which is exactly what correcting a wrong
+    /// binding does (ADR 0002 D1; `ARCHITECTURE.md` §5 records no derived
+    /// state).
     RunStarted {
         session: CorralSessionId,
         run: RunId,
         runtime_binding: BindingId,
-        ordinal: RunOrdinal,
         /// Absent when the runtime itself cannot say when it began.
         started_at: Option<SystemTime>,
     },
@@ -156,13 +161,11 @@ pub(crate) fn encode(event: &SessionEvent) -> Result<Value, FatalState> {
         SessionEvent::RunStarted {
             run,
             runtime_binding,
-            ordinal,
             started_at,
             ..
         } => json!({
             "run_id": run.to_string(),
             "runtime_binding_id": runtime_binding.to_string(),
-            "ordinal": ordinal.position(),
             "started_at_ms": optional_millis(*started_at)?,
         }),
         SessionEvent::RunEnded {
@@ -250,10 +253,6 @@ pub(crate) fn decode(
             session,
             run: identity(payload, "run_id")?,
             runtime_binding: identity(payload, "runtime_binding_id")?,
-            ordinal: RunOrdinal::from_position(
-                u32::try_from(integer(payload, "ordinal")?)
-                    .map_err(|_| unreadable("a run ordinal", "an out-of-range integer"))?,
-            ),
             started_at: optional_instant(payload, "started_at_ms")?,
         },
         "run-ended" => SessionEvent::RunEnded {
