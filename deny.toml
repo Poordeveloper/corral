@@ -15,6 +15,9 @@ allow = [
     # Unicode License v3 is permissive; the clause applies to the Unicode data
     # tables the crate embeds, and nothing of it ships in Corral's binaries.
     "Unicode-3.0",
+    # foldhash, reached through rusqlite's hash map. The zlib licence is
+    # permissive, OSI approved, and imposes no notice requirement on binaries.
+    "Zlib",
 ]
 
 [bans]

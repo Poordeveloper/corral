@@ -11,6 +11,7 @@ use tracing::{debug, error, info};
 use crate::connection;
 use crate::lifecycle::{Lifecycle, Phase, ShutdownReason, watch_idle};
 use crate::policy::DaemonPolicy;
+use crate::state::DaemonState;
 
 /// Keeps a failing accept from spinning the CPU while the cause persists.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
@@ -21,7 +22,7 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 /// between the last client closing and the process exiting still reads as
 /// "owner present" to anyone probing — which is what stops a second daemon
 /// from starting into a half-dismantled rendezvous.
-pub async fn serve(socket: &Path, policy: DaemonPolicy) -> io::Result<()> {
+pub async fn serve(socket: &Path, policy: DaemonPolicy, state: Arc<DaemonState>) -> io::Result<()> {
     let listener = UnixListener::bind(socket)?;
     // The run directory is already user-private; the socket says so too rather
     // than inheriting whatever the umask happened to be.
@@ -43,6 +44,7 @@ pub async fn serve(socket: &Path, policy: DaemonPolicy) -> io::Result<()> {
                     tokio::spawn(connection::serve(
                         stream,
                         Arc::clone(&lifecycle),
+                        Arc::clone(&state),
                         policy,
                         lifecycle.subscribe(),
                     ));

@@ -292,13 +292,19 @@ Two stores with opposite guarantees, never the same file:
 
 ```text
 registry store (authoritative)          history index (derived)
-├── sessions           projection       └── FTS5 over provider history,
+├── sessions           projections      └── FTS5 over provider history,
 ├── bindings                                rebuildable and deletable (M2)
-├── session_events     Corral-owned durable semantic events,
-│                      per-session monotonic seq; projections
-│                      committed in the same transaction
-└── command_receipts   client-supplied command ids / idempotency
+├── runs
+├── session_lineage
+├── command_receipts   client-supplied command ids / idempotency
+└── session_events     Corral-owned durable semantic events,
+                       per-session monotonic seq; projections
+                       committed in the same transaction
 ```
+
+The registry store also carries its own metadata: the schema version it was
+written at, and the node it belongs to. Neither is a projection — no event
+derives them, and rebuilding the projections never touches them.
 
 The event log records only semantic facts Corral must order, replay, and
 keep consistent — `SessionCreated`, `BindingAdded`, `BindingConfirmed`,
@@ -514,6 +520,10 @@ terms: `PRODUCT.md` §8.
 | **Facet** | an independently available aspect of a Session: history, runtime, control, artifacts, attention |
 | **Binding** | an edge from a Session to an external identity, carrying provenance, assurance, evidence source, and observation time |
 | **Assurance** | discrete binding trust: Deterministic, Attested, Manual, Heuristic. Heuristic never controls and never notifies |
+| **Provenance** | how a binding came to exist — Corral created it, discovered it, or the user linked it. Never re-evaluated, unlike the evidence supporting it |
+| **Control eligibility** | whether control may be driven through a binding. Resolved from that binding's assurance and nowhere else — never from a Run |
+| **Occurrence time** | when a runtime fact happened, as against the event sequence, which is when Corral accepted it. Recorded only when authoritative runtime evidence supports it; a first-observed time is never one |
+| **Withheld fact** | a fact deliberately kept out of the durable log because the association it would assert is only heuristically supported. The thing it describes still exists |
 | **Evidence** | a status observation with source, `observed_at`, and assurance. Authority is qualified by freshness |
 | **AttentionItem** | a structured reason a Session needs the user, with source, freshness, and optional action |
 | **NeedsInputRequest** | a reserved answerable entity: a specific blocked interaction with provider/tool context and allowed actions |
@@ -532,6 +542,7 @@ terms: `PRODUCT.md` §8.
 | **Command fingerprint** | the semantic identity of a mutating command — kind plus the inputs that affect the mutation. Excludes serialization, transport, and tracing detail. One command id means one immutable semantic command, for the life of the node's durable state |
 | **Link / unlink** | attach or detach a binding. Corral never merges or destroys provider data |
 | **NativeResume / ContextHandoff / RuntimeMove** | distinct continuation operations, never collapsed into a generic resume |
+| **Session lineage** | a Corral-owned edge from a Session to the one it continued from, carrying the assurance of that claim. Recorded only where Corral knows the parent; heuristic similarity records nothing |
 | **Live synchronized control** | joining the same live provider session as a second synchronized surface; the preferred control path |
 | **First-response lease** | the bounded window (≤15s) during which Corral may hold an already-blocked interaction before failing open |
 | **Surface** | a client rendering the shared model: Desktop, Terminal/TUI, Tray, CLI, Mobile, Web. Holds presentation state only |

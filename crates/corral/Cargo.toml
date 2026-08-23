@@ -19,6 +19,10 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 corral-protocol = { workspace = true }
+# Writing to a running daemon's registry the way another process would. Going
+# through SQLite is what makes the daemon see the change: a byte-level rewrite
+# would depend on its page cache noticing.
+rusqlite = { workspace = true }
 # Integration tests drive real daemons, so they need to send real signals.
 rustix = { workspace = true }
 serde_json = { workspace = true }

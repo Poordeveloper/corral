@@ -1,0 +1,18 @@
+[package]
+name = "corral-state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+corral-core = { workspace = true }
+rusqlite = { workspace = true }
+# The durable encoding of a semantic event's payload. This crate owns that
+# encoding; the domain crate deliberately derives none.
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

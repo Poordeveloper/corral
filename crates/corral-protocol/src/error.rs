@@ -28,6 +28,10 @@ pub enum ErrorCode {
     MalformedHello,
     /// A legal frame sent where the connection's state does not allow it.
     ProtocolViolation,
+    /// The daemon could not answer this request now and the same request may
+    /// be sent again. Says nothing beyond "not now": it is not a claim about
+    /// the daemon's health, and it is never an answer's content.
+    Busy,
     Unknown(String),
 }
 
@@ -47,6 +51,7 @@ impl ErrorCode {
             Self::InvalidParams => "invalid_params",
             Self::MalformedHello => "malformed_hello",
             Self::ProtocolViolation => "protocol_violation",
+            Self::Busy => "busy",
             Self::Unknown(raw) => raw,
         }
     }
@@ -59,6 +64,7 @@ impl From<String> for ErrorCode {
             "invalid_params" => Self::InvalidParams,
             "malformed_hello" => Self::MalformedHello,
             "protocol_violation" => Self::ProtocolViolation,
+            "busy" => Self::Busy,
             _ => Self::Unknown(raw),
         }
     }
