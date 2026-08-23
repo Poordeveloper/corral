@@ -20,13 +20,6 @@ enum Dispatch {
     Reply(Frame),
     /// Answer and close: the connection's state machine cannot continue.
     ReplyThenClose(Frame),
-    /// The registry store declined, and is still intact. Protocol 1 defines no
-    /// error code for a transient state condition, and PR2 is ruled zero-wire,
-    /// so it does not mint one: this connection closes — an outcome the client
-    /// already handles — and the caller may come back. The phase that serves
-    /// state-derived facts on the wire owns the retryable code. The daemon
-    /// keeps serving every other client meanwhile.
-    CloseWithoutReply(corral_state::StateError),
     /// The registry store can no longer vouch for durable truth. Nothing is
     /// answered — a normal-looking reply from an untrusted store is the one
     /// outcome fail-closed exists to prevent — and the whole daemon stops
@@ -226,10 +219,6 @@ async fn serve_established(
         let (frame, close) = match dispatched {
             Dispatch::Reply(frame) => (frame, false),
             Dispatch::ReplyThenClose(frame) => (frame, true),
-            Dispatch::CloseWithoutReply(error) => {
-                warn!(%error, "the registry could not answer; closing the connection");
-                return;
-            }
             Dispatch::FailClosed(error) => {
                 error!(%error, "the registry store can no longer be trusted");
                 // Noted before the shutdown is committed, and separately from
@@ -266,12 +255,19 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             // sessions it can describe, which is none. The registry is still
             // asked: an empty list is a claim about it, and a store that can
             // no longer vouch for durable truth must not have that claim made
-            // in its name. Only that conclusion ends the daemon — a refusal
-            // leaves the store intact and costs this connection alone.
+            // in its name.
+            //
+            // Only that conclusion ends the daemon. A refusal leaves the store
+            // intact, so it is answered and the connection carries on: the
+            // caller learns it may try the same request again, which a closed
+            // connection could not have told it.
             Ok(()) => match state.vouch().await {
                 Ok(()) => Dispatch::Reply(Frame::result(id, SessionListResult::empty_wire_value())),
                 Err(error) if error.is_fatal() => Dispatch::FailClosed(error),
-                Err(error) => Dispatch::CloseWithoutReply(error),
+                Err(error) => Dispatch::Reply(Frame::error(
+                    id,
+                    ProtocolError::new(ErrorCode::Busy, error.to_string()),
+                )),
             },
             Err(error) => Dispatch::Reply(Frame::error(id, error)),
         },

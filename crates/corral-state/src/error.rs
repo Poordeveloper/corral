@@ -263,3 +263,7 @@ impl fmt::Display for FatalState {
 }
 
 impl std::error::Error for StateError {}
+
+#[cfg(test)]
+#[path = "error_tests.rs"]
+mod tests;

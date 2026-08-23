@@ -1224,6 +1224,29 @@ fn a_refusal_leaves_the_store_usable() {
     );
 }
 
+/// Another writer holding the file is something to wait for, not to conclude
+/// anything from. Without the wait, one concurrent writer would turn every
+/// operation into a hard failure.
+#[test]
+fn a_store_held_by_another_writer_is_waited_for() {
+    let mut store = TestStore::new("contention");
+    // Being the second opener is the condition under test.
+    #[allow(clippy::disallowed_methods)]
+    let blocker = rusqlite::Connection::open(store.path()).expect("open");
+    blocker
+        .execute_batch("BEGIN EXCLUSIVE")
+        .expect("hold the store");
+    let released = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        blocker.execute_batch("COMMIT").expect("release the store");
+    });
+
+    let sessions = store.sessions().expect("waited rather than gave up");
+
+    assert_eq!(sessions, Vec::new());
+    released.join().expect("the other writer finished");
+}
+
 /// A store that is not the schema this build knows is refused rather than
 /// guessed at: no migration exists, and reading it as if it were this schema
 /// would reinterpret recorded facts.

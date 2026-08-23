@@ -47,9 +47,7 @@ fn error_code(dispatch: Dispatch) -> (ErrorCode, bool) {
     let (frame, close) = match dispatch {
         Dispatch::Reply(frame) => (frame, false),
         Dispatch::ReplyThenClose(frame) => (frame, true),
-        Dispatch::CloseWithoutReply(error) | Dispatch::FailClosed(error) => {
-            panic!("expected an answer, got {error}")
-        }
+        Dispatch::FailClosed(error) => panic!("expected an answer, got {error}"),
     };
     match frame {
         Frame::Response(response) => match response.outcome {
