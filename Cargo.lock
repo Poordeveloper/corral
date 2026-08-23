@@ -193,7 +193,6 @@ name = "corrald"
 version = "0.0.0"
 dependencies = [
  "clap",
- "corral-core",
  "corral-protocol",
  "corral-rendezvous",
  "corral-state",
