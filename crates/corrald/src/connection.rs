@@ -20,6 +20,12 @@ enum Dispatch {
     Reply(Frame),
     /// Answer and close: the connection's state machine cannot continue.
     ReplyThenClose(Frame),
+    /// The registry declined for a reason this build cannot name on the wire,
+    /// and the store is still intact. Closing costs the one connection that
+    /// asked; answering `busy` would tell it to retry something nothing
+    /// diagnosed as retryable. PR2 cannot reach this — it is what keeps the
+    /// unreachable case from being answered with a claim.
+    CloseWithoutReply(corral_state::StateError),
     /// The registry store can no longer vouch for durable truth. Nothing is
     /// answered — a normal-looking reply from an untrusted store is the one
     /// outcome fail-closed exists to prevent — and the whole daemon stops
@@ -219,6 +225,10 @@ async fn serve_established(
         let (frame, close) = match dispatched {
             Dispatch::Reply(frame) => (frame, false),
             Dispatch::ReplyThenClose(frame) => (frame, true),
+            Dispatch::CloseWithoutReply(error) => {
+                warn!(%error, "the registry declined; closing the connection");
+                return;
+            }
             Dispatch::FailClosed(error) => {
                 error!(%error, "the registry store can no longer be trusted");
                 lifecycle.commit_shutdown(ShutdownReason::FatalState);
@@ -267,7 +277,8 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
                     id,
                     ProtocolError::new(ErrorCode::Busy, "the registry is held by another writer"),
                 )),
-                Err(error) => Dispatch::FailClosed(error),
+                Err(error) if error.is_fatal() => Dispatch::FailClosed(error),
+                Err(error) => Dispatch::CloseWithoutReply(error),
             },
             Err(error) => Dispatch::Reply(Frame::error(id, error)),
         },

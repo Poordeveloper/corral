@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use corral_state::{FatalState, StateError, Store};
+use corral_state::{FatalState, Refusal, StateError, Store};
 
 /// What the registry said when asked whether it can still vouch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,19 +49,21 @@ impl DaemonState {
     /// Protocol 1 assigns no session encoding, so nothing this build serves
     /// carries a fact out of the store — but an empty list is still a claim
     /// about it, and this is the question behind that claim.
-    /// Contention is the only refusal this call can produce, and a refusal
-    /// leaves the store intact either way — so no refusal ends the daemon.
-    /// Only a store that cannot vouch does.
+    /// Contention is the only refusal this call can produce, and the only one
+    /// reported as retryable: `busy` tells a client to send the request again,
+    /// and saying that about a refusal nothing diagnosed would be a claim the
+    /// daemon cannot make. Anything else is returned as it is, for the caller
+    /// to decide — and a refusal still never ends the daemon, because a
+    /// refusal leaves the store intact.
     ///
     /// The mapping is this call's, not a shared one: a mutating method's
-    /// refusals are mostly permanent, and telling a client to retry one of
-    /// those would be worse than saying nothing. The phase that serves one
-    /// writes its own.
+    /// refusals are mostly permanent, and the phase that serves one writes its
+    /// own.
     pub async fn vouch(self: &Arc<Self>) -> Result<Vouched, StateError> {
         match self.off_the_reactor(Store::vouch).await {
             Ok(()) => Ok(Vouched::Yes),
-            Err(StateError::Refused(_)) => Ok(Vouched::NotNow),
-            Err(fatal) => Err(fatal),
+            Err(StateError::Refused(Refusal::Busy { .. })) => Ok(Vouched::NotNow),
+            Err(other) => Err(other),
         }
     }
 
@@ -107,3 +109,7 @@ impl DaemonState {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
+
+#[cfg(test)]
+#[path = "state_tests.rs"]
+mod tests;
