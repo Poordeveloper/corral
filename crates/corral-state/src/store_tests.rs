@@ -300,7 +300,6 @@ fn a_run_exists_under_a_heuristic_binding_and_grants_no_control() {
     let recorded = store
         .record_run_started(
             binding.id(),
-            RunIdentity::New,
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Unknown,
         )
@@ -336,7 +335,6 @@ fn a_heuristically_bound_run_writes_no_durable_lifecycle_fact() {
     let recorded = store
         .record_run_started(
             binding.id(),
-            RunIdentity::New,
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Unknown,
         )
@@ -384,7 +382,6 @@ fn confirmation_makes_later_facts_durable_without_rewriting_earlier_ones() {
     let withheld = store
         .record_run_started(
             binding.id(),
-            RunIdentity::New,
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Unknown,
         )
@@ -400,7 +397,6 @@ fn confirmation_makes_later_facts_durable_without_rewriting_earlier_ones() {
     let recorded = store
         .record_run_started(
             binding.id(),
-            RunIdentity::New,
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Authoritative(observed_start),
         )
@@ -440,7 +436,6 @@ fn a_late_fact_may_carry_an_earlier_occurrence_time() {
     store
         .record_run_started(
             binding,
-            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(long_ago),
         )
@@ -468,7 +463,6 @@ fn a_first_observed_time_is_never_stored_as_a_start_time() {
     store
         .record_run_started(
             binding,
-            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::FirstObserved(instant(500)),
         )
@@ -500,7 +494,6 @@ fn semantic_evidence_cannot_mint_a_run() {
     let refusal = store
         .record_run_started(
             binding.id(),
-            RunIdentity::New,
             EvidenceSource::ProviderHook,
             OccurrenceTime::Unknown,
         )
@@ -531,7 +524,6 @@ fn only_a_runtime_binding_can_carry_a_run() {
     let refusal = store
         .record_run_started(
             binding.id(),
-            RunIdentity::New,
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Unknown,
         )
@@ -556,7 +548,6 @@ fn native_resume_opens_a_new_run_under_the_same_session() {
     let first = store
         .record_run_started(
             binding,
-            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
         )
@@ -572,7 +563,6 @@ fn native_resume_opens_a_new_run_under_the_same_session() {
     let second = store
         .record_run_started(
             binding,
-            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(40)),
         )
@@ -597,7 +587,6 @@ fn a_run_ends_once() {
     let run = store
         .record_run_started(
             binding,
-            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
         )
@@ -633,7 +622,6 @@ fn attachment_is_recorded_without_touching_the_projection() {
     let run = store
         .record_run_started(
             binding,
-            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
         )
@@ -808,7 +796,6 @@ fn attachment_cannot_follow_an_end() {
     let run = store
         .record_run_started(
             binding,
-            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
         )
@@ -858,7 +845,6 @@ fn confirming_an_association_does_not_make_an_earlier_run_recordable() {
     let withheld = store
         .record_run_started(
             binding.id(),
-            RunIdentity::New,
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Unknown,
         )
@@ -903,7 +889,6 @@ fn a_withheld_run_becomes_durable_under_its_own_identity() {
     let withheld = store
         .record_run_started(
             binding.id(),
-            RunIdentity::New,
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Authoritative(instant(20)),
         )
@@ -917,9 +902,8 @@ fn a_withheld_run_becomes_durable_under_its_own_identity() {
         )
         .expect("confirmed");
     let recorded = store
-        .record_run_started(
-            binding.id(),
-            RunIdentity::Withheld(withheld.run().id()),
+        .record_withheld_run_started(
+            withheld.run(),
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Authoritative(instant(20)),
         )
@@ -964,16 +948,14 @@ fn a_recorded_run_cannot_have_its_start_appended_again() {
     let run = store
         .record_run_started(
             binding,
-            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
         )
         .expect("recorded");
 
     let refusal = store
-        .record_run_started(
-            binding,
-            RunIdentity::Withheld(run.run().id()),
+        .record_withheld_run_started(
+            run.run(),
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(21)),
         )
@@ -1002,7 +984,7 @@ fn a_confirmation_may_not_weaken_a_binding() {
 
     assert!(matches!(
         refusal,
-        StateError::Refused(Refusal::ConfirmationWouldWeaken { .. })
+        StateError::Refused(Refusal::UnsupportedConfirmation { .. })
     ));
     assert_eq!(
         store.bindings_of(session).expect("readable")[0].assurance(),
@@ -1088,6 +1070,142 @@ fn a_database_that_is_not_the_registry_is_refused() {
         error,
         StateError::Fatal(FatalState::Unopenable { .. })
     ));
+}
+
+/// A Run's position is where its episode sits, not where its acceptance fell.
+/// A start learned late still takes the place its occurrence earns.
+#[test]
+fn a_backfilled_run_takes_the_position_its_occurrence_earns() {
+    let mut store = TestStore::new("position");
+    let node = store.node();
+    let SessionResolution::Created { session, binding } = store
+        .resolve_or_create_session(
+            key(node, BindingKind::Runtime, "pid-77"),
+            Provenance::Discovered,
+            suspected_runtime(),
+            instant(10),
+        )
+        .expect("resolved")
+    else {
+        panic!("a new external identity is a new Session");
+    };
+    let early = store
+        .record_run_started(
+            binding.id(),
+            EvidenceSource::NodeRuntimeObservation,
+            OccurrenceTime::Authoritative(instant(20)),
+        )
+        .expect("a Run exists");
+    store
+        .confirm_binding(
+            binding.id(),
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+        )
+        .expect("confirmed");
+    let late = store
+        .record_run_started(
+            binding.id(),
+            EvidenceSource::NodeRuntimeObservation,
+            OccurrenceTime::Authoritative(instant(40)),
+        )
+        .expect("recorded");
+    store
+        .record_run_ended(
+            late.run(),
+            RunEnd::Exited(ExitCause::Completed),
+            OccurrenceTime::Authoritative(instant(41)),
+        )
+        .expect("recorded");
+
+    store
+        .record_withheld_run_started(
+            early.run(),
+            EvidenceSource::NodeRuntimeObservation,
+            OccurrenceTime::Authoritative(instant(20)),
+        )
+        .expect("appended now");
+
+    let runs = store.runs_of(session.id()).expect("readable");
+    assert_eq!(runs.len(), 2);
+    assert_eq!(
+        runs[0].id(),
+        early.run().id(),
+        "the earlier episode is first"
+    );
+    assert_eq!(runs[0].ordinal(), Some(RunOrdinal::FIRST));
+    assert_eq!(runs[1].id(), late.run().id());
+    assert_eq!(runs[1].ordinal(), Some(RunOrdinal::from_position(2)));
+}
+
+/// The store kept no record of a withheld Run, so the Run itself is what it
+/// checks: one that names a Session its binding does not is not this
+/// association's Run.
+#[test]
+fn a_withheld_run_cannot_be_filed_under_an_association_it_does_not_claim() {
+    let mut store = TestStore::new("misfiled");
+    let (_, binding) = managed_session(&mut store, "run-a");
+    let stranger = CorralSessionId::mint();
+    let misfiled = Run::started(
+        RunId::mint(),
+        stranger,
+        binding,
+        OccurrenceTime::Authoritative(instant(20)),
+    );
+
+    let refusal = store
+        .record_withheld_run_started(
+            &misfiled,
+            EvidenceSource::CorralConstructed,
+            OccurrenceTime::Authoritative(instant(20)),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::UnknownSession(named)) if named == stranger
+    ));
+}
+
+/// Confirming a binding the store never held is an unknown binding, not weak
+/// evidence — the refusal has to name the real problem.
+#[test]
+fn confirming_a_binding_the_store_never_held_says_so() {
+    let mut store = TestStore::new("confirm-unknown");
+    let absent = BindingId::mint();
+
+    let refusal = store
+        .confirm_binding(
+            absent,
+            evidence(EvidenceSource::Correlation, Assurance::Heuristic),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::UnknownBinding(named)) if named == absent
+    ));
+}
+
+/// A registry that lost its version row is a damaged registry, not somebody
+/// else's database. On a fail-closed startup path the message is all the
+/// operator has, and it must point at the right file.
+#[test]
+fn a_registry_that_lost_its_version_is_not_mistaken_for_a_stranger() {
+    let store = TestStore::new("version-dropped");
+    store.behind_the_daemons_back("DROP TABLE schema_version");
+    let path = store.path();
+
+    let Err(error) = Store::open(&path) else {
+        panic!("a registry without its version is not usable");
+    };
+
+    assert!(
+        matches!(
+            error,
+            StateError::Fatal(FatalState::SchemaVersionMismatch { found: None, .. })
+        ),
+        "expected a damaged registry, got {error}"
+    );
 }
 
 /// A lineage cycle can never be removed from an append-only log with no
@@ -1295,7 +1413,6 @@ fn every_durable_transition(store: &mut Store) -> Vec<CommandId> {
     let run = store
         .record_run_started(
             runtime.id(),
-            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(12)),
         )
@@ -1316,7 +1433,6 @@ fn every_durable_transition(store: &mut Store) -> Vec<CommandId> {
     store
         .record_run_started(
             runtime.id(),
-            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Unknown,
         )
@@ -1418,7 +1534,6 @@ fn one_runtime_binding_runs_one_episode_at_a_time() {
     let first = store
         .record_run_started(
             binding,
-            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
         )
@@ -1427,7 +1542,6 @@ fn one_runtime_binding_runs_one_episode_at_a_time() {
     let refusal = store
         .record_run_started(
             binding,
-            RunIdentity::New,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(21)),
         )

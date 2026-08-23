@@ -47,9 +47,11 @@ pub enum Refusal {
         session: CorralSessionId,
     },
     /// Evidence that cannot assert a durable fact is not a confirmation.
-    /// Persisting a weakening is an assurance-change write, which has no
-    /// accepted event and no producer (acceptance record, Q15).
-    ConfirmationWouldWeaken {
+    /// Writing it would be the assurance-change persistence Q15 deferred, and
+    /// an append-only log with no correction event could never undo it. Not a
+    /// claim that one assurance level sits below another: Corral does not
+    /// order them.
+    UnsupportedConfirmation {
         binding: BindingId,
         assurance: Assurance,
     },
@@ -209,7 +211,7 @@ impl fmt::Display for Refusal {
                 f,
                 "that external identity is binding {binding}, which belongs to session {session}"
             ),
-            Self::ConfirmationWouldWeaken { binding, assurance } => write!(
+            Self::UnsupportedConfirmation { binding, assurance } => write!(
                 f,
                 "{assurance:?} evidence does not confirm binding {binding}"
             ),

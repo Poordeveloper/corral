@@ -81,19 +81,13 @@ pub(crate) fn apply(tx: &Transaction<'_>, event: &SessionEvent) -> Result<(), St
             runtime_binding,
             started_at,
         } => {
-            // Derived here rather than carried by the fact: a replay applies
-            // events in acceptance order, so counting the Runs already
-            // projected reproduces the same numbering — and the number stays
-            // renumberable, which a value frozen in the log would not be.
-            let ordinal = run_count(tx, *session)?.saturating_add(1);
             tx.execute(
-                "INSERT INTO runs (id, session_id, runtime_binding_id, ordinal, started_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO runs (id, session_id, runtime_binding_id, started_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
                 params![
                     run.to_string(),
                     session.to_string(),
                     runtime_binding.to_string(),
-                    ordinal,
                     started_at.map(millis).transpose()?,
                 ],
             )?;
@@ -252,17 +246,27 @@ pub(crate) fn bindings_of(
     Ok(bindings)
 }
 
+/// A Session's Runs, oldest episode first, each numbered by where it sits.
+///
+/// The ordinal is read off this order rather than stored: it is a position
+/// within the Session (ADR 0002 D1), so a Run whose start is learned late
+/// takes the place its occurrence earns instead of the place its acceptance
+/// happened to fall in. Runs whose start the runtime could not state come
+/// last, in acceptance order, because nothing better is known about them.
 pub(crate) fn runs_of(
     connection: &Connection,
     session: CorralSessionId,
 ) -> Result<Vec<Run>, StateError> {
     let mut statement = connection.prepare(&format!(
-        "{RUN_COLUMNS} WHERE session_id = ?1 ORDER BY ordinal"
+        "{RUN_COLUMNS} WHERE session_id = ?1
+         ORDER BY started_at_ms IS NULL, started_at_ms, rowid"
     ))?;
     let rows = statement.query_map(params![session.to_string()], run_row)?;
     let mut runs = Vec::new();
-    for row in rows {
-        runs.push(run_from(row?)?);
+    for (position, row) in rows.enumerate() {
+        let position = u32::try_from(position.saturating_add(1))
+            .map_err(|_| unreadable("a run position", "more Runs than can be numbered"))?;
+        runs.push(run_from(row?)?.with_ordinal(RunOrdinal::from_position(position)));
     }
     Ok(runs)
 }
@@ -285,14 +289,13 @@ pub(crate) fn recorded_run(connection: &Connection, id: RunId) -> Result<Option<
     row.map(run_from).transpose()
 }
 
-const RUN_COLUMNS: &str = "SELECT id, session_id, runtime_binding_id, ordinal, started_at_ms, \
+const RUN_COLUMNS: &str = "SELECT id, session_id, runtime_binding_id, started_at_ms, \
                            ended_at_ms, end_state FROM runs";
 
 type RunRow = (
     String,
     String,
     String,
-    i64,
     Option<i64>,
     Option<i64>,
     Option<String>,
@@ -303,24 +306,20 @@ fn run_row(row: &Row<'_>) -> rusqlite::Result<RunRow> {
         text(row, 0)?,
         text(row, 1)?,
         text(row, 2)?,
-        integer(row, 3)?,
+        row.get(3)?,
         row.get(4)?,
         row.get(5)?,
-        row.get(6)?,
     ))
 }
 
 fn run_from(row: RunRow) -> Result<Run, StateError> {
-    let (id, session, binding, ordinal, started, ended, end_state) = row;
+    let (id, session, binding, started, ended, end_state) = row;
     let run = Run::started(
         id.parse().map_err(FatalState::from)?,
         session.parse().map_err(FatalState::from)?,
         binding.parse().map_err(FatalState::from)?,
         occurrence(started),
-    )
-    .with_ordinal(RunOrdinal::from_position(u32::try_from(ordinal).map_err(
-        |_| unreadable("a run ordinal", "an out-of-range integer"),
-    )?));
+    );
     Ok(match end_state {
         None => run,
         Some(token) => run.ended(run_end_from_token(&token)?, occurrence(ended)),
@@ -343,18 +342,6 @@ pub(crate) fn live_run_of_binding(
     found
         .map(|id| id.parse().map_err(|error| FatalState::from(error).into()))
         .transpose()
-}
-
-pub(crate) fn run_count(
-    connection: &Connection,
-    session: CorralSessionId,
-) -> Result<u32, StateError> {
-    let count: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM runs WHERE session_id = ?1",
-        params![session.to_string()],
-        |row| row.get(0),
-    )?;
-    u32::try_from(count).map_err(|_| unreadable("a run count", "an out-of-range integer").into())
 }
 
 pub(crate) fn lineage_of(

@@ -85,7 +85,6 @@ CREATE TABLE runs (
     id                 TEXT PRIMARY KEY,
     session_id         TEXT NOT NULL REFERENCES sessions(id),
     runtime_binding_id TEXT NOT NULL REFERENCES bindings(id),
-    ordinal            INTEGER NOT NULL,
     started_at_ms      INTEGER,
     ended_at_ms        INTEGER,
     end_state          TEXT
@@ -256,10 +255,10 @@ enum StoredSchema {
     /// A perfectly good database that is not Corral's registry.
     NotARegistry,
     Version(u32),
-    /// The table exists and states nothing — a store whose own version was
-    /// lost. Never an empty store: creating the schema over it would fail on a
-    /// table that is already there, and reinterpreting it would read facts
-    /// written under an unknown version as if they were this one.
+    /// Corral's tables are there and the version is not — a store whose own
+    /// version was lost. Never an empty store: creating the schema over it
+    /// would fail on tables that are already there, and reinterpreting it would
+    /// read facts written under an unknown version as if they were this one.
     VersionLost,
 }
 
@@ -272,19 +271,33 @@ fn stored_schema(connection: &Connection) -> Result<StoredSchema, StateError> {
         )
         .optional()?;
     if table.is_none() {
-        // A file with tables but no `schema_version` is not an unwritten
-        // registry — it is somebody else's database. Creating the registry
-        // inside it would put the authoritative store and something unrelated
-        // in one file, which `ARCHITECTURE.md` §5 forbids outright.
-        let foreign: i64 = connection.query_row(
+        // A file with tables but no `schema_version` was written by
+        // something. Creating the registry inside it would either fail on a
+        // name collision or leave the authoritative store sharing a file with
+        // unrelated data — the same hazard §5 names when it keeps the registry
+        // and the history index apart, applied here by analogy rather than by
+        // quotation.
+        let tables: i64 = connection.query_row(
             "SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
             [],
             |row| row.get(0),
         )?;
-        if foreign > 0 {
-            return Ok(StoredSchema::NotARegistry);
+        if tables == 0 {
+            return Ok(StoredSchema::NeverWritten);
         }
-        return Ok(StoredSchema::NeverWritten);
+        // Corral's own tables without its version row is a damaged registry,
+        // not a stranger's file. Telling an operator to look at the wrong file
+        // is the worst answer available on a fail-closed startup path.
+        let ours: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('session_events', 'sessions')",
+            [],
+            |row| row.get(0),
+        )?;
+        return Ok(if ours > 0 {
+            StoredSchema::VersionLost
+        } else {
+            StoredSchema::NotARegistry
+        });
     }
     let version: Option<u32> = connection
         .query_row(

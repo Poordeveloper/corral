@@ -24,6 +24,6 @@ mod store;
 pub use error::{FatalState, Refusal, StateError};
 pub use event::SessionEvent;
 pub use store::{
-    BindingResolution, CommandAcceptance, Durability, RecordedEvent, RecordedRun, RunIdentity,
+    BindingResolution, CommandAcceptance, Durability, RecordedEvent, RecordedRun,
     SessionResolution, Store,
 };

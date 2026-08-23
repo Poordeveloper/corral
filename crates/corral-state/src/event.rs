@@ -45,13 +45,11 @@ pub enum SessionEvent {
         evidence: Evidence,
     },
     /// The process episode began.
-    /// The process episode began.
     ///
-    /// No ordinal: a Run's position is display data derived from the Runs its
-    /// Session already has, and a derived number frozen into an immutable log
-    /// could never be renumbered — which is exactly what correcting a wrong
-    /// binding does (ADR 0002 D1; `ARCHITECTURE.md` §5 records no derived
-    /// state).
+    /// No ordinal: a Run's position is read off the Runs its Session has, and
+    /// a number frozen into an immutable log could never be renumbered — which
+    /// is exactly what correcting a wrong binding does (ADR 0002 D1). The log
+    /// keeps facts; where a Run sits in a list is not one.
     RunStarted {
         session: CorralSessionId,
         run: RunId,

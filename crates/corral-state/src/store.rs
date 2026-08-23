@@ -4,7 +4,7 @@ use std::time::SystemTime;
 use corral_core::{
     Binding, BindingId, BindingKey, BindingKind, Command, CommandOutcome, CommandReceipt,
     CorralSessionId, Evidence, EvidenceSource, NodeId, OccurrenceTime, Provenance, Run, RunEnd,
-    RunId, RunOrdinal, Session, SessionLineage,
+    RunId, Session, SessionLineage,
 };
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
@@ -39,26 +39,15 @@ pub enum Durability {
     /// Deliberately not written, and the Run is unaffected by that: durability
     /// follows fact assurance, not object existence. Writing `RunStarted` into
     /// a Session's stream asserts the Run belongs to it, and under a Heuristic
-    /// runtime binding that assertion is a guess. A Run whose start was
-    /// withheld keeps its later facts out of the log too, because confirming
-    /// an association later never promotes earlier heuristic runtime metadata
-    /// into durable truth (ADR 0002 D6).
-    Withheld,
-}
-
-/// Which Run a start records.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RunIdentity {
-    /// A runtime occurrence Corral has not recorded before.
-    New,
-    /// A Run the store withheld while its association was only heuristic, and
-    /// which the caller has held as live state since.
+    /// runtime binding that assertion is a guess.
     ///
-    /// Its facts become durable when the association does — appended then,
-    /// never inserted into an earlier seq, and only while authoritative
-    /// runtime evidence still supports them (ADR 0002 D6). The caller brings
-    /// the identity back because the store kept no record of it.
-    Withheld(RunId),
+    /// A Run whose start was withheld keeps its later facts out of the log
+    /// too: confirming an association never *automatically* promotes earlier
+    /// heuristic runtime metadata into durable truth. What it does is make the
+    /// promotion possible — the runtime owner brings the Run back through
+    /// `record_withheld_run_started`, asserting that authoritative evidence
+    /// still supports it (ADR 0002 D6).
+    Withheld,
 }
 
 /// A Run, and whether the log took its start.
@@ -105,10 +94,10 @@ pub enum SessionResolution {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BindingResolution {
     Created(Binding),
-    /// The identity was already bound. The existing binding is authoritative,
-    /// including when it names a Session the caller did not expect: binding
-    /// uniqueness is what stops one external identity resolving to two
-    /// Sessions (`ARCHITECTURE.md` §1).
+    /// The identity was already bound to the Session the caller named, so the
+    /// link it asked for is the link that exists. An identity another Session
+    /// holds is refused instead — binding uniqueness is what stops one
+    /// external identity resolving to two Sessions (`ARCHITECTURE.md` §1).
     Existing(Binding),
 }
 
@@ -407,18 +396,21 @@ impl Store {
     ) -> Result<Binding, StateError> {
         self.write(move |transaction| {
             let evidence = as_stored_evidence(evidence)?;
-            // Confirmation strengthens. Persisting a weakening would be the
-            // assurance-change write Q15 deferred: no accepted event expresses
-            // it, and in an append-only log with no correction event it could
-            // never be undone.
+            let existing = require_binding(transaction, binding)?;
+            // A confirmation records evidence strong enough to assert a durable
+            // fact. Heuristic evidence is not a confirmation, and writing it
+            // would be the assurance-change persistence Q15 deferred — which an
+            // append-only log with no correction event could never undo. Not a
+            // claim that one level sits below another: Corral does not order
+            // assurance at all.
             if !evidence.assurance().may_assert_durable_fact() {
-                return Err(Refusal::ConfirmationWouldWeaken {
+                return Err(Refusal::UnsupportedConfirmation {
                     binding,
                     assurance: evidence.assurance(),
                 }
                 .into());
             }
-            let confirmed = require_binding(transaction, binding)?.with_evidence(evidence);
+            let confirmed = existing.with_evidence(evidence);
             refuse_second_control_capable_runtime_binding(transaction, &confirmed)?;
             Ok(Written::recording(
                 confirmed.clone(),
@@ -446,7 +438,38 @@ impl Store {
     pub fn record_run_started(
         &mut self,
         runtime_binding: BindingId,
-        identity: RunIdentity,
+        occurrence: EvidenceSource,
+        started: OccurrenceTime,
+    ) -> Result<RecordedRun, StateError> {
+        self.start_run(runtime_binding, None, occurrence, started)
+    }
+
+    /// Append the start of a Run the store withheld while its association was
+    /// only heuristic.
+    ///
+    /// This is D6's other half: the facts become durable when the association
+    /// does, appended then and never inserted into an earlier seq, carrying
+    /// the occurrence the runtime still supports.
+    ///
+    /// The caller brings the Run back whole rather than as a bare id, because
+    /// the store kept no record of it and has nothing else to check it
+    /// against. What it can check, it does: the Run names the binding the fact
+    /// will be filed under, and the Session that binding names — so a Run
+    /// cannot be attached to an association it does not itself claim.
+    pub fn record_withheld_run_started(
+        &mut self,
+        run: &Run,
+        occurrence: EvidenceSource,
+        started: OccurrenceTime,
+    ) -> Result<RecordedRun, StateError> {
+        let (id, binding, session) = (run.id(), run.runtime_binding(), run.session());
+        self.start_run(binding, Some((id, session)), occurrence, started)
+    }
+
+    fn start_run(
+        &mut self,
+        runtime_binding: BindingId,
+        withheld: Option<(RunId, CorralSessionId)>,
         occurrence: EvidenceSource,
         started: OccurrenceTime,
     ) -> Result<RecordedRun, StateError> {
@@ -463,11 +486,14 @@ impl Store {
                 }
                 .into());
             }
-            let id = match identity {
-                RunIdentity::New => RunId::mint(),
-                RunIdentity::Withheld(id) => {
+            let id = match withheld {
+                None => RunId::mint(),
+                Some((id, claimed)) => {
                     if projection::recorded_run(transaction, id)?.is_some() {
                         return Err(Refusal::RunAlreadyRecorded(id).into());
+                    }
+                    if claimed != binding.session() {
+                        return Err(Refusal::UnknownSession(claimed).into());
                     }
                     id
                 }
@@ -500,13 +526,10 @@ impl Store {
             // Saturating rather than wrapping: past four billion Runs the
             // number stops being useful, and a wrapped one would name a Run at
             // the top of the list.
-            // The position this Run will hold once the fact is applied. The
-            // projection derives the same number from the same rows; this copy
-            // exists only so the caller is handed a complete Run.
-            let ordinal = RunOrdinal::from_position(
-                projection::run_count(transaction, session)?.saturating_add(1),
-            );
-            let run = run.with_ordinal(ordinal);
+            // No ordinal here. A Run's position is read off the Runs its
+            // Session has, in the order they happened — one owner, and a Run
+            // whose start is learned late takes the place its occurrence
+            // earns rather than the place its acceptance fell in.
             Ok(Written::recording(
                 RecordedRun {
                     run: run.clone(),
@@ -592,13 +615,6 @@ impl Store {
     /// edge can reach the log (ADR 0002 D4).
     pub fn record_fork(&mut self, lineage: SessionLineage) -> Result<(), StateError> {
         let outcome = self.write(move |transaction| {
-            // The parent is checked at record time, not enforced by a foreign
-            // key: D8 keeps an edge whose target is deleted later, but an edge
-            // that never had a target is a producer bug, and an append-only
-            // log with no correction event cannot take it back.
-            if projection::session(transaction, lineage.parent())?.is_none() {
-                return Err(Refusal::UnknownSession(lineage.parent()).into());
-            }
             refuse_lineage_cycle(transaction, lineage)?;
             // A Session's origin is recorded once. Re-recording the same one is
             // a retry and does nothing; a different one is a conflict named as
@@ -614,6 +630,14 @@ impl Store {
                     assurance: recorded.assurance(),
                 }
                 .into());
+            }
+            // After the retry branch, never before it: D8 keeps an edge whose
+            // parent is deleted later, and a re-record of an edge the store
+            // already holds must stay a no-op once delete exists. An edge that
+            // never had a parent is a producer bug, and the log cannot take it
+            // back.
+            if projection::session(transaction, lineage.parent())?.is_none() {
+                return Err(Refusal::UnknownSession(lineage.parent()).into());
             }
             Ok(Written::recording(
                 (),
@@ -819,9 +843,11 @@ fn append(transaction: &Transaction<'_>, facts: &[SessionEvent]) -> Result<(), S
 /// The store keeps no record of a Run it withheld, so it cannot tell one from
 /// a Run it was never told about — and must not try. The binding's assurance
 /// now says nothing about what it was when that Run started, so consulting it
-/// here would refuse the ordinary discover → confirm → exit sequence, where a
-/// Run whose start was withheld quite correctly keeps its later facts out of
-/// the log too (ADR 0002 D6).
+/// here would refuse the ordinary discover → confirm → exit sequence.
+///
+/// A withheld Run stays out of the log until the runtime owner brings it back
+/// through `record_withheld_run_started`; until then, facts about it are
+/// withheld too.
 fn live_run_to_record(connection: &Connection, run: RunId) -> Result<Option<Run>, StateError> {
     match projection::recorded_run(connection, run)? {
         Some(recorded) if recorded.is_live() => Ok(Some(recorded)),
