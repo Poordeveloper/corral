@@ -13,7 +13,7 @@ mod support;
 
 use std::io::{BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use support::wire::{RawClient, error_code};
@@ -370,6 +370,65 @@ fn a_session_refuses_a_geometry_it_will_not_build() {
             "{rows}x{cols} was accepted: {refused}"
         );
     }
+}
+
+/// The product invariant, across the idle grace rather than at the instant of
+/// detaching: a daemon must not exit under managed work, because exiting
+/// closes every PTY master and hangs up every agent it was asked to keep.
+///
+/// The earlier version of this suite asserted immediately after detaching,
+/// which a daemon that exits sixty seconds later passes.
+#[test]
+fn a_managed_session_keeps_the_daemon_alive_after_everyone_detaches() {
+    let account =
+        TestAccount::new("session-holds-daemon").with_idle_grace(Duration::from_millis(300));
+    let daemon = account.start_daemon();
+
+    {
+        let mut client = RawClient::connect(&account.socket());
+        client.establish();
+        let _started = start_session(&mut client, 1, &["/bin/sh", "-c", "sleep 30"]);
+        // The client goes away here: nothing is attached and nobody is
+        // connected.
+    }
+
+    // Comfortably past the grace an idle daemon would have exited on.
+    std::thread::sleep(Duration::from_millis(1500));
+
+    let mut client = RawClient::try_connect(&account.socket())
+        .expect("the daemon exited while a managed session was running");
+    client.establish();
+    let listed = client
+        .request(1, "session.list", None)
+        .expect("session.list answered");
+    let sessions = result(&listed)
+        .get("sessions")
+        .and_then(Value::as_array)
+        .expect("a session array");
+
+    assert_eq!(sessions.len(), 1, "the session did not survive");
+    assert_eq!(
+        sessions[0].get("execution_state").and_then(Value::as_str),
+        Some("running"),
+        "the daemon survived but the work did not"
+    );
+    drop(daemon);
+}
+
+/// A daemon with no sessions and no clients still exits: holding it open for
+/// nothing is the other half of the same rule.
+#[test]
+fn a_daemon_with_no_sessions_still_exits_when_idle() {
+    let account = TestAccount::new("no-sessions-idle").with_idle_grace(Duration::from_millis(300));
+    let daemon = account.start_daemon();
+
+    {
+        let mut client = RawClient::connect(&account.socket());
+        client.establish();
+    }
+
+    let (status, _log) = daemon.wait();
+    assert_eq!(status, Some(0), "an idle daemon with no work did not exit");
 }
 
 /// Input a client sends reaches the child, and what the child does with it

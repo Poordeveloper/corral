@@ -103,3 +103,68 @@ async fn shutdown_is_broadcast_to_every_subscriber() {
     assert!(second.changed().await.is_ok());
     assert!(*first.borrow());
 }
+
+/// Managed work holds the daemon exactly as a client does. Without this a
+/// daemon exits sixty seconds after the last person detaches and hangs up every
+/// agent it was asked to keep.
+#[test]
+fn a_managed_session_holds_the_daemon_open_with_no_clients() {
+    let started = Instant::now();
+    let lifecycle = Lifecycle::new(started);
+    assert_eq!(lifecycle.managed_sessions(), 0);
+
+    lifecycle.managed_sessions_now(1);
+
+    assert_eq!(lifecycle.managed_sessions(), 1);
+    assert_eq!(
+        lifecycle.poll_idle(
+            Duration::from_millis(1),
+            started + Duration::from_secs(3600)
+        ),
+        IdleCheck::Busy,
+        "the daemon was ready to exit under managed work"
+    );
+}
+
+/// The last session ending starts the clock, the same way the last client
+/// leaving does.
+#[test]
+fn the_last_session_ending_makes_the_daemon_idle() {
+    let started = Instant::now();
+    let lifecycle = Lifecycle::new(started);
+    lifecycle.managed_sessions_now(2);
+
+    lifecycle.managed_sessions_now(0);
+
+    assert!(matches!(
+        lifecycle.poll_idle(Duration::from_secs(60), started),
+        IdleCheck::Wait(_)
+    ));
+    assert_eq!(
+        lifecycle.poll_idle(
+            Duration::from_millis(1),
+            Instant::now() + Duration::from_secs(3600)
+        ),
+        IdleCheck::Committed
+    );
+}
+
+/// A client and a session each hold it: neither leaving alone is enough.
+#[test]
+fn a_client_and_a_session_hold_the_daemon_independently() {
+    let started = Instant::now();
+    let lifecycle = Lifecycle::new(started);
+    lifecycle.managed_sessions_now(1);
+    let client = lifecycle.establish().expect("established");
+
+    drop(client);
+
+    assert_eq!(
+        lifecycle.poll_idle(
+            Duration::from_millis(1),
+            started + Duration::from_secs(3600)
+        ),
+        IdleCheck::Busy,
+        "a session stopped holding the daemon when a client left"
+    );
+}

@@ -107,7 +107,17 @@ async fn attach(connection: &mut Connection, session: &str) -> ExitCode {
         Err(error) => return report_request_failure(&error),
     };
 
-    match terminal::run(channel).await {
+    // The session's size is what the daemon reports; this terminal's is what
+    // the person has. Told to `run` so it can reconcile them at once —
+    // otherwise a 50x200 terminal renders a 24x80 session in the corner for
+    // the whole attach, and an 80-column terminal wraps a 200-column session
+    // into garbage.
+    let session_geometry = terminal::Geometry {
+        rows: grant.rows,
+        cols: grant.cols,
+    };
+
+    match terminal::run(channel, session_geometry).await {
         Ok(()) => {
             eprintln!("detached from {resolved}");
             ExitCode::SUCCESS

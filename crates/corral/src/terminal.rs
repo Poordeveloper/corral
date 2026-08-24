@@ -121,7 +121,12 @@ pub fn apply(frame: &TerminalFrame, out: &mut impl Write) -> std::io::Result<()>
         }
         // Kinds only a client sends, and kinds this build does not know. Both
         // are skipped: the length prefix already said how much to drop.
-        FrameKind::Input | FrameKind::Resize | FrameKind::ResyncRequest | FrameKind::Unknown(_) => {
+        FrameKind::Input | FrameKind::Resize | FrameKind::ResyncRequest => Ok(()),
+        // The skippability rule has one owner, in the protocol crate, so a
+        // receiver added later cannot quietly decide it differently.
+        other if other.is_skippable() => Ok(()),
+        other => {
+            debug_assert!(false, "no rule for {other:?}");
             Ok(())
         }
     }
@@ -194,7 +199,10 @@ mod tests;
 /// person typing must not wait for the screen, and the screen must not wait
 /// for a keystroke. Reading the local terminal blocks, so it runs on its own
 /// thread and hands bytes over.
-pub async fn run(channel: corral_client::TerminalChannel) -> std::io::Result<()> {
+pub async fn run(
+    channel: corral_client::TerminalChannel,
+    session_geometry: Geometry,
+) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let raw = RawMode::enter()?;
@@ -232,7 +240,9 @@ pub async fn run(channel: corral_client::TerminalChannel) -> std::io::Result<()>
     // Bytes that arrived with the handshake are already terminal frames.
     let mut pending = channel.leftover;
     let mut buffer = [0_u8; 65536];
-    let mut local = Geometry::of(&std::io::stdin());
+    // Seeded from the session, not from this terminal: the two are compared
+    // below, and starting them equal would mean never reconciling them.
+    let mut local = Some(session_geometry);
     // Adopted from what arrives rather than assumed: a resize opens a new
     // epoch, and input still labelled with the old one names a screen shape
     // that no longer exists.
@@ -244,7 +254,8 @@ pub async fn run(channel: corral_client::TerminalChannel) -> std::io::Result<()>
     // A person who resizes their window and then just watches must still get a
     // correct screen, so the local size is checked on a tick rather than only
     // when a key is pressed. Polling instead of SIGWINCH keeps the client
-    // single-threaded about its own geometry.
+    // single-threaded about its own geometry. The first tick fires
+    // immediately, which is what reconciles this terminal with the session's.
     let mut geometry_check = tokio::time::interval(std::time::Duration::from_millis(250));
     geometry_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 

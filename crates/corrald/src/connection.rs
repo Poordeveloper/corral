@@ -178,9 +178,13 @@ async fn bootstrap(
         return None;
     }
 
-    // A hello claiming the terminal-data role is answered only if its token
-    // opens something: refusing before the daemon commits to anything means a
-    // spent or forged token costs a connection, not a session.
+    // Establish before answering: between the decision and the answer, an idle
+    // shutdown must not be able to commit behind this client's back.
+    let guard = lifecycle.establish()?;
+
+    // Redeemed only now. A token is single-use, so consuming it before the
+    // connection is certain to be served would spend a client's capability on
+    // a connection that then closed with no answer at all.
     let role = match hello.role.as_ref() {
         None => None,
         Some(role) => match redeem_role(role, state) {
@@ -200,9 +204,6 @@ async fn bootstrap(
         },
     };
 
-    // Establish before answering: between the decision and the answer, an idle
-    // shutdown must not be able to commit behind this client's back.
-    let guard = lifecycle.establish()?;
     if write_hello(writer, request.id, &server_hello)
         .await
         .is_err()
@@ -339,7 +340,7 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
         // would still fork children and mint terminal capabilities while
         // refusing to list what it had just created.
         method::SESSION_NEW => match state.vouch().await {
-            Ok(Vouched::Yes) => Dispatch::Reply(session_new(request, state)),
+            Ok(Vouched::Yes) => Dispatch::Reply(session_new(request, state).await),
             Ok(Vouched::NotNow) => Dispatch::Reply(Frame::error(
                 id,
                 ProtocolError::new(ErrorCode::Busy, "the registry is held by another writer"),
@@ -395,7 +396,26 @@ fn encode_session(session: &ManagedSession) -> serde_json::Value {
 }
 
 /// Start a managed session and its first Run.
-fn session_new(request: &Request, state: &Arc<DaemonState>) -> Frame {
+/// Create a session on the blocking pool.
+///
+/// `openpty` plus fork and exec can take a while under memory pressure, and
+/// `LaunchRequest::new` stats the working directory. On the daemon's one
+/// reactor thread that window is one where nothing else is served — the same
+/// cost every other call here goes out of its way to avoid.
+async fn start_off_the_reactor(
+    launch: LaunchRequest,
+    geometry: PtyGeometry,
+    session: corral_core::CorralSessionId,
+    run: corral_core::RunId,
+) -> Result<crate::runtime::SessionHandle, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::runtime::start(&launch, geometry, session, run).map_err(|error| error.to_string())
+    })
+    .await
+    .unwrap_or_else(|_| Err("the session could not be started".to_owned()))
+}
+
+async fn session_new(request: &Request, state: &Arc<DaemonState>) -> Frame {
     let id = request.id;
     let params: SessionNewParams = match request.params.clone() {
         Some(params) => match serde_json::from_value(params) {
@@ -459,15 +479,12 @@ fn session_new(request: &Request, state: &Arc<DaemonState>) -> Frame {
     let session = corral_core::CorralSessionId::mint();
     let run = corral_core::RunId::mint();
 
-    let handle = match crate::runtime::start(&launch, geometry, session, run) {
+    let handle = match start_off_the_reactor(launch, geometry, session, run).await {
         Ok(handle) => handle,
         // The command never ran, so no Run exists to report. Saying otherwise
         // would record a runtime occurrence that never happened.
         Err(error) => {
-            return Frame::error(
-                id,
-                ProtocolError::new(ErrorCode::InvalidParams, error.to_string()),
-            );
+            return Frame::error(id, ProtocolError::new(ErrorCode::InvalidParams, error));
         }
     };
 

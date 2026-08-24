@@ -29,6 +29,9 @@ pub async fn serve(socket: &Path, policy: DaemonPolicy, state: Arc<DaemonState>)
     std::fs::set_permissions(socket, PermissionsExt::from_mode(0o600))?;
 
     let lifecycle = Lifecycle::new(Instant::now());
+    // Before anything can be served, so no session can be started without the
+    // lifecycle hearing about it.
+    state.attach_lifecycle(Arc::clone(&lifecycle));
     let mut shutdown = lifecycle.subscribe();
 
     tokio::spawn(watch_idle(Arc::clone(&lifecycle), policy.idle_grace));
@@ -63,6 +66,10 @@ pub async fn serve(socket: &Path, policy: DaemonPolicy, state: Arc<DaemonState>)
     debug!(
         reason = ?lifecycle.shutdown_reason(),
         established = lifecycle.established_clients(),
+        // A daemon stopping with sessions still running is the one shutdown
+        // worth being able to see afterwards: it means managed work ended
+        // because the daemon did.
+        sessions = lifecycle.managed_sessions(),
         "corrald is shutting down"
     );
     lifecycle.mark_exited();

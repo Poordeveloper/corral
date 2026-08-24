@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use corral_core::{CorralSessionId, RunId};
-use corral_protocol::terminal::{FrameKind, Sequence, TerminalFrame};
+use corral_protocol::terminal::{FrameKind, TerminalFrame};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::debug;
@@ -40,6 +40,14 @@ pub async fn serve(
     // this framing, and dropping them would lose a first keystroke.
     let mut pending = leftover;
     let mut buffer = [0_u8; 8192];
+
+    // Acted on before waiting. A client that pipelines its hello with a resync
+    // and then waits for the snapshot would otherwise deadlock: this loop
+    // waits for a read that the client is waiting for an answer to make.
+    match consume_pending(&mut pending, writer, session, run, state, &mut attachment).await {
+        Handled::Continue => {}
+        Handled::Close => return,
+    }
 
     loop {
         // Output the daemon produced and frames the client sent are
@@ -82,22 +90,38 @@ pub async fn serve(
                 };
                 pending.extend_from_slice(&buffer[..read]);
 
-                loop {
-                    match TerminalFrame::decode(&pending) {
-                        Err(error) => {
-                            debug!(%error, "a terminal frame could not be read");
-                            return;
-                        }
-                        Ok(None) => break,
-                        Ok(Some((frame, consumed))) => {
-                            pending.drain(..consumed);
-                            match handle(&frame, writer, session, run, state, &mut attachment).await
-                            {
-                                Handled::Continue => {}
-                                Handled::Close => return,
-                            }
-                        }
-                    }
+                match consume_pending(&mut pending, writer, session, run, state, &mut attachment)
+                    .await
+                {
+                    Handled::Continue => {}
+                    Handled::Close => return,
+                }
+            }
+        }
+    }
+}
+
+/// Act on every complete frame in the buffer.
+async fn consume_pending(
+    pending: &mut Vec<u8>,
+    writer: &mut OwnedWriteHalf,
+    session: CorralSessionId,
+    run: RunId,
+    state: &Arc<DaemonState>,
+    attachment: &mut Attachment,
+) -> Handled {
+    loop {
+        match TerminalFrame::decode(pending) {
+            Err(error) => {
+                debug!(%error, "a terminal frame could not be read");
+                return Handled::Close;
+            }
+            Ok(None) => return Handled::Continue,
+            Ok(Some((frame, consumed))) => {
+                pending.drain(..consumed);
+                match handle(&frame, writer, session, run, state, attachment).await {
+                    Handled::Continue => {}
+                    Handled::Close => return Handled::Close,
                 }
             }
         }
@@ -122,8 +146,9 @@ async fn handle(
     match frame.kind {
         // A kind this build does not know is skipped, not fatal: the length
         // prefix said exactly how much to drop, and refusing would make every
-        // future frame kind a breaking change.
-        FrameKind::Unknown(_) => Handled::Continue,
+        // future frame kind a breaking change. The rule itself lives in the
+        // protocol crate so both receivers cannot drift apart on it.
+        kind if kind.is_skippable() => Handled::Continue,
         FrameKind::Input => {
             let bytes = frame.payload.clone();
             match ask_session(session, run, state, move |handle| handle.write_input(bytes)).await {
@@ -167,7 +192,7 @@ async fn handle(
                     let frame = TerminalFrame {
                         kind: FrameKind::ChannelError,
                         epoch: attachment.epoch,
-                        sequence: Sequence(0),
+                        sequence: attachment.sequence,
                         payload: refused.to_string().into_bytes(),
                     };
                     if send(writer, &frame).await {
@@ -193,6 +218,9 @@ async fn handle(
         // Frames only the daemon sends. A client sending one is confused about
         // the channel's direction, which is not something to guess about.
         FrameKind::Snapshot | FrameKind::Delta | FrameKind::ChannelError => Handled::Close,
+        // Unreachable while every kind is either handled above or skippable;
+        // stated so a new kind has to decide rather than fall through.
+        FrameKind::Unknown(_) => Handled::Continue,
     }
 }
 
@@ -258,7 +286,7 @@ async fn send_snapshot(writer: &mut OwnedWriteHalf, attachment: &Attachment) -> 
                 &TerminalFrame {
                     kind: FrameKind::ChannelError,
                     epoch: attachment.epoch,
-                    sequence: Sequence(0),
+                    sequence: attachment.sequence,
                     payload: error.to_string().into_bytes(),
                 },
             )
@@ -271,12 +299,13 @@ async fn send_snapshot(writer: &mut OwnedWriteHalf, attachment: &Attachment) -> 
         writer,
         &TerminalFrame {
             kind: FrameKind::Snapshot,
-            // The epoch the snapshot actually belongs to. A snapshot labelled
-            // with an epoch the client has left is discarded by any client
-            // that follows the rule, which is exactly the divergence the epoch
-            // exists to prevent.
+            // The epoch and position the snapshot actually belongs to. A
+            // snapshot labelled with an epoch the client has left is discarded
+            // by any client that follows the rule, and one labelled sequence
+            // zero after thousands of chunks reads as a gap that never
+            // happened.
             epoch: attachment.epoch,
-            sequence: Sequence(0),
+            sequence: attachment.sequence,
             payload,
         },
     )

@@ -17,7 +17,7 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Instant;
 
 use corral_core::{CorralSessionId, RunId};
-use corral_protocol::terminal::Epoch;
+use corral_protocol::terminal::{Epoch, Sequence};
 
 use super::launch::LaunchRequest;
 use super::snapshot::{Snapshot, SnapshotError};
@@ -73,6 +73,12 @@ enum Ask {
 pub struct Attachment {
     pub snapshot: Result<Snapshot, SnapshotError>,
     pub epoch: Epoch,
+    /// Where in the epoch this snapshot sits.
+    ///
+    /// Carried because the deltas that follow carry their real positions: a
+    /// snapshot stamped zero after eight thousand chunks tells any client that
+    /// checks for gaps that it just missed eight thousand frames.
+    pub sequence: Sequence,
     pub viewer: super::stream::Viewer,
 }
 
@@ -296,9 +302,37 @@ pub fn start(
     let published_geometry = Arc::new(AtomicU32::new(pack_geometry(geometry)));
     let title = request.display_title();
 
-    let (screen, reaper) = runtime.split();
-    let reader = screen.reader().map_err(StartError::Terminal)?;
-    let writer = screen.writer().map_err(StartError::Terminal)?;
+    let (screen, mut reaper) = runtime.split();
+    // The child is already running. If its own handles cannot be taken there
+    // is no way to manage it, and leaving it is worse than never having
+    // started it: it would be alive, unreachable, and never reaped.
+    let handles = screen.reader().and_then(|reader| {
+        let writer = screen.writer()?;
+        Ok((reader, writer))
+    });
+    let (reader, mut writer) = match handles {
+        Ok(handles) => handles,
+        Err(error) => {
+            screen.hang_up();
+            let _ = reaper.wait();
+            return Err(StartError::Terminal(error));
+        }
+    };
+
+    // Writing to a PTY blocks when the child stops reading, and the child
+    // stops reading when its output is not drained — so a write on the thread
+    // that drains output can deadlock a session against itself. It gets its
+    // own thread and its own bounded queue: a client that floods a child that
+    // is not listening loses its keystrokes, and nothing else stops.
+    let (to_child, outbound) = sync_channel::<Vec<u8>>(64);
+    std::thread::spawn(move || {
+        while let Ok(bytes) = outbound.recv() {
+            if std::io::Write::write_all(&mut writer, &bytes).is_err() {
+                return;
+            }
+            let _ = std::io::Write::flush(&mut writer);
+        }
+    });
 
     let from_pty = asks.clone();
     // Reading the PTY blocks, and so does reaping the child, so both live off
@@ -318,7 +352,14 @@ pub fn start(
     let sizes = Arc::clone(&published_geometry);
     std::thread::spawn(move || {
         let _alive = held;
-        serve_screen(screen, writer, geometry, questions, published, sizes)
+        serve_screen(
+            Some(screen),
+            to_child,
+            geometry,
+            questions,
+            published,
+            sizes,
+        )
     });
 
     Ok(SessionHandle {
@@ -344,12 +385,17 @@ fn read_pty(
     asks: SyncSender<Ask>,
 ) {
     let mut buffer = [0_u8; 8192];
+    let mut screen_gone = false;
     loop {
         match std::io::Read::read(&mut reader, &mut buffer) {
             Ok(0) => break,
             Ok(read) => {
                 if asks.send(Ask::Output(buffer[..read].to_vec())).is_err() {
-                    return;
+                    // Nobody is left to show output to. The child still has to
+                    // be reaped: returning here would leave it a zombie for the
+                    // daemon's whole life.
+                    screen_gone = true;
+                    break;
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -359,8 +405,11 @@ fn read_pty(
 
     // The terminal closed, so the child is finishing. Reaping is what turns
     // that into a fact: without it the daemon could never say more than that
-    // it stopped hearing anything.
-    let _ = asks.send(Ask::Finished(reaper.wait().ok()));
+    // it stopped hearing anything — and the process would stay a zombie.
+    let ended = reaper.wait().ok();
+    if !screen_gone {
+        let _ = asks.send(Ask::Finished(ended));
+    }
 }
 
 /// The thread that owns one session's screen for its whole life.
@@ -371,8 +420,8 @@ fn read_pty(
 /// freeze every question about the session — and, because callers wait on the
 /// daemon's single reactor thread, freeze the daemon with it.
 fn serve_screen(
-    screen: super::spawn::ManagedTerminal,
-    mut writer: Box<dyn std::io::Write + Send>,
+    mut screen: Option<super::spawn::ManagedTerminal>,
+    to_child: SyncSender<Vec<u8>>,
     geometry: PtyGeometry,
     questions: Receiver<Ask>,
     execution: Arc<AtomicU8>,
@@ -391,11 +440,19 @@ fn serve_screen(
                 let sequence = stream.advance();
                 stream.deliver(sequence, &chunk);
                 if !reply.is_empty() {
-                    let _ = std::io::Write::write_all(&mut writer, reply.as_bytes());
-                    let _ = std::io::Write::flush(&mut writer);
+                    // Queued, never written here: a child that has stopped
+                    // reading must not be able to stop this loop.
+                    let _ = to_child.try_send(reply.as_bytes().to_vec());
                 }
             }
             Ask::Finished(status) => {
+                // The child is gone, so the terminal it was on has no further
+                // use: dropping it returns the master and its clones. The
+                // screen stays readable — someone attaching after an agent
+                // finished still needs what it left — but a daemon that ran a
+                // thousand short sessions must not still hold a thousand pty
+                // descriptors.
+                screen = None;
                 execution.store(
                     match status {
                         // An exit Corral watched happen.
@@ -413,15 +470,23 @@ fn serve_screen(
                 let _ = reply.send(super::snapshot::encode(&terminal));
             }
             Ask::Resize(wanted, reply) => {
-                let outcome = apply_resize(&screen, &mut terminal, &mut stream, wanted);
+                let outcome = match screen.as_ref() {
+                    Some(screen) => apply_resize(screen, &mut terminal, &mut stream, wanted),
+                    // A terminal whose child has gone cannot be resized, and
+                    // saying so is better than reflowing a screen nothing will
+                    // redraw.
+                    None => Err(ResizeRefused::TerminalRefused),
+                };
                 if outcome.is_ok() {
                     published_geometry.store(pack_geometry(wanted), Ordering::Release);
                 }
                 let _ = reply.send(outcome);
             }
             Ask::Input(input) => {
-                let _ = std::io::Write::write_all(&mut writer, &input);
-                let _ = std::io::Write::flush(&mut writer);
+                // Dropped rather than queued without bound when the child is
+                // not reading: losing keystrokes a child refuses to take is
+                // better than a session that answers nothing at all.
+                let _ = to_child.try_send(input);
             }
             Ask::Geometry(reply) => {
                 // Always answered. Dropping the channel would report
@@ -435,13 +500,16 @@ fn serve_screen(
                 let _ = reply.send(terminal.title().map(<[u8]>::to_vec));
             }
             Ask::ShutDown => {
-                screen.hang_up();
+                if let Some(screen) = screen.as_ref() {
+                    screen.hang_up();
+                }
                 return;
             }
             Ask::Attach(reply) => {
                 let _ = reply.send(Attachment {
                     snapshot: super::snapshot::encode(&terminal),
                     epoch: stream.epoch(),
+                    sequence: stream.next_sequence(),
                     viewer: stream.attach(),
                 });
             }

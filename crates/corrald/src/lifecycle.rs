@@ -38,9 +38,24 @@ pub enum IdleCheck {
 struct State {
     phase: Phase,
     established: usize,
-    /// `Some` exactly while there are no established clients.
+    /// Managed sessions this daemon is running.
+    ///
+    /// They hold the daemon busy exactly as a client does. Without this a
+    /// daemon exits sixty seconds after the last person detaches, closing every
+    /// PTY master and hanging up every agent it was asked to keep — which is
+    /// the one thing this daemon exists to prevent (AGENTS.md §Client / daemon
+    /// boundary: closing a UI surface must not terminate managed work).
+    managed_sessions: usize,
+    /// `Some` exactly while nothing holds the daemon busy.
     idle_since: Option<Instant>,
     reason: Option<ShutdownReason>,
+}
+
+impl State {
+    /// Whether anything at all keeps this daemon alive.
+    fn busy(&self) -> bool {
+        self.established > 0 || self.managed_sessions > 0
+    }
 }
 
 /// The single serialization point for "may this daemon exit".
@@ -71,6 +86,7 @@ impl Lifecycle {
             state: Mutex::new(State {
                 phase: Phase::Running,
                 established: 0,
+                managed_sessions: 0,
                 idle_since: Some(now),
                 reason: None,
             }),
@@ -97,6 +113,28 @@ impl Lifecycle {
 
     pub fn established_clients(&self) -> usize {
         self.lock().established
+    }
+
+    pub fn managed_sessions(&self) -> usize {
+        self.lock().managed_sessions
+    }
+
+    /// Record how many managed sessions the daemon is running.
+    ///
+    /// Called by whoever owns the registry after it changes, because the
+    /// registry is the only thing that knows — and a lifetime decision made
+    /// without it would end work nobody asked to end.
+    pub fn managed_sessions_now(self: &Arc<Self>, count: usize) {
+        {
+            let mut state = self.lock();
+            state.managed_sessions = count;
+            if state.busy() {
+                state.idle_since = None;
+            } else if state.idle_since.is_none() {
+                state.idle_since = Some(Instant::now());
+            }
+        }
+        self.changed.notify_one();
     }
 
     /// Promote a handshaken connection to an established client.
@@ -175,7 +213,7 @@ impl Lifecycle {
         {
             let mut state = self.lock();
             state.established = state.established.saturating_sub(1);
-            if state.established == 0 && state.idle_since.is_none() {
+            if !state.busy() && state.idle_since.is_none() {
                 state.idle_since = Some(Instant::now());
             }
         }

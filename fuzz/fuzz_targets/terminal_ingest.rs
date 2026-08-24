@@ -12,24 +12,52 @@
 
 #![no_main]
 
+use std::cell::Cell;
+
 use corrald::runtime::{AuthoritativeTerminal, PtyGeometry, encode};
 use libfuzzer_sys::fuzz_target;
 
-/// libfuzzer-sys prints and aborts on every panic, which would make this
-/// target rediscover a contained upstream defect forever
-/// (`docs/evidence/pr3-terminal-fuzz-2026-08-24.md`). Silencing the hook does
-/// not weaken the target: libfuzzer-sys still wraps the body in its own
-/// `catch_unwind` and aborts on anything that escapes, so a panic Corral does
-/// *not* contain is still a crash. What changes is that a panic Corral *does*
-/// contain becomes a property to check rather than a run to throw away.
-fn quiet_panics() {
+thread_local! {
+    /// Set only while inside the call Corral contains panics for.
+    static INSIDE_CONTAINED_CALL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Silence the panic report *only* for panics Corral contains.
+///
+/// Without this the target rediscovers a known, contained upstream defect on
+/// every run (`docs/evidence/pr3-terminal-fuzz-2026-08-24.md`), and a nightly
+/// job that fails every night on the same known thing trains people to ignore
+/// it.
+///
+/// The previous version replaced libfuzzer-sys's hook outright, which was
+/// worse than the problem: that hook is what prints the message and backtrace
+/// and aborts, so an *uncontained* panic — exactly what this gate exists to
+/// catch — would have aborted with no diagnostic at all. The original is kept
+/// and delegated to for everything outside the contained call.
+fn install_hook() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| std::panic::set_hook(Box::new(|_| {})));
+    ONCE.call_once(|| {
+        let original = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if INSIDE_CONTAINED_CALL.with(Cell::get) {
+                return;
+            }
+            original(info);
+        }));
+    });
+}
+
+/// Run `work` with contained panics reported quietly.
+fn contained<T>(work: impl FnOnce() -> T) -> T {
+    INSIDE_CONTAINED_CALL.with(|inside| inside.set(true));
+    let outcome = work();
+    INSIDE_CONTAINED_CALL.with(|inside| inside.set(false));
+    outcome
 }
 
 fuzz_target!(|data: &[u8]| {
-    quiet_panics();
+    install_hook();
 
     if data.len() < 3 {
         return;
@@ -50,11 +78,13 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let mut terminal = AuthoritativeTerminal::new(geometry);
-    for piece in payload.chunks(chunk) {
-        // Device replies are dropped here: what they are is the daemon's
-        // business, that producing them does not crash is this target's.
-        let _reply = terminal.consume(piece);
-    }
+    contained(|| {
+        for piece in payload.chunks(chunk) {
+            // Device replies are dropped here: what they are is the daemon's
+            // business, that producing them does not crash is this target's.
+            let _reply = terminal.consume(piece);
+        }
+    });
 
     // A reflow touches every retained row, which is where a pathological
     // screen becomes unbounded work rather than a wrong screen.
