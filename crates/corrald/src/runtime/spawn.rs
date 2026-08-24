@@ -124,6 +124,23 @@ pub struct ManagedTerminal {
     master: Box<dyn MasterPty + Send>,
 }
 
+/// The process group Corral created a child as.
+///
+/// The child is its own group leader by construction — the backend calls
+///  before exec — so its pid is the group. Carried as a value rather
+/// than read back later, because reading it back is what makes teardown either
+/// silent or dangerous.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChildGroup(i32);
+
+impl ChildGroup {
+    /// The leader's pid, which is the group number.
+    pub fn as_pid(self) -> u32 {
+        // Non-negative by construction: it came from a pid Corral created.
+        self.0.unsigned_abs()
+    }
+}
+
 /// The process half: the one thing that can establish how a child ended.
 ///
 /// Separate because reaping blocks, and the thread that owns a screen must
@@ -136,9 +153,17 @@ pub struct ChildReaper {
 ///
 /// `TERM` is set for the child, not inherited: the emulator Corral runs is the
 /// terminal the child actually talks to, so the child is told what that
-/// terminal is (ADR 0003 D1, grill mechanism defaults). This is a property of
-/// each managed Run and says nothing about the daemon's own environment, which
-/// must never determine daemon identity or lifetime.
+/// terminal is (ADR 0003 D1, grill mechanism defaults).
+///
+/// Everything else in the child's environment is the daemon's, not the
+/// caller's — and `corrald` is long-lived and auto-started, so that is a
+/// snapshot of whichever client happened to start it. A shell's `PATH`,
+/// `VIRTUAL_ENV`, or `SSH_AUTH_SOCK` therefore do not reach an agent launched
+/// through Corral. `session.new` carries a working directory and no
+/// environment, so this is a stated limitation of this phase rather than
+/// something the wire can express: closing it means deciding which of a
+/// caller's variables Corral forwards, and that is a product decision this
+/// phase does not own.
 pub fn spawn(request: &LaunchRequest, geometry: PtyGeometry) -> Result<SpawnedRuntime, SpawnError> {
     let pair = native_pty_system()
         .openpty(geometry.to_pty_size())
@@ -170,6 +195,15 @@ pub fn spawn(request: &LaunchRequest, geometry: PtyGeometry) -> Result<SpawnedRu
 }
 
 impl SpawnedRuntime {
+    /// The group this child leads, if Corral knows its pid.
+    pub fn child_group(&self) -> Option<ChildGroup> {
+        // A pid past i32 is not something this platform produces; refusing is
+        // better than signalling a number that means something else.
+        self.process_id
+            .and_then(|pid| i32::try_from(pid).ok())
+            .map(ChildGroup)
+    }
+
     /// Split the runtime so the screen and the child can be owned separately.
     pub fn split(self) -> (ManagedTerminal, ChildReaper) {
         (
@@ -183,54 +217,6 @@ impl SpawnedRuntime {
     pub fn process_id(&self) -> Option<u32> {
         self.process_id
     }
-
-    /// The foreground process group of the managed terminal.
-    pub fn process_group_leader(&self) -> Option<i32> {
-        self.master.process_group_leader()
-    }
-
-    pub fn resize(&self, geometry: PtyGeometry) -> io::Result<()> {
-        self.master
-            .resize(geometry.to_pty_size())
-            .map_err(|error| io::Error::other(error.to_string()))
-    }
-
-    pub fn geometry(&self) -> io::Result<PtyGeometry> {
-        let size = self
-            .master
-            .get_size()
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        PtyGeometry::new(size.rows, size.cols)
-            .map_err(|impossible| io::Error::other(impossible.to_string()))
-    }
-
-    pub fn reader(&self) -> io::Result<Box<dyn io::Read + Send>> {
-        self.master
-            .try_clone_reader()
-            .map_err(|error| io::Error::other(error.to_string()))
-    }
-
-    pub fn writer(&self) -> io::Result<Box<dyn io::Write + Send>> {
-        self.master
-            .take_writer()
-            .map_err(|error| io::Error::other(error.to_string()))
-    }
-
-    /// Block until the child exits, yielding its exit code.
-    pub fn wait(&mut self) -> io::Result<u32> {
-        self.child.wait().map(|status| status.exit_code())
-    }
-}
-
-/// Hand-written because a `MasterPty` is not `Debug`: what identifies a
-/// managed runtime in a diagnostic is the process it holds, not the terminal
-/// machinery underneath it.
-impl std::fmt::Debug for SpawnedRuntime {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SpawnedRuntime")
-            .field("process_id", &self.process_id)
-            .finish_non_exhaustive()
-    }
 }
 
 impl ManagedTerminal {
@@ -238,6 +224,16 @@ impl ManagedTerminal {
         self.master
             .resize(geometry.to_pty_size())
             .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    /// The size the terminal itself reports.
+    pub fn geometry(&self) -> io::Result<PtyGeometry> {
+        let size = self
+            .master
+            .get_size()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        PtyGeometry::new(size.rows, size.cols)
+            .map_err(|impossible| io::Error::other(impossible.to_string()))
     }
 
     pub fn reader(&self) -> io::Result<Box<dyn io::Read + Send>> {
@@ -272,11 +268,14 @@ impl ManagedTerminal {
     /// have spawned (grill Q1). SIGHUP because that is what a terminal going
     /// away means, and a process that chooses to ignore it is making a
     /// decision Corral does not override.
-    pub fn hang_up(&self) {
-        let Some(leader) = self.process_group_leader() else {
-            return;
-        };
-        if let Some(pid) = rustix::process::Pid::from_raw(leader) {
+    ///
+    /// Targets the group Corral created the child as, not whatever the tty
+    /// reports now. The tty answers nothing at all in the window between fork
+    /// and setsid, so a teardown that asked it would silently do nothing —
+    /// and once the child has been reaped its old group number may belong to
+    /// something else entirely.
+    pub fn hang_up(&self, group: ChildGroup) {
+        if let Some(pid) = rustix::process::Pid::from_raw(group.0) {
             let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::HUP);
         }
     }

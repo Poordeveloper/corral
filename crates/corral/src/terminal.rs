@@ -165,21 +165,36 @@ fn drain_frames(
     out: &mut impl Write,
     epoch: &mut Epoch,
 ) -> std::io::Result<()> {
-    while let Ok(Some((frame, consumed))) = TerminalFrame::decode(pending) {
-        pending.drain(..consumed);
-        if frame.kind == FrameKind::Snapshot {
-            *epoch = frame.epoch;
+    loop {
+        match TerminalFrame::decode(pending) {
+            // Not yet a whole frame: the rest is still on its way.
+            Ok(None) => return Ok(()),
+            Ok(Some((frame, consumed))) => {
+                pending.drain(..consumed);
+                if frame.kind == FrameKind::Snapshot {
+                    *epoch = frame.epoch;
+                }
+                apply(&frame, out)?;
+            }
+            // A fault is never "wait for more". The offending header would
+            // never be consumed, so the screen would freeze with no message
+            // and no exit — indistinguishable from a hung agent.
+            Err(error) => return Err(std::io::Error::other(error.to_string())),
         }
-        apply(&frame, out)?;
     }
-    Ok(())
 }
 
 /// Read what the local terminal has, without blocking the caller forever.
 pub fn read_local(input: &mut impl Read, buffer: &mut [u8]) -> LocalInput {
-    match input.read(buffer) {
-        Ok(0) | Err(_) => LocalInput::Closed,
-        Ok(read) => split_at_detach(&buffer[..read]),
+    loop {
+        return match input.read(buffer) {
+            Ok(0) => LocalInput::Closed,
+            Ok(read) => split_at_detach(&buffer[..read]),
+            // A signal is not a person closing their terminal. Ending the
+            // attach here would detach someone mid-session and report success.
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => LocalInput::Closed,
+        };
     }
 }
 

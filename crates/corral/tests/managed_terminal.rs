@@ -415,6 +415,51 @@ fn a_managed_session_keeps_the_daemon_alive_after_everyone_detaches() {
     drop(daemon);
 }
 
+/// The other half of the same rule, and the one an over-eager fix breaks: a
+/// daemon that ran a command and finished it must be able to exit again. Only
+/// *live* runs hold it open, or a single `corral new -- true` keeps a
+/// background daemon alive for the machine's uptime.
+#[test]
+fn a_daemon_exits_again_once_its_session_has_finished() {
+    let account =
+        TestAccount::new("finished-session-idles").with_idle_grace(Duration::from_millis(300));
+    let daemon = account.start_daemon();
+
+    {
+        let mut client = RawClient::connect(&account.socket());
+        client.establish();
+        let started = start_session(&mut client, 1, &["/bin/sh", "-c", "exit 0"]);
+        let session = session_id(&started);
+
+        // Wait for the daemon to observe the exit rather than assuming it.
+        let deadline = Instant::now() + SETTLE;
+        let mut finished = false;
+        while Instant::now() < deadline && !finished {
+            let listed = client
+                .request(2, "session.list", None)
+                .expect("session.list answered");
+            finished = result(&listed)
+                .get("sessions")
+                .and_then(Value::as_array)
+                .is_some_and(|sessions| {
+                    sessions.iter().any(|entry| {
+                        entry.get("session_id").and_then(Value::as_str) == Some(session.as_str())
+                            && entry.get("execution_state").and_then(Value::as_str)
+                                != Some("running")
+                    })
+                });
+        }
+        assert!(finished, "the daemon never observed the command finishing");
+    }
+
+    let (status, _log) = daemon.wait();
+    assert_eq!(
+        status,
+        Some(0),
+        "a daemon whose only session had finished never exited"
+    );
+}
+
 /// A daemon with no sessions and no clients still exits: holding it open for
 /// nothing is the other half of the same rule.
 #[test]

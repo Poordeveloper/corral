@@ -7,7 +7,7 @@ use super::*;
 fn drain(viewer: &mut Viewer) -> Vec<Vec<u8>> {
     let mut received = Vec::new();
     while let Ok(delivery) = viewer.try_recv() {
-        received.push(delivery.bytes.clone());
+        received.push(delivery.bytes.to_vec());
     }
     received
 }

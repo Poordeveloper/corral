@@ -46,7 +46,7 @@ pub enum Desynchronised {
 pub struct Delivery {
     pub epoch: Epoch,
     pub sequence: Sequence,
-    pub bytes: Vec<u8>,
+    pub bytes: Arc<[u8]>,
     /// Released on drop, so a viewer that keeps up keeps its whole budget and
     /// a viewer that falls behind runs out of it.
     _room: OwnedSemaphorePermit,
@@ -141,6 +141,16 @@ impl TerminalStream {
         self.attached.len()
     }
 
+    /// End every viewer's stream.
+    ///
+    /// For the case where the daemon can no longer say what its screen holds:
+    /// continuing to forward raw bytes would let an attached client render a
+    /// screen nobody vouches for, while every new attach on the same session
+    /// is being refused.
+    pub fn drop_viewers(&mut self) {
+        self.attached.clear();
+    }
+
     /// Hand output to every attached viewer.
     ///
     /// A viewer that cannot keep up loses its whole stream rather than a piece
@@ -154,6 +164,10 @@ impl TerminalStream {
         // asking for room that cannot exist would drop every viewer. A PTY
         // read is far smaller, so this is a guard rather than a case.
         let wanted = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+        // One allocation for every viewer rather than one each: this is the
+        // daemon's hottest path, and the byte budget already charges each
+        // viewer for bytes it has no reason to own privately.
+        let shared: Arc<[u8]> = Arc::from(bytes);
 
         for viewer in &mut self.attached {
             if viewer.desynchronised.is_some() {
@@ -170,7 +184,7 @@ impl TerminalStream {
                 .try_send(Delivery {
                     epoch,
                     sequence,
-                    bytes: bytes.to_vec(),
+                    bytes: Arc::clone(&shared),
                     _room: room,
                 })
                 .is_err()

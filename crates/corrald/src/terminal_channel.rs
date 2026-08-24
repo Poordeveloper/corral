@@ -75,7 +75,7 @@ pub async fn serve(
                             kind: FrameKind::Delta,
                             epoch: delivery.epoch,
                             sequence: delivery.sequence,
-                            payload: delivery.bytes,
+                            payload: delivery.bytes.to_vec(),
                         };
                         if !send(writer, &frame).await {
                             return;
@@ -150,6 +150,12 @@ async fn handle(
         // protocol crate so both receivers cannot drift apart on it.
         kind if kind.is_skippable() => Handled::Continue,
         FrameKind::Input => {
+            // A client cannot make the daemon hold or forward more than its
+            // own limit, whatever the frame ceiling allows: that ceiling sizes
+            // snapshots the daemon sends, not input a client pushes.
+            if frame.payload.len() > corral_protocol::terminal::MAX_CLIENT_FRAME_BYTES {
+                return Handled::Close;
+            }
             let bytes = frame.payload.clone();
             match ask_session(session, run, state, move |handle| handle.write_input(bytes)).await {
                 // A session that no longer answers cannot receive keystrokes,

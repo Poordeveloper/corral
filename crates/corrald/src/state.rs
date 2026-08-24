@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use corral_state::{FatalState, Refusal, StateError, Store};
 
-use crate::lifecycle::Lifecycle;
 use crate::runtime::{AttachTokens, ManagedSessions};
 
 /// What the registry said when asked whether it can still vouch.
@@ -27,9 +26,7 @@ pub enum Vouched {
 /// other connection, the idle watchdog, and the signal handler along with it.
 pub struct DaemonState {
     store: Mutex<Store>,
-    /// Told how many sessions the daemon runs, because a daemon that exits
-    /// while managed work is running ends that work.
-    lifecycle: Mutex<Option<Arc<Lifecycle>>>,
+
     /// Set when a store call could not complete at all. The store latches its
     /// own conclusions, but it never saw this one, and the exit status is read
     /// from here.
@@ -59,7 +56,6 @@ impl DaemonState {
     pub fn open(registry: &Path) -> Result<Self, StateError> {
         Ok(Self {
             store: Mutex::new(Store::open(registry)?),
-            lifecycle: Mutex::new(None),
             unreachable: AtomicBool::new(false),
             runtime: Mutex::new(Runtime::default()),
         })
@@ -89,6 +85,33 @@ impl DaemonState {
         }
     }
 
+    /// How many managed runs are still running.
+    ///
+    /// Answered rather than announced: the idle check asks at the moment it
+    /// decides, so no caller can forget to report a change and leave a daemon
+    /// exiting under live work. Zero when the registry cannot be read, which
+    /// only delays an exit rather than causing one.
+    pub fn live_sessions(&self) -> usize {
+        self.runtime
+            .lock()
+            .map(|runtime| runtime.sessions.live())
+            .unwrap_or(0)
+    }
+
+    /// Work with the live runtime.
+    ///
+    /// Synchronous and short: these calls touch in-memory state and message a
+    /// session's own thread, so they never wait on a process the way a store
+    /// call can wait on a database.
+    pub fn with_runtime<T>(&self, work: impl FnOnce(&mut Runtime) -> T) -> Option<T> {
+        // A poisoned lock means a holder panicked mid-mutation, which is not
+        // something to paper over: the caller answers with what it says when
+        // the runtime cannot be consulted rather than reading state nobody
+        // finished writing.
+        let mut runtime = self.runtime.lock().ok()?;
+        Some(work(&mut runtime))
+    }
+
     /// Whether the registry has concluded it can no longer vouch for durable
     /// truth.
     ///
@@ -96,43 +119,6 @@ impl DaemonState {
     /// recorded: the conclusion has to survive the task that reached it being
     /// dropped mid-shutdown, or a daemon that stopped over an untrusted store
     /// could still exit as though nothing happened.
-    /// Work with the live runtime.
-    ///
-    /// Synchronous and short: these calls touch in-memory state and message a
-    /// session's own thread, so they never wait on a process the way a store
-    /// call can wait on a database.
-    /// Give the state the lifecycle it must keep informed.
-    ///
-    /// Set once at startup, after both exist. Held rather than passed to every
-    /// call site because the registry changes in several places and each of
-    /// them must report — a missed one is a daemon that exits under live work.
-    pub fn attach_lifecycle(&self, lifecycle: Arc<Lifecycle>) {
-        if let Ok(mut held) = self.lifecycle.lock() {
-            *held = Some(lifecycle);
-        }
-    }
-
-    pub fn with_runtime<T>(&self, work: impl FnOnce(&mut Runtime) -> T) -> Option<T> {
-        // A poisoned lock means a holder panicked mid-mutation, which is not
-        // something to paper over: the caller answers with what it says when
-        // the runtime cannot be consulted rather than reading state nobody
-        // finished writing.
-        let (outcome, sessions) = {
-            let mut runtime = self.runtime.lock().ok()?;
-            let outcome = work(&mut runtime);
-            (outcome, runtime.sessions.len())
-        };
-        // Reported after the lock is released and on every path, so no caller
-        // has to remember: a registry change nobody reported is a daemon that
-        // exits under live work.
-        if let Ok(lifecycle) = self.lifecycle.lock()
-            && let Some(lifecycle) = lifecycle.as_ref()
-        {
-            lifecycle.managed_sessions_now(sessions);
-        }
-        Some(outcome)
-    }
-
     pub fn stopped_vouching(&self) -> bool {
         self.unreachable.load(Ordering::SeqCst) || self.lock().stopped_vouching()
     }

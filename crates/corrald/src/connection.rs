@@ -187,6 +187,21 @@ async fn bootstrap(
     // a connection that then closed with no answer at all.
     let role = match hello.role.as_ref() {
         None => None,
+        // A role this build does not serve carried no token at all, so saying
+        // the token is bad would send a client looking for a problem it does
+        // not have. The decode already keeps the two facts apart; so does this.
+        Some(ConnectionRole::Unknown { kind }) => {
+            let _ = writer
+                .write_frame(&Frame::error(
+                    request.id,
+                    ProtocolError::new(
+                        ErrorCode::InvalidParams,
+                        format!("this daemon does not serve the {kind} role"),
+                    ),
+                ))
+                .await;
+            return None;
+        }
         Some(role) => match redeem_role(role, state) {
             Some(grant) => Some(grant),
             None => {
@@ -395,7 +410,6 @@ fn encode_session(session: &ManagedSession) -> serde_json::Value {
     .unwrap_or_else(|_| serde_json::json!({}))
 }
 
-/// Start a managed session and its first Run.
 /// Create a session on the blocking pool.
 ///
 /// `openpty` plus fork and exec can take a while under memory pressure, and
@@ -415,6 +429,7 @@ async fn start_off_the_reactor(
     .unwrap_or_else(|_| Err("the session could not be started".to_owned()))
 }
 
+/// Start a managed session and its first Run.
 async fn session_new(request: &Request, state: &Arc<DaemonState>) -> Frame {
     let id = request.id;
     let params: SessionNewParams = match request.params.clone() {

@@ -49,11 +49,22 @@ fn install_hook() {
 }
 
 /// Run `work` with contained panics reported quietly.
+///
+/// The flag is cleared by a guard rather than after the call: a panic that
+/// escapes would otherwise be reported under it — silencing the very
+/// diagnostic this target exists to produce — and would leave the flag set for
+/// every later iteration on the thread.
 fn contained<T>(work: impl FnOnce() -> T) -> T {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            INSIDE_CONTAINED_CALL.with(|inside| inside.set(false));
+        }
+    }
+
     INSIDE_CONTAINED_CALL.with(|inside| inside.set(true));
-    let outcome = work();
-    INSIDE_CONTAINED_CALL.with(|inside| inside.set(false));
-    outcome
+    let _restore = Restore;
+    work()
 }
 
 fuzz_target!(|data: &[u8]| {

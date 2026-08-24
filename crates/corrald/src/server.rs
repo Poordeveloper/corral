@@ -29,12 +29,14 @@ pub async fn serve(socket: &Path, policy: DaemonPolicy, state: Arc<DaemonState>)
     std::fs::set_permissions(socket, PermissionsExt::from_mode(0o600))?;
 
     let lifecycle = Lifecycle::new(Instant::now());
-    // Before anything can be served, so no session can be started without the
-    // lifecycle hearing about it.
-    state.attach_lifecycle(Arc::clone(&lifecycle));
     let mut shutdown = lifecycle.subscribe();
 
-    tokio::spawn(watch_idle(Arc::clone(&lifecycle), policy.idle_grace));
+    let counted = Arc::clone(&state);
+    tokio::spawn(watch_idle(
+        Arc::clone(&lifecycle),
+        policy.idle_grace,
+        move || counted.live_sessions(),
+    ));
     tokio::spawn(watch_signals(Arc::clone(&lifecycle)));
 
     info!(endpoint = %socket.display(), "corrald is serving");

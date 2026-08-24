@@ -14,14 +14,45 @@ fn request(program: &str, args: &[&str]) -> LaunchRequest {
     .expect("a valid launch request")
 }
 
-fn started(script: &str) -> SessionHandle {
-    start(
-        &request("/bin/sh", &["-c", script]),
-        GEOMETRY,
-        CorralSessionId::mint(),
-        RunId::mint(),
-    )
-    .expect("the session starts")
+/// A started session, hung up however the test ends.
+///
+/// Setup with a matching end: without it every case here leaves a live child
+/// and two threads behind for the length of its own sleep.
+struct Running(Option<SessionHandle>);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.as_ref() {
+            handle.shut_down();
+        }
+    }
+}
+
+impl Running {
+    /// Hand the handle to something that owns it from here on.
+    fn into_handle(mut self) -> SessionHandle {
+        self.0.take().expect("a running session")
+    }
+}
+
+impl std::ops::Deref for Running {
+    type Target = SessionHandle;
+
+    fn deref(&self) -> &SessionHandle {
+        self.0.as_ref().expect("a running session")
+    }
+}
+
+fn started(script: &str) -> Running {
+    Running(Some(
+        start(
+            &request("/bin/sh", &["-c", script]),
+            GEOMETRY,
+            CorralSessionId::mint(),
+            RunId::mint(),
+        )
+        .expect("the session starts"),
+    ))
 }
 
 /// Wait for the screen to reflect something, rather than sleeping a fixed
@@ -136,8 +167,8 @@ fn child_output_reaches_the_daemons_screen() {
 #[test]
 fn a_daemon_describes_the_sessions_it_runs() {
     let mut sessions = ManagedSessions::new();
-    sessions.insert(started("sleep 30"));
-    sessions.insert(started("sleep 30"));
+    sessions.insert(started("sleep 30").into_handle());
+    sessions.insert(started("sleep 30").into_handle());
 
     let described = sessions.describe();
 
@@ -160,7 +191,7 @@ fn an_observed_exit_is_reported_as_exited() {
     let exited = wait_for(|| (handle.execution_state() == ExecutionState::Exited).then_some(()));
     assert!(exited.is_some(), "the daemon never observed the exit");
 
-    sessions.insert(handle);
+    sessions.insert(handle.into_handle());
     assert_eq!(
         sessions.describe()[0].execution_state,
         ExecutionState::Exited
@@ -195,7 +226,7 @@ fn a_finished_sessions_screen_is_still_readable() {
 #[test]
 fn a_session_whose_runtime_stops_answering_is_unknown_not_exited() {
     let mut sessions = ManagedSessions::new();
-    let mut handle = started("sleep 30");
+    let mut handle = started("sleep 30").into_handle();
     // Sever the daemon's ability to ask, which is exactly what a lost runtime
     // looks like from here: the process's fate is not part of what happened.
     handle.sever_for_test();

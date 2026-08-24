@@ -55,10 +55,49 @@ fn request(program: &str, args: &[&str]) -> LaunchRequest {
     .expect("a valid launch request")
 }
 
+/// A spawned runtime, split the way production splits it, and torn down
+/// however the test ends.
+///
+/// Without the teardown every case here leaves a live child behind for the
+/// length of its own sleep: setup with no matching end.
+struct Started {
+    screen: ManagedTerminal,
+    reaper: ChildReaper,
+    group: Option<ChildGroup>,
+}
+
+impl std::fmt::Debug for Started {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Started")
+            .field("group", &self.group)
+            .finish()
+    }
+}
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        if let Some(group) = self.group {
+            self.screen.hang_up(group);
+        }
+        let _ = self.reaper.wait();
+    }
+}
+
+fn started(request: &LaunchRequest) -> Result<Started, SpawnError> {
+    let runtime = spawn(request, GEOMETRY)?;
+    let group = runtime.child_group();
+    let (screen, reaper) = runtime.split();
+    Ok(Started {
+        screen,
+        reaper,
+        group,
+    })
+}
+
 /// Read the terminal to EOF so the child never blocks on a full buffer, then
 /// return what it wrote.
-fn drain(runtime: &SpawnedRuntime) -> std::sync::mpsc::Receiver<Vec<u8>> {
-    let mut reader = runtime.reader().expect("clone the reader");
+fn drain(runtime: &Started) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let mut reader = runtime.screen.reader().expect("clone the reader");
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut output = Vec::new();
@@ -70,8 +109,8 @@ fn drain(runtime: &SpawnedRuntime) -> std::sync::mpsc::Receiver<Vec<u8>> {
 
 #[test]
 fn spawn_missing_executable_is_error() {
-    let error = spawn(&request("/definitely/not/here", &[]), GEOMETRY)
-        .expect_err("a missing program cannot start");
+    let error =
+        started(&request("/definitely/not/here", &[])).expect_err("a missing program cannot start");
 
     assert!(matches!(error, SpawnError::Exec(_)), "{error}");
 }
@@ -80,7 +119,7 @@ fn spawn_missing_executable_is_error() {
 fn spawn_non_executable_is_error() {
     let file = scratch("no-exec-bit", b"#!/bin/sh\necho hi\n", 0o644);
 
-    let error = spawn(&request(&file.0.to_string_lossy(), &[]), GEOMETRY)
+    let error = started(&request(&file.0.to_string_lossy(), &[]))
         .expect_err("a file without an exec bit cannot start");
 
     assert!(matches!(error, SpawnError::Exec(_)), "{error}");
@@ -92,7 +131,7 @@ fn spawn_non_executable_is_error() {
 fn spawn_bad_shebang_is_error() {
     let file = scratch("bad-shebang", b"#!/definitely/not/here\n", 0o755);
 
-    let error = spawn(&request(&file.0.to_string_lossy(), &[]), GEOMETRY)
+    let error = started(&request(&file.0.to_string_lossy(), &[]))
         .expect_err("a dangling interpreter cannot start");
 
     assert!(matches!(error, SpawnError::Exec(_)), "{error}");
@@ -104,10 +143,10 @@ fn spawn_bad_shebang_is_error() {
 #[test]
 fn spawn_exit_1_is_distinguishable_from_exec_failure() {
     let mut runtime =
-        spawn(&request("/bin/sh", &["-c", "exit 1"]), GEOMETRY).expect("a real program starts");
+        started(&request("/bin/sh", &["-c", "exit 1"])).expect("a real program starts");
     let output = drain(&runtime);
 
-    assert_eq!(runtime.wait().expect("reap the child"), 1);
+    assert_eq!(runtime.reaper.wait().expect("reap the child"), 1);
     let _ = output.recv_timeout(std::time::Duration::from_secs(5));
 
     let never_started = spawn(
@@ -127,11 +166,10 @@ fn spawn_exit_1_is_distinguishable_from_exec_failure() {
 
 #[test]
 fn spawn_exit_42_is_preserved() {
-    let mut runtime =
-        spawn(&request("/bin/sh", &["-c", "exit 42"]), GEOMETRY).expect("the program starts");
+    let mut runtime = started(&request("/bin/sh", &["-c", "exit 42"])).expect("the program starts");
     let output = drain(&runtime);
 
-    assert_eq!(runtime.wait().expect("reap the child"), 42);
+    assert_eq!(runtime.reaper.wait().expect("reap the child"), 42);
     let _ = output.recv_timeout(std::time::Duration::from_secs(5));
 }
 
@@ -140,16 +178,16 @@ fn spawn_exit_42_is_preserved() {
 /// target rather than a single pid.
 #[test]
 fn pty_child_is_session_and_process_group_leader() {
-    let mut runtime = spawn(
-        &request("/bin/sh", &["-c", "ps -o pid,pgid -p $$ | tail -1"]),
-        GEOMETRY,
-    )
+    let mut runtime = started(&request(
+        "/bin/sh",
+        &["-c", "ps -o pid,pgid -p $$ | tail -1"],
+    ))
     .expect("the program starts");
     let output = drain(&runtime);
-    let leader = runtime.process_group_leader();
-    let pid = runtime.process_id();
+    let leader = runtime.screen.process_group_leader();
+    let pid = runtime.group.map(ChildGroup::as_pid);
 
-    let _ = runtime.wait().expect("reap the child");
+    let _ = runtime.reaper.wait().expect("reap the child");
     let reported = output
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("the child's report");
@@ -170,27 +208,38 @@ fn pty_child_is_session_and_process_group_leader() {
 /// Geometry set at spawn reaches the child, and a later resize replaces it.
 #[test]
 fn pty_resize_round_trips() {
-    let mut runtime = spawn(
-        &request("/bin/sh", &["-c", "stty size; read _ignored; stty size"]),
-        GEOMETRY,
-    )
+    let mut runtime = started(&request(
+        "/bin/sh",
+        &["-c", "stty size; read _ignored; stty size"],
+    ))
     .expect("the program starts");
-    let mut reader = runtime.reader().expect("clone the reader");
-    let mut writer = runtime.writer().expect("take the writer");
+    let mut reader = runtime.screen.reader().expect("clone the reader");
+    let mut writer = runtime.screen.writer().expect("take the writer");
 
-    let mut first = [0_u8; 64];
-    let read = reader.read(&mut first).expect("the first size line");
+    // Read until the line is complete: a pty returns whatever is ready, so a
+    // single read can hand back "31 " and nothing more. Asserting on one read
+    // is the classic flaky-test shape.
+    let mut first = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !first.contains(&b'\n') {
+        let read = reader.read(&mut byte).expect("the first size line");
+        if read == 0 {
+            break;
+        }
+        first.push(byte[0]);
+    }
     assert!(
-        String::from_utf8_lossy(&first[..read]).contains("31 113"),
+        String::from_utf8_lossy(&first).contains("31 113"),
         "the child starts at the geometry it was spawned with, got {:?}",
-        String::from_utf8_lossy(&first[..read])
+        String::from_utf8_lossy(&first)
     );
 
     runtime
+        .screen
         .resize(PtyGeometry::expect_valid(24, 80))
         .expect("resize the terminal");
     assert_eq!(
-        runtime.geometry().expect("read the geometry back"),
+        runtime.screen.geometry().expect("read the geometry back"),
         PtyGeometry::expect_valid(24, 80)
     );
 
@@ -206,21 +255,18 @@ fn pty_resize_round_trips() {
         String::from_utf8_lossy(&rest)
     );
 
-    let _ = runtime.wait();
+    let _ = runtime.reaper.wait();
 }
 
 /// The child is told what terminal it is talking to, and that is Corral's
 /// emulator rather than whatever the daemon's own environment says.
 #[test]
 fn the_child_is_told_which_terminal_it_talks_to() {
-    let mut runtime = spawn(
-        &request("/bin/sh", &["-c", "printf '[%s]' \"$TERM\""]),
-        GEOMETRY,
-    )
-    .expect("the program starts");
+    let mut runtime = started(&request("/bin/sh", &["-c", "printf '[%s]' \"$TERM\""]))
+        .expect("the program starts");
     let output = drain(&runtime);
 
-    let _ = runtime.wait().expect("reap the child");
+    let _ = runtime.reaper.wait().expect("reap the child");
     let reported = output
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("the child's report");

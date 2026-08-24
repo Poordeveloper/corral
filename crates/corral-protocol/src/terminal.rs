@@ -13,6 +13,15 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The most one client-to-daemon frame may carry.
+///
+/// A separate number from the daemon-to-client ceiling below, because they
+/// answer different questions: that one sizes a snapshot the daemon mints,
+/// this one sizes what a client may make the daemon buffer and push into a
+/// PTY. A keystroke, a paste, or a mouse burst is kilobytes; nothing a person
+/// does needs megabytes.
+pub const MAX_CLIENT_FRAME_BYTES: usize = 256 * 1024;
+
 /// The most a terminal frame may carry.
 ///
 /// Derived from the snapshot ceiling rather than shared with the RPC channel's

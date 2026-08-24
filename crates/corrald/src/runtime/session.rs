@@ -231,7 +231,12 @@ impl SessionHandle {
     /// responsibility for it: a live child with no registry entry is
     /// unreachable and unlistable, which is worse than not having started it.
     pub fn shut_down(&self) {
-        let _ = self.ask(Ask::ShutDown);
+        // Never waits for room. A queue full of pending output would otherwise
+        // park whoever is tearing the session down — and the one caller runs
+        // on the daemon's reactor thread. A screen too busy to hear this is a
+        // screen still serving; the session outlives the failed registration
+        // rather than the daemon stalling behind it.
+        let _ = self.asks.try_send(Ask::ShutDown);
     }
 
     /// Join this session's terminal stream.
@@ -302,6 +307,10 @@ pub fn start(
     let published_geometry = Arc::new(AtomicU32::new(pack_geometry(geometry)));
     let title = request.display_title();
 
+    // Captured before the split, while the runtime still knows the pid it
+    // created: after the child is reaped that number may belong to something
+    // else, and before setsid the tty cannot say it at all.
+    let group = runtime.child_group();
     let (screen, mut reaper) = runtime.split();
     // The child is already running. If its own handles cannot be taken there
     // is no way to manage it, and leaving it is worse than never having
@@ -313,7 +322,9 @@ pub fn start(
     let (reader, mut writer) = match handles {
         Ok(handles) => handles,
         Err(error) => {
-            screen.hang_up();
+            if let Some(group) = group {
+                screen.hang_up(group);
+            }
             let _ = reaper.wait();
             return Err(StartError::Terminal(error));
         }
@@ -354,7 +365,8 @@ pub fn start(
         let _alive = held;
         serve_screen(
             Some(screen),
-            to_child,
+            group,
+            Some(to_child),
             geometry,
             questions,
             published,
@@ -421,7 +433,8 @@ fn read_pty(
 /// daemon's single reactor thread, freeze the daemon with it.
 fn serve_screen(
     mut screen: Option<super::spawn::ManagedTerminal>,
-    to_child: SyncSender<Vec<u8>>,
+    group: Option<super::spawn::ChildGroup>,
+    mut to_child: Option<SyncSender<Vec<u8>>>,
     geometry: PtyGeometry,
     questions: Receiver<Ask>,
     execution: Arc<AtomicU8>,
@@ -430,29 +443,44 @@ fn serve_screen(
     let mut terminal = super::terminal::AuthoritativeTerminal::new(geometry);
     let mut stream = super::stream::TerminalStream::new();
 
-    // The screen outlives the process: a person who attaches after an agent
-    // finished still needs to read what it left, so this loop ends when every
-    // handle is gone rather than when the child is.
+    // The screen outlives the process — a person who attaches after an agent
+    // finished still needs to read what it left — but not forever. Once the
+    // child has ended and nobody is watching, this thread returns, its handle
+    // stops answering, and the registry drops the session. Without that a
+    // daemon that ran one command never idles again, which is the
+    // zero-background-by-default rule broken by the fix that kept it alive
+    // while work was running.
     while let Ok(ask) = questions.recv() {
         match ask {
             Ask::Output(chunk) => {
                 let reply = terminal.consume(&chunk);
                 let sequence = stream.advance();
-                stream.deliver(sequence, &chunk);
+                // Not delivered once the screen is poisoned: the daemon can no
+                // longer say what these bytes did, so a viewer replaying them
+                // would be building a screen nothing vouches for while every
+                // attach and resync on the same session is refused. Dropping
+                // the viewers ends their streams, and they are told by the
+                // refusal they get when they come back.
+                if terminal.poisoned().is_none() {
+                    stream.deliver(sequence, &chunk);
+                } else {
+                    stream.drop_viewers();
+                }
                 if !reply.is_empty() {
                     // Queued, never written here: a child that has stopped
                     // reading must not be able to stop this loop.
-                    let _ = to_child.try_send(reply.as_bytes().to_vec());
+                    if let Some(to_child) = to_child.as_ref() {
+                        let _ = to_child.try_send(reply.as_bytes().to_vec());
+                    }
                 }
             }
             Ask::Finished(status) => {
                 // The child is gone, so the terminal it was on has no further
-                // use: dropping it returns the master and its clones. The
-                // screen stays readable — someone attaching after an agent
-                // finished still needs what it left — but a daemon that ran a
-                // thousand short sessions must not still hold a thousand pty
-                // descriptors.
+                // use: dropping the screen returns the master, and dropping
+                // the writer's end lets that thread finish and return its dup
+                // of the same descriptor. Both, or the fd stays open.
                 screen = None;
+                to_child = None;
                 execution.store(
                     match status {
                         // An exit Corral watched happen.
@@ -486,7 +514,9 @@ fn serve_screen(
                 // Dropped rather than queued without bound when the child is
                 // not reading: losing keystrokes a child refuses to take is
                 // better than a session that answers nothing at all.
-                let _ = to_child.try_send(input);
+                if let Some(to_child) = to_child.as_ref() {
+                    let _ = to_child.try_send(input);
+                }
             }
             Ask::Geometry(reply) => {
                 // Always answered. Dropping the channel would report
@@ -500,8 +530,10 @@ fn serve_screen(
                 let _ = reply.send(terminal.title().map(<[u8]>::to_vec));
             }
             Ask::ShutDown => {
-                if let Some(screen) = screen.as_ref() {
-                    screen.hang_up();
+                // Only while the child is still ours to end: once it has been
+                // reaped, its old group number may name something else.
+                if let (Some(screen), Some(group)) = (screen.as_ref(), group) {
+                    screen.hang_up(group);
                 }
                 return;
             }
@@ -548,7 +580,6 @@ fn apply_resize(
 }
 
 /// The sessions one daemon is running.
-/// The sessions one daemon is running.
 ///
 /// Handles are behind `Arc` so a caller can take one out from under the
 /// registry lock before doing anything that waits. Asking a screen thread a
@@ -576,6 +607,19 @@ impl ManagedSessions {
 
     pub fn len(&self) -> usize {
         self.handles.len()
+    }
+
+    /// Sessions whose runtime is still running.
+    ///
+    /// This, not the total, is what holds the daemon open: the plan says live
+    /// runs keep it busy, and counting finished ones would mean a daemon that
+    /// ran one command never idles again — zero-background-by-default broken
+    /// by the fix that stopped it exiting under live work.
+    pub fn live(&self) -> usize {
+        self.handles
+            .values()
+            .filter(|handle| handle.execution_state() == ExecutionState::Running)
+            .count()
     }
 
     pub fn is_empty(&self) -> bool {
