@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# The terminal fuzz target's semantics live here, not in CI configuration.
+#
+# ADR 0003 D9 names three layers. This script owns the two that generate
+# input: the recorded pre-merge campaign, and the scheduled deep runs. The
+# third — the deterministic corpus every PR clears — is a normal test in
+# crates/corrald/tests/terminal_corpus.rs and is not this script's business.
+#
+# Usage:
+#   ./scripts/fuzz-terminal [seconds]
+#
+# A crash is a P1. Its minimized reproducer belongs in the permanent corpus
+# under crates/corrald/tests/corpus/terminal/, which is what turns a finding
+# into something that can never come back quietly
+# (docs/decisions/2026-08-24-pr3-plan-grill.md).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+SECONDS_TO_RUN="${1:-1800}"
+TARGET="terminal_ingest"
+FUZZ_DIR="fuzz"
+
+if ! command -v cargo-fuzz >/dev/null 2>&1; then
+    echo "fuzz-terminal: cargo-fuzz is not installed" >&2
+    echo "" >&2
+    echo "  cargo install cargo-fuzz" >&2
+    echo "" >&2
+    echo "It needs a nightly toolchain: the sanitizers that make a memory" >&2
+    echo "safety finding visible are not available on stable." >&2
+    exit 127
+fi
+
+if [ ! -d "$FUZZ_DIR" ]; then
+    echo "fuzz-terminal: no $FUZZ_DIR directory; run 'cargo fuzz init' first" >&2
+    exit 1
+fi
+
+echo "==> fuzzing $TARGET for ${SECONDS_TO_RUN}s"
+echo "    corpus seeds: crates/corrald/tests/corpus/terminal"
+
+# The permanent corpus seeds the run: every past finding is where the next
+# one is most likely to be near.
+cargo +nightly fuzz run "$TARGET" \
+    crates/corrald/tests/corpus/terminal \
+    -- \
+    -max_total_time="$SECONDS_TO_RUN" \
+    -rss_limit_mb=4096 \
+    -timeout=30
+
+echo "fuzz-terminal: OK"

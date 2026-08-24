@@ -13,7 +13,13 @@ members = [
 # the repository would otherwise become an implicit member and inherit Corral's
 # lints and formatting. Its `unsafe` is upstream's, and Corral-owned crates keep
 # `#![forbid(unsafe_code)]` (docs/decisions/2026-08-24-pr3-spawn-gate.md).
-exclude = ["third_party/portable-pty"]
+exclude = [
+    "third_party/portable-pty",
+    # The fuzz target is its own workspace: cargo-fuzz builds it with a
+    # nightly toolchain and sanitizer flags that must not reach the crates
+    # a normal `cargo build` produces.
+    "fuzz",
+]
 
 [workspace.package]
 version = "0.0.0"
