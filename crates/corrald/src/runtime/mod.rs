@@ -15,7 +15,11 @@
 //! (`third_party/portable-pty/CORRAL_PATCHES.md`).
 
 mod launch;
+mod pump;
 mod spawn;
+mod terminal;
 
 pub use launch::{LaunchRejection, LaunchRequest};
+pub use pump::{PumpEnd, pump};
 pub use spawn::{PtyGeometry, SpawnError, SpawnedRuntime, spawn};
+pub use terminal::{AuthoritativeTerminal, DeviceReply, RETAINED_SCROLLBACK_BYTES};

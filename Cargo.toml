@@ -37,6 +37,11 @@ clap = { version = "4.5", features = ["derive"] }
 # controlling-terminal/EIO platform work), and a pinned WezTerm fork
 # (adds a git source and a fork lifecycle for one reviewable hunk).
 portable-pty = { path = "third_party/portable-pty" }
+# The authoritative VT. Selected by spike S1 against four candidates: it is the
+# only one that round-trips every dimension ROADMAP names, and the only pure
+# Rust port of a serializing emulator (ADR 0003 D1). Its `unsafe` surface is
+# named there and fuzzed before PR3 ships.
+qwertty-term-vt = "0.4.0"
 # The registry store. `bundled` compiles SQLite from source so every platform
 # runs the same engine and version, rather than whatever the host happens to
 # ship.
