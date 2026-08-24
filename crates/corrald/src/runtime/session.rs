@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use corral_core::{CorralSessionId, ExitCause, OccurrenceTime, RunEnd, RunId};
 use corral_protocol::terminal::{Epoch, Sequence};
@@ -416,13 +416,26 @@ impl SessionHandle {
 /// exists. What is left is starting threads, which cannot fail, so a Run whose
 /// start committed is always served.
 pub struct PendingSession {
+    /// Taken by whichever of `serve` and the destructor gets there first.
+    ///
+    /// The obligation lives in the type rather than in every caller: this owns
+    /// a live child, its pty and the only thing that can reap it, and a
+    /// `PendingSession` dropped without either being served or abandoned —
+    /// which is what happens when the task holding it is dropped at an await —
+    /// would leave a process alive, unreachable and never waited for.
+    runtime: Option<PendingRuntime>,
+    began: SystemTime,
+    geometry: PtyGeometry,
+    title: String,
+}
+
+/// A spawned runtime's own parts, separated so the destructor can take them.
+struct PendingRuntime {
     screen: super::spawn::ManagedTerminal,
     reaper: super::spawn::ChildReaper,
     teardown: Arc<super::spawn::TeardownWindow>,
     reader: Box<dyn std::io::Read + Send>,
     writer: Box<dyn std::io::Write + Send>,
-    geometry: PtyGeometry,
-    title: String,
 }
 
 /// Create a managed runtime, without yet serving it.
@@ -431,6 +444,10 @@ pub fn spawn_session(
     geometry: PtyGeometry,
 ) -> Result<PendingSession, StartError> {
     let runtime = super::spawn::spawn(request, geometry).map_err(StartError::Spawn)?;
+    // Measured here, where the process was created. Anywhere later is a first
+    // observation, and a first-observed instant is never written as a start
+    // time (ADR 0002 D6).
+    let began = SystemTime::now();
 
     // Captured before the split, while the runtime still knows the pid it
     // created: after the child is reaped that number may belong to something
@@ -455,11 +472,14 @@ pub fn spawn_session(
     };
 
     Ok(PendingSession {
-        screen,
-        reaper,
-        teardown,
-        reader,
-        writer,
+        runtime: Some(PendingRuntime {
+            screen,
+            reaper,
+            teardown,
+            reader,
+            writer,
+        }),
+        began,
         geometry,
         title: request.display_title(),
     })
@@ -470,6 +490,11 @@ impl PendingSession {
         &self.title
     }
 
+    /// When this runtime began, as the party that created it measured it.
+    pub fn began(&self) -> SystemTime {
+        self.began
+    }
+
     /// End a runtime whose Run never became a durable fact.
     ///
     /// The child is already running, so it is hung up and reaped here rather
@@ -478,49 +503,34 @@ impl PendingSession {
     /// end, and reporting one would ask the store to close an episode it never
     /// opened (grill Q9).
     pub fn abandon(self) {
-        let Self {
-            screen,
-            mut reaper,
-            teardown,
-            reader,
-            writer,
-            ..
-        } = self;
-
-        teardown.hang_up();
-        // Two endings, not one. The hang-up is a signal a child may choose to
-        // ignore — the group teardown says so in as many words — and a child
-        // that ignored it while Corral still held the pty master open would
-        // never see its terminal close either. Dropping the master is the
-        // second ending: a child reading its terminal reaches EOF, which is
-        // the shape an interactive agent is almost always in. A child that
-        // ignores the signal *and* never touches its terminal survives both,
-        // and is left to the same limitation ADR 0007 L6 already states —
-        // which is why nothing waits on this.
-        drop(reader);
-        drop(writer);
-        drop(screen);
-        // Closed before the wait, by the only party that waits (ADR 0007 L4).
-        teardown.close();
-        let _ = reaper.wait();
+        // The destructor is what ends it. Naming the call is what makes the
+        // intent readable where a bare `drop` would look like a mistake.
+        drop(self);
     }
 
     /// Own this runtime's screen and watch its end.
     pub fn serve(
-        self,
+        mut self,
         session: CorralSessionId,
         run: RunId,
         observations: RunObservations,
     ) -> SessionHandle {
-        let Self {
+        // Taken, so this stops being an obligation: from here the threads
+        // below own the ending, and the destructor has nothing left to do.
+        let Some(runtime) = self.runtime.take() else {
+            // Filled at construction and taken exactly once, by this or by the
+            // destructor — and both consume the value.
+            unreachable!("a pending session always holds its runtime")
+        };
+        let PendingRuntime {
             screen,
             reaper,
             teardown,
             reader,
             mut writer,
-            geometry,
-            title,
-        } = self;
+        } = runtime;
+        let geometry = self.geometry;
+        let title = std::mem::take(&mut self.title);
 
         // Bounded so a client that floods input cannot make the daemon
         // allocate without limit; generous because the screen thread drains it
@@ -581,6 +591,45 @@ impl PendingSession {
             alive: weak,
             published,
         }
+    }
+}
+
+/// End a runtime nobody took responsibility for.
+///
+/// The obligation is here rather than in a method every caller must remember,
+/// because the caller is not always in a position to remember: a task dropped
+/// at an await takes its `PendingSession` with it, and a live child whose
+/// parent forgot it is exactly what this type exists to make impossible.
+impl Drop for PendingSession {
+    fn drop(&mut self) {
+        let Some(runtime) = self.runtime.take() else {
+            // Served: its threads own the ending now.
+            return;
+        };
+        let PendingRuntime {
+            screen,
+            mut reaper,
+            teardown,
+            reader,
+            writer,
+        } = runtime;
+
+        teardown.hang_up();
+        // Two endings, not one. The hang-up is a signal a child may choose to
+        // ignore — the group teardown says so in as many words — and a child
+        // that ignored it while Corral still held the pty master open would
+        // never see its terminal close either. Dropping the master is the
+        // second ending: a child reading its terminal reaches EOF, which is
+        // the shape an interactive agent is almost always in. A child that
+        // ignores the signal *and* never touches its terminal survives both,
+        // and is left to the limitation ADR 0007 L6 already states — which is
+        // why the one caller that can afford to wait is the only one that does.
+        drop(reader);
+        drop(writer);
+        drop(screen);
+        // Closed before the wait, by the only party that waits (ADR 0007 L4).
+        teardown.close();
+        let _ = reaper.wait();
     }
 }
 

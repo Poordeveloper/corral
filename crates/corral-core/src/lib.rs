@@ -29,7 +29,7 @@ pub use attention::{
     NeedsInputContext, NeedsInputRequest,
 };
 pub use binding::{
-    Binding, BindingKey, BindingKind, ControlEligibility, Provenance, ReservedNamespace,
+    Binding, BindingKey, BindingKind, ControlEligibility, Provenance, ReservedNamespaceMisuse,
 };
 pub use command::{
     Command, CommandFingerprint, CommandFingerprintBuilder, CommandId, CommandKind, CommandOutcome,

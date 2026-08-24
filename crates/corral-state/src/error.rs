@@ -2,8 +2,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 use corral_core::{
-    Assurance, BindingId, CommandId, CorralSessionId, EvidenceSource, NodeId, ReservedNamespace,
-    RunId,
+    Assurance, BindingId, CommandId, CorralSessionId, EvidenceSource, NodeId,
+    ReservedNamespaceMisuse, RunId,
 };
 
 /// Everything the registry store can answer with other than the fact asked
@@ -122,7 +122,7 @@ pub enum Refusal {
     /// namespace — would leave one field meaning two things (ADR 0008 D3).
     ReservedProviderNamespace {
         binding: BindingId,
-        misuse: ReservedNamespace,
+        misuse: ReservedNamespaceMisuse,
     },
     /// The store's own integrity rules rejected the write. The transaction
     /// rolled back whole, so neither the event nor the projection landed.
@@ -275,17 +275,13 @@ impl fmt::Display for Refusal {
                 "session {session} already has the control-capable runtime binding {existing}"
             ),
             Self::ReservedProviderNamespace { binding, misuse } => match misuse {
-                ReservedNamespace::Respected => write!(
-                    f,
-                    "binding {binding} respects the reserved provider namespace"
-                ),
-                ReservedNamespace::ManagedRuntimeWithoutIt => write!(
+                ReservedNamespaceMisuse::ManagedRuntimeWithoutIt => write!(
                     f,
                     "binding {binding} is a runtime Corral created, so its provider must be \
                      the reserved {reserved}",
                     reserved = corral_core::ProviderId::RESERVED_FOR_CORRAL
                 ),
-                ReservedNamespace::ClaimedByAnotherIdentity => write!(
+                ReservedNamespaceMisuse::ClaimedByAnotherIdentity => write!(
                     f,
                     "binding {binding} is not a runtime Corral created, so it may not take the \
                      reserved provider {reserved}",

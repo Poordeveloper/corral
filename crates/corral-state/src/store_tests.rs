@@ -1911,7 +1911,7 @@ fn a_corral_created_runtime_binding_must_carry_the_reserved_provider() {
     assert!(matches!(
         refusal,
         StateError::Refused(Refusal::ReservedProviderNamespace {
-            misuse: corral_core::ReservedNamespace::ManagedRuntimeWithoutIt,
+            misuse: corral_core::ReservedNamespaceMisuse::ManagedRuntimeWithoutIt,
             ..
         })
     ));
@@ -1944,7 +1944,7 @@ fn a_provider_binding_may_not_take_the_reserved_provider() {
     assert!(matches!(
         refusal,
         StateError::Refused(Refusal::ReservedProviderNamespace {
-            misuse: corral_core::ReservedNamespace::ClaimedByAnotherIdentity,
+            misuse: corral_core::ReservedNamespaceMisuse::ClaimedByAnotherIdentity,
             ..
         })
     ));
@@ -2082,4 +2082,82 @@ fn startup_records_nothing_when_no_managed_episode_is_open() {
         store.events_of(accepted.session()).expect("readable").len(),
         before
     );
+}
+
+/// A replay names the Run its command wrote, not the earliest one the Session
+/// happens to hold. A later Run can carry an earlier occurrence — a clock that
+/// stepped back, or a Run appended once its association was confirmed — and
+/// answering with that one hands a retry a different episode than the receipt
+/// describes.
+#[test]
+fn a_replay_names_the_run_its_command_wrote_not_the_earliest_one() {
+    let mut store = TestStore::new("replay-run");
+    let command = command("cmd-1", "/work");
+    let first = opened(&mut store, &command, instant(500)).expect("created");
+    let binding = store.bindings_of(first.session()).expect("readable")[0].id();
+    store
+        .record_run_ended(
+            first.run(),
+            RunEnd::Exited(ExitCause::Completed),
+            OccurrenceTime::Authoritative(instant(600)),
+        )
+        .expect("recorded");
+    let resumed = RunId::mint();
+    store
+        .record_run_started(
+            resumed,
+            binding,
+            EvidenceSource::CorralConstructed,
+            OccurrenceTime::Authoritative(instant(1)),
+        )
+        .expect("recorded");
+
+    let again = opened(&mut store, &command, instant(700)).expect("replayed");
+
+    assert_eq!(again.run(), first.run());
+    assert_ne!(again.run(), resumed);
+}
+
+/// The Run's id is the caller's on this path too, and one episode acquiring
+/// two starts is not something a primary key should be left to report.
+#[test]
+fn opening_a_managed_session_refuses_a_run_id_the_log_holds() {
+    let mut store = TestStore::new("managed-run-repeat");
+    let taken = opened(&mut store, &command("cmd-1", "/work"), instant(10)).expect("created");
+
+    let refusal = store
+        .start_managed_session(
+            &command("cmd-2", "/elsewhere"),
+            taken.run(),
+            OccurrenceTime::Authoritative(instant(20)),
+            instant(20),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::RunAlreadyRecorded(named)) if named == taken.run()
+    ));
+    assert_eq!(store.sessions().expect("readable").len(), 1);
+}
+
+/// The consult that runs before anything is spawned refuses a command the
+/// commit could never take, so an impossible command does not first cost a
+/// process and then a teardown.
+#[test]
+fn an_oversized_command_is_refused_before_it_is_looked_up() {
+    let mut store = TestStore::new("oversize-consult");
+    let huge = Command::new(
+        CommandId::new("cmd-1").expect("usable"),
+        CommandFingerprint::builder(CommandKind::new("session.new").expect("usable"))
+            .input("argv.0", "x".repeat(8192))
+            .build(),
+    );
+
+    let refusal = store.completed_managed_session(&huge).expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::FingerprintTooLarge { .. })
+    ));
 }

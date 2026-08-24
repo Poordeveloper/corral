@@ -346,19 +346,19 @@ fn run_from(row: RunRow) -> Result<Run, StateError> {
 
 /// The Run a Session's creating command produced.
 ///
-/// Ordered exactly as `runs_of` orders, so "first" means the same thing to
-/// both: the earliest occurrence, with acceptance order settling ties the
-/// runtime could not. A Session created by one command has one Run at that
-/// moment, and a later resume adds Runs after it rather than before.
+/// Ordered by acceptance, deliberately not by occurrence the way `runs_of`
+/// presents Runs to a person. What this answers is "which Run did that command
+/// write", and a Session's creation and its first `RunStarted` are one
+/// transaction — so the earliest accepted Run is that one, unconditionally. A
+/// later Run carrying an earlier occurrence time is an ordinary thing (a clock
+/// that stepped back, a Run appended after its association was confirmed), and
+/// ordering by occurrence would hand a retry the wrong episode.
 pub(crate) fn first_run_of(
     connection: &Connection,
     session: CorralSessionId,
 ) -> Result<Option<RunId>, StateError> {
     let found: Option<String> = connection
-        .prepare_cached(
-            "SELECT id FROM runs WHERE session_id = ?1
-              ORDER BY started_at_ms IS NULL, started_at_ms, accepted_seq LIMIT 1",
-        )?
+        .prepare_cached("SELECT id FROM runs WHERE session_id = ?1 ORDER BY accepted_seq LIMIT 1")?
         .query_row(params![session.to_string()], |row| row.get(0))
         .optional()?;
     found

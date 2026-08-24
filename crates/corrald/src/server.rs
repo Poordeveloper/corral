@@ -104,10 +104,17 @@ async fn watch_run_lifecycle(
     lifecycle: Arc<Lifecycle>,
     mut integrity: tokio::sync::watch::Receiver<crate::runtime::Integrity>,
 ) {
-    while integrity.changed().await.is_ok() {
+    loop {
+        // Read before waiting. The recorder is started with the store, before
+        // anything is served and before startup reconciliation runs, so a
+        // fact already lost by the time this task exists would otherwise be
+        // waited past — a subscriber begins having seen the current value.
         if *integrity.borrow_and_update() == crate::runtime::Integrity::Lost {
             error!("a managed run's lifecycle could not be recorded; corrald is stopping");
             lifecycle.commit_shutdown(ShutdownReason::FatalState);
+            return;
+        }
+        if integrity.changed().await.is_err() {
             return;
         }
     }

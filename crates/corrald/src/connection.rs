@@ -641,8 +641,11 @@ async fn execute_session_new(
     // Two instants, because they answer different questions: when the runtime
     // began, which Corral watched, and when Corral accepted the command. ADR
     // 0002 D6 keeps them apart, and one value used for both would be the
-    // conflation it exists to prevent.
-    let began = SystemTime::now();
+    // conflation it exists to prevent. The first is the spawn's own, measured
+    // where the process was created rather than here — the gap across a
+    // blocking-pool hop and a reschedule is arbitrary under load, and an
+    // instant measured after the fact is not an authoritative one.
+    let began = pending.began();
     let started = match state
         .start_managed_session(
             command.clone(),
@@ -723,28 +726,45 @@ fn abandon(pending: PendingSession) {
 
 /// Turn a store answer into what the client is told, or fail closed.
 ///
-/// A refusal leaves the store intact and is the client's to act on. Anything
-/// else is a store this daemon cannot explain, and uncertainty resolves to the
-/// stricter path.
+/// The split is the store's own: a refusal leaves it intact and trustworthy,
+/// so it is the client's to act on; a fatal state means it can no longer vouch
+/// for durable truth and nothing may be answered from it (ADR 0002, Q14).
+///
+/// Every refusal, not a list of the ones that came to mind. A refusal this
+/// arm did not name would otherwise end the daemon — and a fingerprint too
+/// large for a durable row is a refusal any argv can reach, so the list was a
+/// way for one client to stop every other session's control plane.
 fn refused_by_store(
     command: &Command,
     error: corral_state::StateError,
 ) -> Result<Concluded, corral_state::StateError> {
-    match error {
-        corral_state::StateError::Refused(corral_state::Refusal::CommandIdConflict { .. }) => {
-            Ok(Concluded::Refused {
-                code: ErrorCode::CommandIdConflict,
-                message: conflict(command).message,
-            })
-        }
-        corral_state::StateError::Refused(corral_state::Refusal::Busy { .. }) => {
-            Ok(Concluded::Refused {
-                code: ErrorCode::Busy,
-                message: "the registry is held by another writer".to_owned(),
-            })
-        }
-        other => Err(other),
-    }
+    use corral_state::{Refusal, StateError};
+
+    let refusal = match error {
+        StateError::Refused(refusal) => refusal,
+        fatal => return Err(fatal),
+    };
+    Ok(match refusal {
+        Refusal::CommandIdConflict { .. } => Concluded::Refused {
+            code: ErrorCode::CommandIdConflict,
+            message: conflict(command).message,
+        },
+        Refusal::Busy { .. } => Concluded::Refused {
+            code: ErrorCode::Busy,
+            message: "the registry is held by another writer".to_owned(),
+        },
+        // A fixed message: the engine's own text names tables, columns and
+        // paths, and a protocol error crosses the socket.
+        Refusal::Constraint { .. } => Concluded::Refused {
+            code: ErrorCode::InvalidParams,
+            message: "the registry would not record this command".to_owned(),
+        },
+        // Domain text, which is written to be read by whoever sent the command.
+        other => Concluded::Refused {
+            code: ErrorCode::InvalidParams,
+            message: other.to_string(),
+        },
+    })
 }
 
 fn conflict(command: &Command) -> ProtocolError {

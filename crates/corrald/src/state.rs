@@ -11,11 +11,17 @@ use crate::runtime::{AttachTokens, Integrity, ManagedSessions, RunObservations, 
 
 /// How long a departing daemon waits for its last observed facts to land.
 ///
-/// Short: the recorder is a thread with a queue in front of it and one local
-/// transaction per fact, so anything still outstanding after this is stuck
-/// rather than busy — and a shutdown that leaves without asking would drop
-/// exactly the facts this design promises never to drop silently.
-const SETTLE_GRACE: Duration = Duration::from_secs(2);
+/// Derived from the recorder's own budget rather than chosen beside it. The
+/// recorder legitimately waits out a store another writer is holding, and a
+/// shutdown that gave up first would declare a hole in the accounting — and
+/// exit non-zero — while the write was still going to succeed.
+const SETTLE_GRACE: Duration = Duration::from_millis(
+    crate::run_lifecycle::LONGEST_RECORD.as_millis() as u64 + STORE_WAIT_OVERSHOOT_MILLIS,
+);
+
+/// The recorder's budget bounds when it stops *starting* attempts; the attempt
+/// under way when it runs out still has the store's own wait to spend.
+const STORE_WAIT_OVERSHOOT_MILLIS: u64 = 5_000;
 
 /// What the registry said when asked whether it can still vouch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

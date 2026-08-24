@@ -105,15 +105,18 @@ impl BindingKey {
     }
 }
 
-/// How a binding sits with respect to the reserved `corral` provider
-/// namespace (ADR 0008 D3).
+/// How a binding sits wrongly in the reserved `corral` provider namespace
+/// (ADR 0008 D3).
+///
+/// Only the two ways of being wrong, because "respected" is the absence of one
+/// of these: a type that could also say nothing was wrong would make a refusal
+/// representable that has nothing to refuse.
 ///
 /// The rule is directional rather than a blanket refusal of the string,
 /// because the Corral-owned runtime binding is precisely the thing that needs
 /// it. Stating it as a ban would have been simpler and wrong.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReservedNamespace {
-    Respected,
+pub enum ReservedNamespaceMisuse {
     /// A `CorralCreated` runtime binding that does not carry the reserved id.
     /// Without it, what the binding's identity means rests on convention, and
     /// the first provider phase is where conventions go.
@@ -236,17 +239,16 @@ impl Binding {
     /// Asked of provenance and kind rather than of assurance: what the
     /// namespace records is who minted the identity, which is settled when the
     /// edge is created and never re-evaluated (ADR 0008 D3).
-    #[must_use]
-    pub fn reserved_namespace(&self) -> ReservedNamespace {
+    pub fn reserved_namespace(&self) -> Result<(), ReservedNamespaceMisuse> {
         let managed_runtime =
             self.kind() == BindingKind::Runtime && self.provenance == Provenance::CorralCreated;
         match (
             managed_runtime,
             self.key.provider().is_reserved_for_corral(),
         ) {
-            (true, true) | (false, false) => ReservedNamespace::Respected,
-            (true, false) => ReservedNamespace::ManagedRuntimeWithoutIt,
-            (false, true) => ReservedNamespace::ClaimedByAnotherIdentity,
+            (true, true) | (false, false) => Ok(()),
+            (true, false) => Err(ReservedNamespaceMisuse::ManagedRuntimeWithoutIt),
+            (false, true) => Err(ReservedNamespaceMisuse::ClaimedByAnotherIdentity),
         }
     }
 }

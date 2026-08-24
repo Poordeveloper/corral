@@ -506,11 +506,14 @@ fn detaching_after_a_run_ended_leaves_the_daemon_serving() {
             .len(),
         1
     );
+    // Matched explicitly rather than compared as options: `None < Some(_)`,
+    // so an attach that never landed would satisfy an ordering test and turn
+    // this into the next test while still reporting green.
     let recorded = kinds(&account.registry());
     let attached = recorded.iter().position(|kind| kind == "run-attached");
     let ended = recorded.iter().position(|kind| kind == "run-ended");
     assert!(
-        attached < ended,
+        matches!((attached, ended), (Some(attached), Some(ended)) if attached < ended),
         "the person was meant to be attached before the run ended: {recorded:?}"
     );
 }
@@ -543,5 +546,31 @@ fn attaching_to_a_finished_run_leaves_the_daemon_serving() {
     assert!(
         client.request(3, "session.list", None).is_some(),
         "attaching to a finished run is not a reason to stop serving"
+    );
+}
+
+/// A refusal leaves the store intact and is the caller's to act on. Only a
+/// store that can no longer vouch ends the daemon — and a command whose
+/// fingerprint is too large for a durable row is a refusal, reachable from any
+/// ordinary `argv`.
+#[test]
+fn a_command_the_registry_refuses_does_not_end_the_daemon() {
+    let account = TestAccount::new("oversize-command");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    let script = "x".repeat(8192);
+
+    let refused = new_session(&mut client, 1, "cmd-1", &["/bin/sh", "-c", &script]);
+
+    assert_eq!(error_code(&refused), Some("invalid_params"), "{refused}");
+    assert_eq!(
+        runs(&account.registry()),
+        Vec::new(),
+        "a refused command is not a Run"
+    );
+    assert!(
+        client.request(2, "session.list", None).is_some(),
+        "a refusal leaves the daemon serving"
     );
 }

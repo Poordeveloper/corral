@@ -4,7 +4,7 @@ use std::time::SystemTime;
 use corral_core::{
     Assurance, Binding, BindingId, BindingKey, BindingKind, Command, CommandOutcome,
     CommandReceipt, CorralSessionId, Evidence, EvidenceSource, NodeId, OccurrenceTime, Provenance,
-    ReservedNamespace, Run, RunEnd, RunId, Session, SessionLineage,
+    Run, RunEnd, RunId, Session, SessionLineage,
 };
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
@@ -311,13 +311,13 @@ impl Store {
         self.write(move |transaction| {
             let at = encoding::as_stored(at)?;
             let started = as_stored_occurrence(started)?;
-            let length = command.fingerprint().as_str().len();
-            if length > FINGERPRINT_LIMIT {
-                return Err(Refusal::FingerprintTooLarge {
-                    length,
-                    limit: FINGERPRINT_LIMIT,
-                }
-                .into());
+            refuse_oversized_fingerprint(command)?;
+            // The id is the caller's, so a repeat is possible — and the same
+            // rule `start_run` states applies for the same reason: one episode
+            // acquiring two starts is not something a primary key should be
+            // left to report.
+            if projection::recorded_run(transaction, run)?.is_some() {
+                return Err(Refusal::RunAlreadyRecorded(run).into());
             }
 
             if let Some(replayed) = already_started(transaction, command)? {
@@ -395,7 +395,13 @@ impl Store {
         &mut self,
         command: &Command,
     ) -> Result<Option<StartedManagedSession>, StateError> {
-        self.read(|connection| already_started(connection, command))
+        self.read(|connection| {
+            // Refused here as well as at the commit, because this is the call
+            // that runs before a process exists: a command the store could
+            // never take should not first cost a spawn and then a teardown.
+            refuse_oversized_fingerprint(command)?;
+            already_started(connection, command)
+        })
     }
 
     /// Close every managed-runtime episode no daemon owns any more.
@@ -1049,6 +1055,20 @@ fn require_binding(connection: &Connection, id: BindingId) -> Result<Binding, St
     projection::binding(connection, id)?.ok_or_else(|| Refusal::UnknownBinding(id).into())
 }
 
+/// A durable row is not a place for unbounded client input, however the
+/// command reached the store.
+fn refuse_oversized_fingerprint(command: &Command) -> Result<(), StateError> {
+    let length = command.fingerprint().as_str().len();
+    if length > FINGERPRINT_LIMIT {
+        return Err(Refusal::FingerprintTooLarge {
+            length,
+            limit: FINGERPRINT_LIMIT,
+        }
+        .into());
+    }
+    Ok(())
+}
+
 /// What a command already produced, read from its receipt.
 ///
 /// One implementation for the pre-spawn consult and for the transaction that
@@ -1094,14 +1114,13 @@ fn already_started(
 /// and `STORAGE_EPOCH` is `dev` — a development database that predates this
 /// rule is reset, not reinterpreted.
 fn refuse_reserved_namespace(binding: &Binding) -> Result<(), StateError> {
-    match binding.reserved_namespace() {
-        ReservedNamespace::Respected => Ok(()),
-        misuse => Err(Refusal::ReservedProviderNamespace {
+    binding.reserved_namespace().map_err(|misuse| {
+        Refusal::ReservedProviderNamespace {
             binding: binding.id(),
             misuse,
         }
-        .into()),
-    }
+        .into()
+    })
 }
 
 /// At most one control-capable runtime binding is active per Session.

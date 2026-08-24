@@ -28,10 +28,27 @@ use crate::runtime::{ObservedRuns, RunOccurrence};
 /// wait: it is a hole in the accounting, and the daemon says so.
 const ATTEMPTS: u32 = 3;
 
-/// The pause between them. Short next to the store's own five-second wait,
-/// which is what actually does the waiting; this only avoids re-entering it
-/// on the same instant.
-const BETWEEN_ATTEMPTS: Duration = Duration::from_millis(50);
+/// The pause between them. Short next to the store's own wait, which is what
+/// actually does the waiting; this only avoids re-entering it on the same
+/// instant.
+const BETWEEN_ATTEMPTS_MILLIS: u64 = 50;
+const BETWEEN_ATTEMPTS: Duration = Duration::from_millis(BETWEEN_ATTEMPTS_MILLIS);
+
+/// What the store itself spends waiting for another writer before refusing.
+///
+/// Stated here because the budget below is a multiple of it. Not read from the
+/// store: it is that crate's number to choose, and a copy that drifted would
+/// only ever make this budget too generous, never too short.
+const STORE_WAIT_MILLIS: u64 = 5_000;
+
+/// The longest the recorder may spend on one fact before calling it lost.
+///
+/// Derived rather than chosen, and public because a shutdown has to outwait
+/// it: settling for less would declare a hole in the accounting while a write
+/// was still legitimately in progress, and two owners of one deadline is how
+/// that happens.
+pub const LONGEST_RECORD: Duration =
+    Duration::from_millis(ATTEMPTS as u64 * (STORE_WAIT_MILLIS + BETWEEN_ATTEMPTS_MILLIS));
 
 /// Record every run occurrence this daemon observes, on a thread of its own.
 pub fn record_observed_runs(store: Arc<Mutex<Store>>, observed: ObservedRuns) {
@@ -95,6 +112,11 @@ fn record(store: &Mutex<Store>, occurrence: RunOccurrence) -> Recorded {
                 warn!(%run, "a managed run ended with no durable start to close");
                 Recorded::No
             }
+            // The end is already recorded. That is the outcome this fact
+            // wanted, not a hole in the accounting — and reading it as one
+            // would end the daemon over a duplicate, which a commit that
+            // landed and then reported contention produces for free.
+            Err(StateError::Refused(Refusal::RunAlreadyEnded(_))) => Recorded::Yes,
             Err(error) => held_or_lost(run, &error, "a managed run's ending"),
         },
         RunOccurrence::Attached { run, at } => attachment(run, store.record_run_attached(run, at)),
