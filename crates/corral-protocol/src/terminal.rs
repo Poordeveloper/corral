@@ -140,8 +140,12 @@ pub struct TerminalFrame {
 /// socket, not to the framing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalFrameError {
-    /// A frame declared a length past the safety limit.
-    Oversize { declared: usize },
+    /// A frame declared a length past the limit that applied to it.
+    ///
+    /// The limit is carried rather than named by a constant, because two
+    /// apply: what a client may send, and what the daemon may. A message that
+    /// quoted the wrong one would send a reader looking at the wrong number.
+    Oversize { declared: usize, limit: usize },
 }
 
 /// The fixed-size header every frame carries: kind, epoch, sequence, length.
@@ -152,6 +156,7 @@ impl TerminalFrame {
         if self.payload.len() > MAX_TERMINAL_FRAME_BYTES {
             return Err(TerminalFrameError::Oversize {
                 declared: self.payload.len(),
+                limit: MAX_TERMINAL_FRAME_BYTES,
             });
         }
 
@@ -168,7 +173,28 @@ impl TerminalFrame {
 
     /// Decode one frame from a complete buffer, returning it and the bytes it
     /// consumed.
-    pub fn decode(bytes: &[u8]) -> Result<Option<(Self, usize)>, TerminalFrameError> {
+    /// Decode a frame a client sent to the daemon.
+    ///
+    /// Bounded by what a client may make the daemon hold, not by what the
+    /// daemon may send: a header alone must not be able to reserve sixteen
+    /// megabytes of buffer per connection. Named by direction rather than
+    /// taking a limit, so a call site cannot pass the wrong ceiling.
+    pub fn decode_from_client(bytes: &[u8]) -> Result<Option<(Self, usize)>, TerminalFrameError> {
+        Self::decode_within(bytes, MAX_CLIENT_FRAME_BYTES)
+    }
+
+    /// Decode a frame the daemon sent to a client.
+    ///
+    /// Bounded by the snapshot ceiling, which is the largest legitimate
+    /// message on this channel (ADR 0003 D8).
+    pub fn decode_from_daemon(bytes: &[u8]) -> Result<Option<(Self, usize)>, TerminalFrameError> {
+        Self::decode_within(bytes, MAX_TERMINAL_FRAME_BYTES)
+    }
+
+    fn decode_within(
+        bytes: &[u8],
+        limit: usize,
+    ) -> Result<Option<(Self, usize)>, TerminalFrameError> {
         if bytes.len() < HEADER_BYTES {
             return Ok(None);
         }
@@ -182,8 +208,14 @@ impl TerminalFrame {
         let sequence = Sequence(u64::from_be_bytes(read_eight(header, 9)));
         let length = u32::from_be_bytes([header[17], header[18], header[19], header[20]]) as usize;
 
-        if length > MAX_TERMINAL_FRAME_BYTES {
-            return Err(TerminalFrameError::Oversize { declared: length });
+        // Refused on the declared length, before a byte of the body is
+        // waited for: the caller buffers until a frame is complete, so a
+        // header alone decides how much it is asked to hold.
+        if length > limit {
+            return Err(TerminalFrameError::Oversize {
+                declared: length,
+                limit,
+            });
         }
         if rest.len() < length {
             return Ok(None);
@@ -214,9 +246,9 @@ fn read_eight(header: &[u8], at: usize) -> [u8; 8] {
 impl std::fmt::Display for TerminalFrameError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Oversize { declared } => write!(
+            Self::Oversize { declared, limit } => write!(
                 f,
-                "a frame declared {declared} bytes, past the {MAX_TERMINAL_FRAME_BYTES}-byte limit"
+                "a frame declared {declared} bytes, past the {limit}-byte limit for its direction"
             ),
         }
     }

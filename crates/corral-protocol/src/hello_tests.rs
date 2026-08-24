@@ -114,8 +114,13 @@ fn a_role_kind_this_build_does_not_know_decodes_as_unknown() {
 
 /// The terminal-data role is its token. A claim without one is not that role,
 /// and inventing an empty token would open a channel on nothing.
+///
+/// But it is not an unknown role either. The kind is one this build serves, so
+/// a client that left the field out must be told about its field — not that
+/// the daemon lacks the feature, which would send it looking for a problem it
+/// does not have.
 #[test]
-fn a_terminal_data_role_without_a_token_is_not_that_role() {
+fn a_terminal_data_role_without_a_token_is_malformed_not_unknown() {
     let decoded: ClientHello = serde_json::from_str(
         r#"{"protocol_version": 1, "min_compatible_peer_version": 1,
             "role": {"kind": "terminal_data"}}"#,
@@ -124,7 +129,7 @@ fn a_terminal_data_role_without_a_token_is_not_that_role() {
 
     assert_eq!(
         decoded.role,
-        Some(ConnectionRole::Unknown {
+        Some(ConnectionRole::Malformed {
             kind: "terminal_data".to_owned()
         })
     );

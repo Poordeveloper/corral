@@ -20,10 +20,71 @@ use tracing::debug;
 use crate::runtime::{Attachment, Delivery, InputRefused, PtyGeometry, SessionHandle, Viewer};
 use crate::state::DaemonState;
 
+/// How many encoded frames may wait for a client that is not reading.
+///
+/// Small on purpose, because a snapshot is the one frame with no small bound:
+/// this depth times the frame ceiling is what one connection can hold, so the
+/// number is kept low rather than generous. Deltas are one PTY read each — at
+/// most 8 KiB — and the per-viewer budget in `stream.rs` already bounds how
+/// many of those pile up. What the depth really buys is the difference between
+/// "the socket is momentarily full" and "this client has stopped reading", and
+/// the second is not something to wait on.
+const OUTBOUND_FRAMES: usize = 8;
+
+/// How long a channel that has ended waits for its last frame to leave.
+///
+/// The last frame is usually a channel error saying why this ended, and a
+/// client that is reading should get it. A client that is *not* reading is
+/// the reason most channels end this way, and waiting on one would hold the
+/// connection — and its write half — open for as long as it stayed connected.
+const FLUSH_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Serve a channel until the client goes away or the session does.
+///
+/// Writes leave through a task of their own, never from the loop below. A
+/// client that stops reading fills its socket buffer, and a `write_all` awaited
+/// inside a `select!` branch owns that loop while it blocks — so the daemon
+/// would stop reading that client at exactly the moment the client is waiting
+/// for the daemon to read. Both sides then wait forever, with no timeout on
+/// either. The loop can only *queue*; a queue that will not take another frame
+/// is a client that is not draining, which ends its channel rather than the
+/// daemon's progress.
 pub async fn serve(
     reader: &mut OwnedReadHalf,
-    writer: &mut OwnedWriteHalf,
+    writer: OwnedWriteHalf,
+    leftover: Vec<u8>,
+    session: CorralSessionId,
+    run: RunId,
+    state: &Arc<DaemonState>,
+) {
+    let (outbound, mut queued) = tokio::sync::mpsc::channel::<Vec<u8>>(OUTBOUND_FRAMES);
+    let writing = tokio::spawn(async move {
+        let mut writer = writer;
+        while let Some(bytes) = queued.recv().await {
+            if writer.write_all(&bytes).await.is_err() {
+                return;
+            }
+        }
+    });
+    let outcome = serve_frames(reader, &outbound, leftover, session, run, state).await;
+    // Dropped so the writer finishes what is queued and ends. Then waited for,
+    // but only briefly: a client that is reading gets the last frame, and one
+    // that is not is exactly why this channel ended — waiting on it would hold
+    // the connection open for as long as it stayed silently connected.
+    drop(outbound);
+    let mut writing = writing;
+    if tokio::time::timeout(FLUSH_GRACE, &mut writing)
+        .await
+        .is_err()
+    {
+        writing.abort();
+    }
+    outcome
+}
+
+async fn serve_frames(
+    reader: &mut OwnedReadHalf,
+    writer: &Outbound,
     leftover: Vec<u8>,
     session: CorralSessionId,
     run: RunId,
@@ -134,11 +195,11 @@ struct Serving<'a> {
 /// Act on every complete frame in the buffer.
 async fn consume_pending(
     pending: &mut Vec<u8>,
-    writer: &mut OwnedWriteHalf,
+    writer: &Outbound,
     serving: &mut Serving<'_>,
 ) -> Handled {
     loop {
-        match TerminalFrame::decode(pending) {
+        match TerminalFrame::decode_from_client(pending) {
             Err(error) => {
                 debug!(%error, "a terminal frame could not be read");
                 return Handled::Close;
@@ -162,11 +223,7 @@ enum Handled {
 }
 
 /// Act on one client frame.
-async fn handle(
-    frame: &TerminalFrame,
-    writer: &mut OwnedWriteHalf,
-    serving: &mut Serving<'_>,
-) -> Handled {
+async fn handle(frame: &TerminalFrame, writer: &Outbound, serving: &mut Serving<'_>) -> Handled {
     match frame.kind {
         // A kind this build does not know is skipped, not fatal: the length
         // prefix said exactly how much to drop, and refusing would make every
@@ -174,12 +231,9 @@ async fn handle(
         // protocol crate so both receivers cannot drift apart on it.
         kind if kind.is_skippable() => Handled::Continue,
         FrameKind::Input => {
-            // A client cannot make the daemon hold or forward more than its
-            // own limit, whatever the frame ceiling allows: that ceiling sizes
-            // snapshots the daemon sends, not input a client pushes.
-            if frame.payload.len() > corral_protocol::terminal::MAX_CLIENT_FRAME_BYTES {
-                return Handled::Close;
-            }
+            // The client-direction ceiling is applied at the decode boundary,
+            // where it stops a header from reserving the buffer — not here,
+            // where the bytes have already been held twice.
             let bytes = frame.payload.clone();
             match ask_session(serving, move |handle| handle.write_input(bytes)).await {
                 Some(Ok(())) => Handled::Continue,
@@ -308,7 +362,7 @@ async fn ask_session<T: Send + 'static>(
 }
 
 /// Send the snapshot an attachment carries, stamped with its own epoch.
-async fn send_snapshot(writer: &mut OwnedWriteHalf, attachment: &Attachment) -> bool {
+async fn send_snapshot(writer: &Outbound, attachment: &Attachment) -> bool {
     let payload = match &attachment.snapshot {
         Ok(snapshot) => snapshot.payload().to_vec(),
         // A screen that cannot be expressed is said out loud rather than sent
@@ -350,11 +404,7 @@ async fn send_snapshot(writer: &mut OwnedWriteHalf, attachment: &Attachment) -> 
 ///
 /// Stamped with the attachment's own position so a client that tracks epochs
 /// does not read the message as a frame from a screen it has left.
-async fn channel_error(
-    writer: &mut OwnedWriteHalf,
-    attachment: &Attachment,
-    refusal: String,
-) -> Handled {
+async fn channel_error(writer: &Outbound, attachment: &Attachment, refusal: String) -> Handled {
     let frame = TerminalFrame {
         kind: FrameKind::ChannelError,
         epoch: attachment.epoch,
@@ -368,9 +418,17 @@ async fn channel_error(
     }
 }
 
-async fn send(writer: &mut OwnedWriteHalf, frame: &TerminalFrame) -> bool {
+/// Where this channel's frames go: a queue the writing task drains.
+type Outbound = tokio::sync::mpsc::Sender<Vec<u8>>;
+
+/// Queue a frame for the client. Never waits.
+///
+/// `false` means this channel is over: the writer has gone, or the client has
+/// let its queue fill, which is the same fact as the slow-viewer policy in
+/// `stream.rs` — nothing a client does becomes a reason for the daemon to stop.
+async fn send(writer: &Outbound, frame: &TerminalFrame) -> bool {
     match frame.encode() {
-        Ok(bytes) => writer.write_all(&bytes).await.is_ok(),
+        Ok(bytes) => writer.try_send(bytes).is_ok(),
         Err(error) => {
             debug!(%error, "a terminal frame could not be encoded");
             false

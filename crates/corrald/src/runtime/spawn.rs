@@ -281,6 +281,46 @@ impl ManagedTerminal {
     }
 }
 
+/// A child's process group, for exactly as long as signalling it is safe.
+///
+/// The group number is the child's pid, and once the reaper has waited it may
+/// name something else entirely. There is one reaper per session, so it closes
+/// this window immediately before it waits — under the same lock a signaller
+/// holds, so a hang-up can never be in flight across the wait (ADR 0007 L4).
+///
+/// A plain flag would leave that race open: a signaller that read "still open"
+/// and was then descheduled would signal after the wait completed.
+#[derive(Debug)]
+pub struct TeardownWindow(std::sync::Mutex<Option<ChildGroup>>);
+
+impl TeardownWindow {
+    #[must_use]
+    pub fn open(group: Option<ChildGroup>) -> Self {
+        Self(std::sync::Mutex::new(group))
+    }
+
+    /// End every process in the group, if it is still the child's.
+    pub fn hang_up(&self) {
+        if let Some(group) = *self.lock() {
+            group.hang_up();
+        }
+    }
+
+    /// Close the window. Called by the reaper, immediately before it waits.
+    pub fn close(&self) {
+        *self.lock() = None;
+    }
+
+    /// A poisoned lock means a signaller panicked mid-teardown. The value it
+    /// guards is a `Copy` id either way, and refusing to look would turn one
+    /// panic into a child nobody can end.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<ChildGroup>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 impl ChildReaper {
     /// Block until the child exits, yielding its exit code.
     pub fn wait(&mut self) -> io::Result<u32> {

@@ -29,6 +29,14 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 /// another may buffer. Initial policy default (grill mechanism defaults).
 pub const SUBSCRIBER_QUEUE_BYTES: usize = 4 * 1024 * 1024;
 
+/// How many deliveries may wait, whatever their size.
+///
+/// A backstop under the byte budget, not the budget itself: it exists so a
+/// stream of one-byte deliveries cannot queue four million of them. Chosen
+/// above `SUBSCRIBER_QUEUE_BYTES / 8 KiB` so an ordinary PTY-sized delivery
+/// always runs out of bytes first.
+pub const SUBSCRIBER_QUEUE_FRAMES: usize = 1024;
+
 /// Why a viewer stopped receiving.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Desynchronised {
@@ -127,8 +135,14 @@ impl TerminalStream {
     /// It joins at the stream's current position: whoever attaches has just
     /// been sent a snapshot of exactly that point.
     pub fn attach(&mut self) -> Viewer {
-        // Bounded by frames at this hop; the byte budget is the semaphore.
-        let (outbox, viewer) = tokio::sync::mpsc::channel(256);
+        // Deep enough that the byte budget below is what actually refuses a
+        // slow viewer: a PTY read is at most 8 KiB, so 256 frames could never
+        // reach four megabytes and the semaphore would have been dead policy —
+        // the real limit would have been "whatever a PTY read happens to be",
+        // silently changing by 8x if that buffer ever did. The frame count
+        // stays as a backstop against many tiny deliveries, which is a
+        // different failure from a viewer holding megabytes.
+        let (outbox, viewer) = tokio::sync::mpsc::channel(SUBSCRIBER_QUEUE_FRAMES);
         self.attached.push(Attached {
             outbox,
             room: Arc::new(Semaphore::new(SUBSCRIBER_QUEUE_BYTES)),
@@ -159,6 +173,14 @@ impl TerminalStream {
     /// neighbours and this call are unaffected — nothing a viewer does becomes
     /// backpressure on the process producing the output.
     pub fn deliver(&mut self, sequence: Sequence, bytes: &[u8]) {
+        // Most managed sessions run with nobody attached — that is what
+        // session-first means — and this is the daemon's hottest path. The
+        // shared copy below is a second allocation of every PTY read, so it
+        // is not made until someone is there to receive it.
+        if self.attached.is_empty() {
+            return;
+        }
+
         let epoch = self.epoch;
         // A chunk larger than the whole budget could never be admitted, and
         // asking for room that cannot exist would drop every viewer. A PTY

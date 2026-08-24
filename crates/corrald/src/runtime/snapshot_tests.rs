@@ -187,3 +187,20 @@ fn the_oldest_scrollback_is_sacrificed_before_the_viewport() {
         "the viewport itself was traded away to meet the target"
     );
 }
+
+/// A refusal names the ceiling that refused it, not whichever constant the
+/// module happens to hold: the budget is a parameter, and a message quoting
+/// the default would state a limit the encoder did not apply.
+#[test]
+fn a_ceiling_refusal_names_the_ceiling_that_applied() {
+    let mut terminal = AuthoritativeTerminal::new(PtyGeometry::expect_valid(24, 80));
+    let _ = terminal.consume(b"a screen with something on it\r\n");
+    let tiny = SnapshotBudget::of(1, 8);
+
+    let refusal = encode_within(&terminal, tiny).expect_err("a viewport past the ceiling");
+
+    assert!(
+        refusal.to_string().contains("8-byte ceiling"),
+        "the refusal named a limit it did not apply: {refusal}"
+    );
+}

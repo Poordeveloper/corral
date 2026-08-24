@@ -64,7 +64,19 @@ pub enum Poisoned {
 
 /// One session's authoritative screen.
 pub struct AuthoritativeTerminal {
-    stream: Stream<TerminalHandler>,
+    /// Taken and forgotten the moment the screen is poisoned, never dropped.
+    ///
+    /// `PageList::drop` walks the packed page list calling `Box::from_raw` on
+    /// every node, and a panic out of that layer leaves the list mid-mutation
+    /// — a node linked but not initialised, or already moved to the free list.
+    /// Refusing to *read* a half-modified structure while still letting its
+    /// destructor walk it is not containment: it is the same unsound
+    /// traversal, run later and unconditionally.
+    ///
+    /// So a poisoned emulator is leaked on purpose. One session's retained
+    /// scrollback is a bounded, one-off cost; undefined behaviour in a daemon
+    /// that is still serving every other session is not.
+    screen: Option<Stream<TerminalHandler>>,
     poisoned: Option<Poisoned>,
 }
 
@@ -78,7 +90,7 @@ impl AuthoritativeTerminal {
         });
 
         Self {
-            stream: Stream::new(TerminalHandler::new(terminal)),
+            screen: Some(Stream::new(TerminalHandler::new(terminal))),
             poisoned: None,
         }
     }
@@ -100,11 +112,13 @@ impl AuthoritativeTerminal {
     #[must_use]
     pub fn consume(&mut self, bytes: &[u8]) -> DeviceReply {
         self.contain(|this| {
+            let screen = this.screen.as_mut()?;
             for byte in bytes {
-                this.stream.next(*byte);
+                screen.next(*byte);
             }
-            DeviceReply(this.stream.handler.take_output())
+            Some(DeviceReply(screen.handler.take_output()))
         })
+        .flatten()
         .unwrap_or_default()
     }
 
@@ -115,9 +129,11 @@ impl AuthoritativeTerminal {
     /// boundary rather than another delta (ADR 0003, `ARCHITECTURE.md` §3).
     pub fn resize(&mut self, geometry: PtyGeometry) {
         let _ = self.contain(|this| {
-            this.stream
+            let screen = this.screen.as_mut()?;
+            screen
                 .terminal_mut()
                 .resize(geometry.cols(), geometry.rows());
+            Some(())
         });
     }
 
@@ -160,15 +176,25 @@ impl AuthoritativeTerminal {
     /// parser meant to do with the bytes that broke it (AGENTS.md §Scope
     /// discipline).
     fn contain<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> Option<T> {
-        if self.poisoned.is_some() {
-            return None;
-        }
+        self.screen.as_ref()?;
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(self))) {
             Ok(outcome) => Some(outcome),
             Err(_) => {
-                self.poisoned = Some(Poisoned::ParserPanicked);
+                self.poison();
                 None
             }
+        }
+    }
+
+    /// Give up this screen without running its destructor.
+    ///
+    /// The one place poisoning happens, so the reason and the disposal cannot
+    /// drift apart: the field's documentation carries why the broken emulator
+    /// is forgotten rather than dropped.
+    fn poison(&mut self) {
+        self.poisoned = Some(Poisoned::ParserPanicked);
+        if let Some(screen) = self.screen.take() {
+            std::mem::forget(screen);
         }
     }
 
@@ -179,10 +205,7 @@ impl AuthoritativeTerminal {
     /// caller that could skip the check would be the one that reads a
     /// half-modified structure.
     pub fn geometry(&self) -> Option<PtyGeometry> {
-        if self.poisoned.is_some() {
-            return None;
-        }
-        let terminal = &self.stream.handler.terminal;
+        let terminal = &self.screen.as_ref()?.handler.terminal;
         // The emulator's own size, which came from a validated geometry and
         // cannot have become invalid since.
         Some(PtyGeometry::expect_valid(terminal.rows, terminal.cols))
@@ -194,10 +217,7 @@ impl AuthoritativeTerminal {
     /// serializer does not re-emit it — the one gap S1 found, and the one
     /// ADR 0003 D3 makes Corral's to close when a snapshot is built.
     pub fn title(&self) -> Option<&[u8]> {
-        if self.poisoned.is_some() {
-            return None;
-        }
-        let title = &self.stream.handler.terminal.title;
+        let title = &self.screen.as_ref()?.handler.terminal.title;
         (!title.is_empty()).then_some(title.as_slice())
     }
 
@@ -208,9 +228,7 @@ impl AuthoritativeTerminal {
     /// caller that could mutate here would be a second writer to the state
     /// this type exists to own.
     pub fn terminal(&self) -> Option<&Terminal> {
-        self.poisoned
-            .is_none()
-            .then_some(&self.stream.handler.terminal)
+        Some(&self.screen.as_ref()?.handler.terminal)
     }
 }
 

@@ -125,3 +125,29 @@ fn an_input_frame_carries_exactly_what_was_typed() {
     assert_eq!(frame.kind, FrameKind::Input);
     assert_eq!(frame.payload, b"\x03".to_vec());
 }
+
+/// A snapshot clears the visible screen and nothing else. `ESC[3J` erases
+/// saved lines — the person's own shell history from before they attached —
+/// and a snapshot is replayed on every attach, resize and resync.
+#[test]
+fn applying_a_snapshot_does_not_erase_the_persons_scrollback() {
+    let mut out = Vec::new();
+    let frame = TerminalFrame {
+        kind: FrameKind::Snapshot,
+        epoch: Epoch(0),
+        sequence: Sequence(0),
+        payload: b"a screen".to_vec(),
+    };
+
+    apply(&frame, &mut out).expect("applied");
+
+    let written = String::from_utf8_lossy(&out);
+    assert!(
+        !written.contains("[3J"),
+        "the client erased saved lines it does not own: {written:?}"
+    );
+    assert!(
+        written.contains("[2J"),
+        "the visible screen was not cleared"
+    );
+}
