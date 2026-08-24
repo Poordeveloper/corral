@@ -23,6 +23,8 @@ docs/plans/                        bounded implementation plans
     ↓
 docs/references/                   evidence: architecture-benchmarks.md
                                    (settled-decision ledger) + source reports
+docs/evidence/                     durable verification evidence for
+                                   milestone or material engineering claims
     ↓
 scripts/verify-fast                iteration feedback, never merge evidence
 scripts/verify                     the one definition of merge-ready;
@@ -41,6 +43,10 @@ Ownership rules:
 - `docs/decisions/` records what the founder accepted and when; it is never
   edited to change a past decision. `docs/adr/` materializes those decisions
   as single-topic, supersedable records. Neither copies the other's text.
+- `docs/references/` holds external/research evidence — benchmarks and
+  spike reports. `docs/evidence/` holds repository-owned verification
+  evidence supporting a merge, release, or governance claim; routine CI run
+  history stays in the CI/artifact system, never in the repo.
 - Settled architecture decisions live as ledger rows; reopening one requires
   reading its row and bringing new evidence (AGENTS.md §Scope discipline).
 - Normative changes to AGENTS.md, this file, or the Workflow require explicit

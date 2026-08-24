@@ -2,7 +2,7 @@
 
 Repository-wide hard rules for coding agents working on Corral. This file is canonical engineering law; `docs/GOVERNANCE.md` explains the document hierarchy.
 
-Keep this file concise and bounded (~260 lines). Product detail belongs in `PRODUCT.md`, architecture detail in `ARCHITECTURE.md`, roadmap scope in `ROADMAP.md`, process mechanics in `docs/ENGINEERING_WORKFLOW.md`, implementation plans in `docs/plans/`, irreversible decisions in `docs/adr/`, and reference evidence in `docs/references/`.
+Keep this file concise and bounded (~260 lines). Product detail belongs in `PRODUCT.md`, architecture detail in `ARCHITECTURE.md`, roadmap scope in `ROADMAP.md`, process mechanics in `docs/ENGINEERING_WORKFLOW.md`, implementation plans in `docs/plans/`, irreversible decisions in `docs/adr/`, reference evidence in `docs/references/`, and durable verification evidence in `docs/evidence/`.
 
 Before non-trivial work, read `docs/ENGINEERING_WORKFLOW.md` and the nearest scoped `AGENTS.md` for the touched subtree, if one exists.
 
