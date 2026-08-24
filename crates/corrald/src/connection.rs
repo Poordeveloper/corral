@@ -577,12 +577,14 @@ fn fingerprint(params: &SessionNewParams) -> CommandFingerprint {
     if let Some(cwd) = &params.cwd {
         fingerprint = fingerprint.input("cwd", cwd);
     }
-    if let Some(rows) = params.rows {
-        fingerprint = fingerprint.input("rows", rows.to_string());
-    }
-    if let Some(cols) = params.cols {
-        fingerprint = fingerprint.input("cols", cols.to_string());
-    }
+    // Geometry is deliberately absent. It is the first attaching client's
+    // presentation preference, not a property of the Session being created —
+    // the daemon already treats it as optional, and the first attach reconciles
+    // it anyway. It is also the one input a client cannot repeat: a terminal
+    // resized between a lost response and its retry would make the retry a
+    // `CommandIdConflict`, whose contract is that the id will never mean this
+    // command — leaving the caller unable to retry and unable to learn what the
+    // first attempt started (founder ruling, 2026-08-25).
     fingerprint.build()
 }
 

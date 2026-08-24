@@ -255,6 +255,12 @@ plan's own rule required it: facts still queued when the process ends are facts
 nobody would ever write, which is the silent loss Q10 forbids. The wait is
 bounded and a wait that runs out is itself reported, in the exit status.
 
+**Terminal geometry is not a semantic input.** Q2 declined to freeze the
+fingerprint's contents, so this phase had to settle `session.new`'s concrete
+set. Geometry went in on the literal reading and came back out on the founder's
+ruling, because it is the one input a client cannot repeat across a retry:
+`docs/decisions/2026-08-25-session-new-fingerprint-excludes-geometry.md`.
+
 **F1 from the PR3 review, folded in as the follow-up it was slated for.**
 `execution_state`'s catch-all had flipped from `Unknown` to `Running` during
 ADR 0007's change. `Running` is the one answer a fallthrough must never give:

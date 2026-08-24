@@ -80,10 +80,12 @@ pub struct SessionNewParams {
     /// the recommended form; correctness rests on the fingerprint rather than
     /// on UUIDs never colliding (ADR 0002, Q13).
     ///
-    /// A retry repeats every other field unchanged. One id means one semantic
-    /// command, so the same id carrying a different `argv`, `cwd`, or geometry
-    /// is a conflict rather than a retry — including a geometry that changed
-    /// only because the person resized their terminal in between.
+    /// A retry repeats `argv` and `cwd` unchanged: one id means one semantic
+    /// command, so the same id carrying different ones is a conflict rather
+    /// than a retry. The geometry below is not part of that identity, so a
+    /// retry sent from a terminal that has since been resized is still a
+    /// retry — it replays, and the session keeps the size its first execution
+    /// was given.
     pub command_id: String,
     /// The program and its arguments. Never joined into a display label.
     pub argv: Vec<String>,
@@ -92,6 +94,12 @@ pub struct SessionNewParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     /// The geometry the first attaching client wants.
+    ///
+    /// A preference, not part of what the command means: the daemon supplies a
+    /// size when it is absent, and the first attach reconciles it against the
+    /// terminal the person actually has. So it stays out of the command's
+    /// identity — a resize between a lost response and its retry must not turn
+    /// the retry into a conflict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

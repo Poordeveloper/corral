@@ -574,3 +574,45 @@ fn a_command_the_registry_refuses_does_not_end_the_daemon() {
         "a refusal leaves the daemon serving"
     );
 }
+
+/// Geometry is the first attaching client's preference, not part of what the
+/// command means. A person who resizes their terminal between a lost response
+/// and its retry still gets a retry — the alternative is a conflict the client
+/// can neither retry nor learn anything from, while a runtime it cannot name
+/// is already running.
+#[test]
+fn a_retry_from_a_resized_terminal_is_still_a_retry() {
+    let account = TestAccount::new("retry-resized");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    let first = new_session(&mut client, 1, "cmd-1", &["/bin/sh", "-c", "sleep 30"]);
+
+    let again = client
+        .request(
+            2,
+            "session.new",
+            Some(json!({
+                "command_id": "cmd-1",
+                "argv": ["/bin/sh", "-c", "sleep 30"],
+                "rows": 60,
+                "cols": 200,
+            })),
+        )
+        .expect("session.new answered");
+
+    assert_eq!(field(&first, "session_id"), field(&again, "session_id"));
+    assert_eq!(field(&first, "run_id"), field(&again, "run_id"));
+    assert_eq!(runs(&account.registry()).len(), 1);
+    // The size its first execution was given still stands; reconciling it is
+    // the attaching client's job, as it is on every attach.
+    let granted = client
+        .request(
+            3,
+            "terminal.attach",
+            Some(json!({ "session_id": field(&first, "session_id") })),
+        )
+        .expect("terminal.attach answered");
+    assert_eq!(result(&granted)["rows"], 24);
+    assert_eq!(result(&granted)["cols"], 80);
+}
