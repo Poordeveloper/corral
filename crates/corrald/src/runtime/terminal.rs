@@ -47,9 +47,25 @@ impl DeviceReply {
     }
 }
 
+/// Why a screen stopped being usable.
+///
+/// One variant, because there is only one way this happens and only one honest
+/// response to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Poisoned {
+    /// The VT parser panicked on provider output.
+    ///
+    /// The screen it was building is not in a state anyone may read: a panic
+    /// out of a data structure with unsafe internals leaves it half-modified,
+    /// so even looking is unsound. Everything about this terminal is refused
+    /// from here on.
+    ParserPanicked,
+}
+
 /// One session's authoritative screen.
 pub struct AuthoritativeTerminal {
     stream: Stream<TerminalHandler>,
+    poisoned: Option<Poisoned>,
 }
 
 impl AuthoritativeTerminal {
@@ -63,7 +79,18 @@ impl AuthoritativeTerminal {
 
         Self {
             stream: Stream::new(TerminalHandler::new(terminal)),
+            poisoned: None,
         }
+    }
+
+    /// Whether this screen may still be read or fed.
+    ///
+    /// Fail-closed containment, not a repair: Corral never guesses what the
+    /// parser meant to do with the bytes that broke it (AGENTS.md §Scope
+    /// discipline). Root cause and follow-up:
+    /// `docs/evidence/pr3-terminal-fuzz-2026-08-24.md`.
+    pub fn poisoned(&self) -> Option<Poisoned> {
+        self.poisoned
     }
 
     /// Feed PTY output to the emulator and collect anything the child must be
@@ -74,10 +101,30 @@ impl AuthoritativeTerminal {
     /// the part every surface reads.
     #[must_use]
     pub fn consume(&mut self, bytes: &[u8]) -> DeviceReply {
-        for byte in bytes {
-            self.stream.next(*byte);
+        if self.poisoned.is_some() {
+            return DeviceReply::default();
         }
-        DeviceReply(self.stream.handler.take_output())
+
+        // The VT parser is third-party code with a large unsafe surface on the
+        // path every untrusted byte takes first (ADR 0003 D1). A panic there
+        // is contained rather than allowed to take the daemon's thread with
+        // it — but it is never treated as recoverable: the screen is marked
+        // and nothing reads it again, because a panic out of a half-modified
+        // structure makes even reading unsound.
+        let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for byte in bytes {
+                self.stream.next(*byte);
+            }
+            self.stream.handler.take_output()
+        }));
+
+        match parsed {
+            Ok(reply) => DeviceReply(reply),
+            Err(_) => {
+                self.poisoned = Some(Poisoned::ParserPanicked);
+                DeviceReply::default()
+            }
+        }
     }
 
     /// Reflow to a new geometry.
@@ -86,17 +133,29 @@ impl AuthoritativeTerminal {
     /// into a reflowed screen diverges, which is why resize is an epoch
     /// boundary rather than another delta (ADR 0003, `ARCHITECTURE.md` §3).
     pub fn resize(&mut self, geometry: PtyGeometry) {
+        if self.poisoned.is_some() {
+            return;
+        }
         self.stream
             .terminal_mut()
             .resize(geometry.cols, geometry.rows);
     }
 
-    pub fn geometry(&self) -> PtyGeometry {
+    /// The screen's size, or `None` once the screen may no longer be read.
+    ///
+    /// Every reader goes through an `Option` rather than one of them getting a
+    /// plain value: a poisoned screen has no size anyone may state, and a
+    /// caller that could skip the check would be the one that reads a
+    /// half-modified structure.
+    pub fn geometry(&self) -> Option<PtyGeometry> {
+        if self.poisoned.is_some() {
+            return None;
+        }
         let terminal = &self.stream.handler.terminal;
-        PtyGeometry {
+        Some(PtyGeometry {
             rows: terminal.rows,
             cols: terminal.cols,
-        }
+        })
     }
 
     /// The window title the child set, if it set one.
@@ -105,6 +164,9 @@ impl AuthoritativeTerminal {
     /// serializer does not re-emit it — the one gap S1 found, and the one
     /// ADR 0003 D3 makes Corral's to close when a snapshot is built.
     pub fn title(&self) -> Option<&[u8]> {
+        if self.poisoned.is_some() {
+            return None;
+        }
         let title = &self.stream.handler.terminal.title;
         (!title.is_empty()).then_some(title.as_slice())
     }
@@ -115,8 +177,10 @@ impl AuthoritativeTerminal {
     /// Read-only on purpose: bytes are the one way the screen changes, so a
     /// caller that could mutate here would be a second writer to the state
     /// this type exists to own.
-    pub fn terminal(&self) -> &Terminal {
-        &self.stream.handler.terminal
+    pub fn terminal(&self) -> Option<&Terminal> {
+        self.poisoned
+            .is_none()
+            .then_some(&self.stream.handler.terminal)
     }
 }
 
@@ -124,6 +188,7 @@ impl std::fmt::Debug for AuthoritativeTerminal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthoritativeTerminal")
             .field("geometry", &self.geometry())
+            .field("poisoned", &self.poisoned)
             .finish_non_exhaustive()
     }
 }

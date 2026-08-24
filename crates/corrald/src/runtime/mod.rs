@@ -37,4 +37,4 @@ pub use snapshot::{
 };
 pub use spawn::{PtyGeometry, SpawnError, SpawnedRuntime, spawn};
 pub use stream::{Desynchronised, SUBSCRIBER_QUEUE_BYTES, Subscriber, TerminalStream};
-pub use terminal::{AuthoritativeTerminal, DeviceReply, RETAINED_SCROLLBACK_BYTES};
+pub use terminal::{AuthoritativeTerminal, DeviceReply, Poisoned, RETAINED_SCROLLBACK_BYTES};

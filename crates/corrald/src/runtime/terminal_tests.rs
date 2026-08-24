@@ -78,7 +78,7 @@ fn a_terminal_whose_child_set_no_title_reports_none() {
 #[test]
 fn resize_moves_the_authoritative_geometry() {
     let mut terminal = terminal();
-    assert_eq!(terminal.geometry(), GEOMETRY);
+    assert_eq!(terminal.geometry(), Some(GEOMETRY));
 
     terminal.resize(PtyGeometry {
         rows: 40,
@@ -87,10 +87,10 @@ fn resize_moves_the_authoritative_geometry() {
 
     assert_eq!(
         terminal.geometry(),
-        PtyGeometry {
+        Some(PtyGeometry {
             rows: 40,
             cols: 120
-        }
+        })
     );
 }
 
@@ -104,6 +104,7 @@ fn retention_is_a_byte_budget_the_emulator_was_told_about() {
     assert_eq!(
         terminal
             .terminal()
+            .expect("a readable screen")
             .screens
             .active()
             .pages
@@ -123,7 +124,13 @@ fn output_past_the_viewport_becomes_retained_history() {
         let _ = terminal.consume(format!("line {line}\r\n").as_bytes());
     }
 
-    let retained = terminal.terminal().screens.active().pages.total_rows();
+    let retained = terminal
+        .terminal()
+        .expect("a readable screen")
+        .screens
+        .active()
+        .pages
+        .total_rows();
     assert!(
         retained > usize::from(GEOMETRY.rows),
         "200 lines through a {}-row screen retained only {retained} rows",

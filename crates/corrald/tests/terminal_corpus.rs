@@ -86,10 +86,11 @@ fn every_corpus_case_is_consumed_without_panicking() {
     }
 }
 
-/// A screen built from hostile input must still be expressible, or a client
-/// could be locked out of a session precisely when something has gone wrong.
+/// A screen built from hostile input must be either expressible or refused in
+/// so many words. What must never happen is a plausible-looking snapshot of a
+/// screen nobody can vouch for.
 #[test]
-fn every_corpus_case_still_yields_a_snapshot() {
+fn every_corpus_case_is_serialized_or_refused_by_name() {
     for (name, bytes) in corpus() {
         let terminal = consume_all(&bytes, 997);
 
@@ -98,14 +99,72 @@ fn every_corpus_case_still_yields_a_snapshot() {
                 !snapshot.payload().is_empty(),
                 "{name} produced an empty snapshot"
             ),
-            // A refusal is a legitimate answer — it is the typed failure ADR
-            // 0003 D8 requires — but it must be a refusal, not a panic.
-            Err(error) => assert!(
-                error.to_string().contains("ceiling"),
-                "{name} failed for a reason the contract does not name: {error}"
-            ),
+            // Two refusals the contract names: a viewport past the ceiling
+            // (ADR 0003 D8), and a screen whose parser panicked and may no
+            // longer be read at all. Anything else means a failure mode
+            // nobody has decided about.
+            Err(error) => {
+                let stated = error.to_string();
+                assert!(
+                    stated.contains("ceiling") || stated.contains("can no longer be read"),
+                    "{name} failed for a reason the contract does not name: {error}"
+                );
+            }
         }
     }
+}
+
+/// What the pre-merge fuzz campaign found: the emulator truncates an OSC title
+/// at 1024 bytes with a raw string slice, so a multi-byte character straddling
+/// the cut panics its parser. An agent that sets a long title containing
+/// anything but ASCII reaches this — it is not an exotic input.
+///
+/// Corral contains it rather than repairing it: the screen is marked
+/// unreadable and every reader refuses, which is the fail-closed path
+/// AGENTS.md §Scope discipline allows while the root cause sits upstream
+/// (`docs/evidence/pr3-terminal-fuzz-2026-08-24.md`).
+#[test]
+fn a_parser_panic_poisons_a_screen_instead_of_taking_the_daemon() {
+    let name = "osc-title-truncation-splits-a-character.bin";
+    let bytes = corpus()
+        .into_iter()
+        .find(|(case, _)| case == name)
+        .map(|(_, bytes)| bytes)
+        .unwrap_or_else(|| panic!("{name} is missing from the corpus"));
+
+    let terminal = consume_all(&bytes, 997);
+
+    assert!(
+        terminal.poisoned().is_some(),
+        "{name} no longer panics the parser; if upstream fixed it, this test \
+         and the containment it guards should be revisited together"
+    );
+    let refusal = encode(&terminal).expect_err("a poisoned screen is refused");
+    assert!(
+        refusal.to_string().contains("can no longer be read"),
+        "{refusal}"
+    );
+    assert_eq!(terminal.geometry(), None);
+    assert_eq!(terminal.title(), None);
+}
+
+/// A poisoned screen never comes back. Feeding it more bytes is not a retry:
+/// the structure a panic left behind is not something later input repairs.
+#[test]
+fn a_poisoned_screen_stays_poisoned() {
+    let bytes = corpus()
+        .into_iter()
+        .find(|(case, _)| case == "osc-title-truncation-splits-a-character.bin")
+        .map(|(_, bytes)| bytes)
+        .expect("the reproducer is in the corpus");
+    let mut terminal = consume_all(&bytes, 997);
+    assert!(terminal.poisoned().is_some());
+
+    let reply = terminal.consume(b"\x1b[2Jperfectly ordinary output\r\n");
+
+    assert!(reply.is_empty(), "a poisoned screen answered a query");
+    assert!(terminal.poisoned().is_some());
+    assert!(encode(&terminal).is_err());
 }
 
 /// Resize is where a reflow touches every retained row, so it is where a

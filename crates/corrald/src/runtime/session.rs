@@ -261,7 +261,12 @@ fn serve(
                 let _ = std::io::Write::flush(&mut writer);
             }
             Ok(Ask::Geometry(reply)) => {
-                let _ = reply.send(terminal.geometry());
+                // A screen that may no longer be read has no geometry to
+                // state, and the caller's channel simply goes unanswered —
+                // which its own error path already means "gone".
+                if let Some(geometry) = terminal.geometry() {
+                    let _ = reply.send(geometry);
+                }
             }
             Ok(Ask::Title(reply)) => {
                 let _ = reply.send(terminal.title().map(<[u8]>::to_vec));

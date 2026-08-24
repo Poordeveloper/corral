@@ -37,9 +37,14 @@ fn pump_to_completion(script: &str) -> Pumped {
         let mut terminal = AuthoritativeTerminal::new(GEOMETRY);
         let end = pump(&runtime, &mut terminal);
         let _ = runtime.wait();
-        let _ = sender.send(end.map(|_| Pumped {
-            title: terminal.title().map(<[u8]>::to_vec),
-            retained_rows: terminal.terminal().screens.active().pages.total_rows(),
+        let _ = sender.send(end.map(|_| {
+            Pumped {
+                title: terminal.title().map(<[u8]>::to_vec),
+                retained_rows: terminal
+                    .terminal()
+                    .map(|inner| inner.screens.active().pages.total_rows())
+                    .unwrap_or_default(),
+            }
         }));
     });
 

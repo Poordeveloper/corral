@@ -10,7 +10,7 @@
 use qwertty_term_vt::formatter::{Content, Options, TerminalExtra};
 use qwertty_term_vt::point::{Coordinate, Point, Tag};
 
-use super::terminal::AuthoritativeTerminal;
+use super::terminal::{AuthoritativeTerminal, Poisoned};
 
 /// How much recent scrollback a snapshot tries to carry.
 ///
@@ -82,7 +82,14 @@ pub struct Snapshot {
 /// screen that never existed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotError {
-    ViewportExceedsCeiling { encoded_bytes: usize },
+    ViewportExceedsCeiling {
+        encoded_bytes: usize,
+    },
+    /// The screen cannot be read at all: its parser panicked and left the
+    /// structure half-modified. Refused rather than serialized, because
+    /// reading it is unsound and a plausible-looking screen is worse than a
+    /// stated absence.
+    ScreenPoisoned(Poisoned),
 }
 
 impl Snapshot {
@@ -124,6 +131,10 @@ pub fn encode_within(
     terminal: &AuthoritativeTerminal,
     budget: SnapshotBudget,
 ) -> Result<Snapshot, SnapshotError> {
+    if let Some(poisoned) = terminal.poisoned() {
+        return Err(SnapshotError::ScreenPoisoned(poisoned));
+    }
+
     let available = retained_scrollback_rows(terminal);
     let mut rows = available.min(SNAPSHOT_SCROLLBACK_ROWS);
 
@@ -163,19 +174,29 @@ pub fn encode_within(
 }
 
 /// Rows of scrollback the emulator is holding above the active area.
+///
+/// Zero for a screen that may no longer be read; every caller has already
+/// refused such a screen, and this keeps the arithmetic from being the place
+/// that discovers it.
 fn retained_scrollback_rows(terminal: &AuthoritativeTerminal) -> usize {
-    let screen = terminal.terminal().screens.active();
-    screen
+    let (Some(inner), Some(geometry)) = (terminal.terminal(), terminal.geometry()) else {
+        return 0;
+    };
+    inner
+        .screens
+        .active()
         .pages
         .total_rows()
-        .saturating_sub(usize::from(terminal.geometry().rows))
+        .saturating_sub(usize::from(geometry.rows))
 }
 
 /// Serialize the viewport plus `scrollback_rows` of history.
 fn render(terminal: &AuthoritativeTerminal, scrollback_rows: usize) -> Vec<u8> {
-    let inner = terminal.terminal();
+    let (Some(inner), Some(geometry)) = (terminal.terminal(), terminal.geometry()) else {
+        return Vec::new();
+    };
     let total_rows = inner.screens.active().pages.total_rows();
-    let viewport_rows = usize::from(terminal.geometry().rows);
+    let viewport_rows = usize::from(geometry.rows);
     let first_row = total_rows.saturating_sub(viewport_rows + scrollback_rows);
 
     let content = match total_rows.checked_sub(1) {
@@ -220,6 +241,9 @@ impl std::fmt::Display for SnapshotError {
             Self::ViewportExceedsCeiling { encoded_bytes } => write!(
                 f,
                 "the viewport alone encodes to {encoded_bytes} bytes, past the {SNAPSHOT_CEILING_BYTES}-byte ceiling"
+            ),
+            Self::ScreenPoisoned(Poisoned::ParserPanicked) => f.write_str(
+                "this terminal's parser failed on provider output and its screen can no longer be read",
             ),
         }
     }
