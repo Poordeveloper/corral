@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 read_when:
   - changing what starts, ends, or removes a managed session
   - adding a thread, descriptor, or buffer to a session's runtime
@@ -16,6 +16,10 @@ vocabulary a Run may be described in. ADR 0003 fixes what a snapshot carries.
 None of them says when a managed session *ends*, and PR3 built the runtime
 without answering it — so nothing released a screen, nothing removed a thread,
 and every failure path left an entry that answered questions forever.
+
+Written during the design pass the founder ordered when four review rounds on
+PR3 stopped converging. Acceptance evidence:
+`docs/decisions/2026-08-24-adr7-managed-session-lifetime-acceptance.md`.
 
 **The invariant.** Every resource a managed session creates has one owner and
 one release point, and the release point is reached on every path — the ones
