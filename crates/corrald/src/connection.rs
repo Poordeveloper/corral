@@ -5,8 +5,8 @@ use corral_protocol::method::{
     TerminalAttachParams, TerminalAttachResult,
 };
 use corral_protocol::{
-    ClientHello, Compatibility, ErrorCode, Frame, FrameError, FrameReader, FrameWriter,
-    ProtocolError, Request, RequestId, ServerHello, compatible, local_versions,
+    ClientHello, Compatibility, ConnectionRole, ErrorCode, Frame, FrameError, FrameReader,
+    FrameWriter, ProtocolError, Request, RequestId, ServerHello, compatible, local_versions,
 };
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -15,7 +15,9 @@ use tracing::{debug, error, warn};
 
 use crate::lifecycle::{EstablishedGuard, Lifecycle, ShutdownReason};
 use crate::policy::DaemonPolicy;
-use crate::runtime::{AttachGrant, LaunchRequest, ManagedSession, PtyGeometry, StartError};
+use crate::runtime::{
+    AttachGrant, AttachToken, LaunchRequest, ManagedSession, PtyGeometry, StartError,
+};
 use crate::state::{DaemonState, Vouched};
 
 /// What a dispatched request produced.
@@ -48,12 +50,12 @@ pub async fn serve(
     let mut reader = FrameReader::new(read_half);
     let mut writer = FrameWriter::new(write_half);
 
-    let established = tokio::select! {
+    let (established, role) = tokio::select! {
         outcome = tokio::time::timeout(
             policy.pre_hello_deadline,
-            bootstrap(&mut reader, &mut writer, &lifecycle),
+            bootstrap(&mut reader, &mut writer, &lifecycle, &state),
         ) => match outcome {
-            Ok(Some(guard)) => guard,
+            Ok(Some(bootstrapped)) => bootstrapped,
             Ok(None) => return,
             Err(_elapsed) => {
                 debug!("a pending connection did not say hello before the deadline");
@@ -63,7 +65,26 @@ pub async fn serve(
         _ = shutdown.changed() => return,
     };
 
-    serve_established(&mut reader, &mut writer, &mut shutdown, &lifecycle, &state).await;
+    match role {
+        // A connection that redeemed a token stops being an RPC connection
+        // here, permanently. There is no path back, which is what keeps the
+        // two framings from ever having to share a stream.
+        Some(grant) => {
+            let (mut raw_reader, leftover) = reader.into_parts();
+            let mut raw_writer = writer.into_inner();
+            crate::terminal_channel::serve(
+                &mut raw_reader,
+                &mut raw_writer,
+                leftover,
+                grant.session,
+                &state,
+            )
+            .await;
+        }
+        None => {
+            serve_established(&mut reader, &mut writer, &mut shutdown, &lifecycle, &state).await;
+        }
+    }
     drop(established);
 }
 
@@ -76,7 +97,8 @@ async fn bootstrap(
     reader: &mut FrameReader<OwnedReadHalf>,
     writer: &mut FrameWriter<OwnedWriteHalf>,
     lifecycle: &Arc<Lifecycle>,
-) -> Option<EstablishedGuard> {
+    state: &Arc<DaemonState>,
+) -> Option<(EstablishedGuard, Option<AttachGrant>)> {
     let frame = match reader.read_frame().await {
         Ok(Some(frame)) => frame,
         Ok(None) => return None,
@@ -157,6 +179,28 @@ async fn bootstrap(
         return None;
     }
 
+    // A hello claiming the terminal-data role is answered only if its token
+    // opens something: refusing before the daemon commits to anything means a
+    // spent or forged token costs a connection, not a session.
+    let role = match hello.role.as_ref() {
+        None => None,
+        Some(role) => match redeem_role(role, state) {
+            Some(grant) => Some(grant),
+            None => {
+                let _ = writer
+                    .write_frame(&Frame::error(
+                        request.id,
+                        ProtocolError::new(
+                            ErrorCode::ProtocolViolation,
+                            "the attach token is not redeemable",
+                        ),
+                    ))
+                    .await;
+                return None;
+            }
+        },
+    };
+
     // Establish before answering: between the decision and the answer, an idle
     // shutdown must not be able to commit behind this client's back.
     let guard = lifecycle.establish()?;
@@ -166,7 +210,18 @@ async fn bootstrap(
     {
         return None;
     }
-    Some(guard)
+    Some((guard, role))
+}
+
+/// Redeem a terminal-data role's token.
+///
+/// Redemption is one step and consumption is final: a caller whose channel
+/// then fails asks for another token rather than reviving a spent one
+/// (grill Q2).
+fn redeem_role(role: &ConnectionRole, state: &Arc<DaemonState>) -> Option<AttachGrant> {
+    let ConnectionRole::TerminalData { attach_token } = role;
+    let token = AttachToken::from_wire(attach_token)?;
+    state.with_runtime(|runtime| runtime.attach_tokens.redeem(&token).ok())?
 }
 
 async fn write_hello(

@@ -1,9 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use corral_protocol::method::{self, SessionListResult};
+use corral_protocol::method::{
+    self, SessionListResult, SessionNewParams, SessionNewResult, TerminalAttachParams,
+    TerminalAttachResult,
+};
 use corral_protocol::{
-    ClientHello, Compatibility, Frame, FrameError, FrameReader, FrameWriter, Outcome, PeerVersions,
-    RequestId, ServerHello, compatible, local_versions,
+    ClientHello, Compatibility, ConnectionRole, Frame, FrameError, FrameReader, FrameWriter,
+    Outcome, PeerVersions, RequestId, ServerHello, compatible, local_versions,
 };
 use serde_json::Value;
 use tokio::net::UnixStream;
@@ -51,6 +54,103 @@ impl Connection {
         let value = self.call(method::SESSION_LIST, None).await?;
         serde_json::from_value(value).map_err(|source| RequestError::Protocol {
             detail: format!("the session list did not decode: {source}"),
+        })
+    }
+
+    /// Open a terminal data channel on this daemon by redeeming a token.
+    ///
+    /// A second connection, not this one: the RPC channel stays semantic, so
+    /// losing the data channel never costs the ability to ask for another
+    /// (ADR 0003, grill Q2). The returned stream has completed its hello and
+    /// carries terminal frames only — the transition is one way.
+    pub async fn open_terminal_channel(
+        endpoint: &Path,
+        attach_token: &str,
+    ) -> Result<UnixStream, RequestError> {
+        let stream =
+            UnixStream::connect(endpoint)
+                .await
+                .map_err(|source| RequestError::Protocol {
+                    detail: format!("the terminal channel could not connect: {source}"),
+                })?;
+
+        let (read_half, write_half) = stream.into_split();
+        let mut reader = FrameReader::new(read_half);
+        let mut writer = FrameWriter::new(write_half);
+
+        let ours = local_versions();
+        let hello = ClientHello {
+            protocol_version: ours.protocol_version,
+            min_compatible_peer_version: ours.min_compatible_peer_version,
+            capabilities: Default::default(),
+            role: Some(ConnectionRole::TerminalData {
+                attach_token: attach_token.to_owned(),
+            }),
+        };
+        let params = serde_json::to_value(&hello).map_err(|source| RequestError::Protocol {
+            detail: format!("the hello did not encode: {source}"),
+        })?;
+
+        writer
+            .write_frame(&Frame::request(RequestId(0), method::HELLO, Some(params)))
+            .await
+            .map_err(|source| RequestError::Protocol {
+                detail: format!("the hello could not be sent: {source}"),
+            })?;
+
+        match reader.read_frame().await {
+            Ok(Some(Frame::Response(response))) => match response.outcome {
+                Outcome::Result(_) => {}
+                Outcome::Error(error) => return Err(RequestError::Refused(error)),
+            },
+            _ => {
+                return Err(RequestError::Protocol {
+                    detail: "the daemon did not answer the terminal hello".to_owned(),
+                });
+            }
+        }
+
+        let (read_half, leftover) = reader.into_parts();
+        if !leftover.is_empty() {
+            return Err(RequestError::Protocol {
+                detail: "the daemon sent terminal bytes before the channel opened".to_owned(),
+            });
+        }
+        read_half
+            .reunite(writer.into_inner())
+            .map_err(|source| RequestError::Protocol {
+                detail: format!("the terminal channel could not be reassembled: {source}"),
+            })
+    }
+
+    /// Start a managed session and its first Run.
+    pub async fn session_new(
+        &mut self,
+        params: SessionNewParams,
+    ) -> Result<SessionNewResult, RequestError> {
+        let encoded = serde_json::to_value(params).map_err(|source| RequestError::Protocol {
+            detail: format!("the request did not encode: {source}"),
+        })?;
+        let value = self.call(method::SESSION_NEW, Some(encoded)).await?;
+        serde_json::from_value(value).map_err(|source| RequestError::Protocol {
+            detail: format!("the new session did not decode: {source}"),
+        })
+    }
+
+    /// Obtain a one-time token for a terminal data channel.
+    pub async fn terminal_attach(
+        &mut self,
+        session_id: &str,
+    ) -> Result<TerminalAttachResult, RequestError> {
+        let params = serde_json::to_value(TerminalAttachParams {
+            session_id: session_id.to_owned(),
+        })
+        .map_err(|source| RequestError::Protocol {
+            detail: format!("the request did not encode: {source}"),
+        })?;
+        let value = self.call(method::TERMINAL_ATTACH, Some(params)).await?;
+        serde_json::from_value(value).map_err(|source| RequestError::Protocol {
+            detail: format!("the attach grant did not decode: {source}"),
         })
     }
 

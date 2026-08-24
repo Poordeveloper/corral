@@ -23,6 +23,7 @@ mod policy;
 pub mod runtime;
 mod server;
 mod state;
+mod terminal_channel;
 
 use std::fmt;
 use std::process::ExitCode;

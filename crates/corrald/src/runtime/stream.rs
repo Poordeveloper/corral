@@ -103,6 +103,21 @@ impl Default for TerminalStream {
 }
 
 impl Subscriber {
+    /// A subscriber joining a stream at a known epoch.
+    ///
+    /// Its sequence starts at zero because a sequence only means anything
+    /// within the epoch it was recorded against, and a joiner's first frame is
+    /// its own snapshot.
+    pub fn joining(epoch: Epoch) -> Self {
+        Self {
+            epoch,
+            next_sequence: Sequence(0),
+            queued: VecDeque::new(),
+            queued_bytes: 0,
+            desynchronised: None,
+        }
+    }
+
     pub fn epoch(&self) -> Epoch {
         self.epoch
     }

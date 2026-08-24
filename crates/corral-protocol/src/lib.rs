@@ -26,7 +26,9 @@ pub use error::{ErrorCode, ProtocolError};
 pub use framing::{
     FrameError, FrameReader, FrameWriter, FramingFault, MAX_FRAME_BYTES, decode_frame, encode_frame,
 };
-pub use hello::{ClientHello, Compatibility, PeerVersions, ServerHello, compatible};
+pub use hello::{
+    ClientHello, Compatibility, ConnectionRole, PeerVersions, ServerHello, compatible,
+};
 
 /// The protocol this build speaks.
 pub const PROTOCOL_VERSION: u32 = 1;
