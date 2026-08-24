@@ -95,6 +95,14 @@ while IFS= read -r -d '' f; do
         docs/decisions/*)
             note "founder decision records" ;;
     esac
+    # Vendored third-party code carries a declared patch set and a removal
+    # condition; a change here either alters code Corral did not write or moves
+    # the boundary that keeps it out of Corral's lint policy
+    # (docs/decisions/2026-08-24-pr3-spawn-gate.md).
+    case "$f" in
+        third_party/*)
+            note "vendored third-party code" ;;
+    esac
     # The CI workflows are the sole execution point of this detector and the
     # other gates; editing them can neuter a gate without touching scripts/.
     case "$f" in
