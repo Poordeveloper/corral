@@ -141,6 +141,14 @@ the same consequence, and drew the boundary around the screen instead
 (ADR 0007 L5): one `contain` that every entrance goes through, poisoning on a
 panic from any of them.
 
+**The destructor was outside the boundary until the round-5 review.** Marking
+a screen unreadable stopped every read and not the drop, and the drop is the
+one entrance nobody writes as a call. A poisoned emulator is now forgotten
+instead. This is the finding least likely to have been caught by testing:
+`cargo test` would not fail on it, and only the sanitized fuzz job could —
+had it ever reached a panic in reflow or serialization rather than in the OSC
+title, which is the one reproducer that exists.
+
 **Verification gap, stated rather than papered over.** The two entrances added
 to the containment have no deterministic test that they *become* poisoned,
 because the only known reproducer — the OSC title truncation above — is
@@ -150,6 +158,25 @@ is covered: every entrance refuses an already-poisoned screen, the corpus
 reflows and serializes every case, and the nightly campaign continues to feed
 the parser. A reproducer that panics reflow or serialization is a corpus entry
 the moment one exists.
+
+## Follow-ups this campaign and the round-5 review left open
+
+**Corpus timing assertions are wall-clock.** `every_corpus_case_is_consumed_without_panicking`
+and `every_corpus_case_survives_a_reflow` assert against a 5s per-case budget
+while the rest of the suite runs on other threads. The property worth holding
+is "no quadratic blowup", and a wall clock inside a parallel suite is a poor
+expression of it. Left as-is deliberately: `AGENTS.md` §Tests forbids widening
+a timeout without measured evidence that the budget is unrealistic, and there
+is no evidence — no flake has been observed. The fix, when it is taken, is a
+bounded operation count, not a larger number.
+
+**A child can reshape the screen without the pty following.** DECCOLM makes
+the emulator 132 columns wide by itself; Corral now follows it in what it
+publishes and opens an epoch, so no client is told a size the screen does not
+have. The pty is deliberately *not* resized to match: the child asked its
+terminal, not the kernel, and whether Corral propagates that is a design
+question this repair does not answer. The divergence self-heals on the next
+explicit resize.
 
 ## What this campaign did not cover
 

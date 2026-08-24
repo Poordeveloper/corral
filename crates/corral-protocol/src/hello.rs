@@ -45,6 +45,12 @@ pub struct ClientHello {
 pub enum ConnectionRole {
     /// A terminal data channel, redeeming a token from `terminal.attach`.
     TerminalData { attach_token: String },
+    /// A role this build serves, claimed without what the claim requires.
+    ///
+    /// A separate answer from `Unknown`: telling a client its daemon lacks a
+    /// feature, when the fault is a field the client left out, sends it
+    /// looking for a problem it does not have.
+    Malformed { kind: String },
     /// A role this build does not serve. The kind is kept because it is the
     /// only thing a diagnostic can report.
     Unknown { kind: String },
@@ -73,7 +79,7 @@ impl Serialize for ConnectionRole {
                 kind: Self::TERMINAL_DATA.to_owned(),
                 attach_token: Some(attach_token.clone()),
             },
-            Self::Unknown { kind } => RoleOnTheWire {
+            Self::Malformed { kind } | Self::Unknown { kind } => RoleOnTheWire {
                 kind: kind.clone(),
                 attach_token: None,
             },
@@ -87,10 +93,14 @@ impl<'de> Deserialize<'de> for ConnectionRole {
         let wire = RoleOnTheWire::deserialize(deserializer)?;
         if wire.kind == Self::TERMINAL_DATA {
             // A terminal-data role without a token is not that role: the token
-            // is the whole claim. Kept as unknown rather than invented.
-            if let Some(attach_token) = wire.attach_token {
-                return Ok(Self::TerminalData { attach_token });
-            }
+            // is the whole claim. But it is not an *unknown* role either — the
+            // kind is one this build serves, and telling a client otherwise
+            // would send it looking for a missing feature instead of its own
+            // missing field.
+            return Ok(match wire.attach_token {
+                Some(attach_token) => Self::TerminalData { attach_token },
+                None => Self::Malformed { kind: wire.kind },
+            });
         }
         Ok(Self::Unknown { kind: wire.kind })
     }

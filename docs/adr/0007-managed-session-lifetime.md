@@ -119,7 +119,17 @@ risks have different answers, and the difference is an accident of which one
 the fuzzer reached first.
 
 Containment is fail-closed, never repair: the screen is poisoned and nothing
-reads it again.
+reads it again — **including its destructor**. `PageList::drop` walks the same
+packed page list with `Box::from_raw` on every node, so refusing to read a
+half-modified structure while still letting it be dropped is the same unsound
+traversal, run later and unconditionally. A poisoned emulator is therefore
+forgotten rather than dropped: one session's retained scrollback is a bounded,
+one-off cost, and undefined behaviour in a daemon still serving every other
+session is not.
+
+(The destructor sentence was added after the round-5 review found it; it states
+the rule this section already made, applied to the one entrance that is never
+written as a call.)
 
 ## L6 — The daemon's own exit ends every managed run, unverified
 

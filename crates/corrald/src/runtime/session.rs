@@ -420,7 +420,7 @@ pub fn start(
     // Captured before the split, while the runtime still knows the pid it
     // created: after the child is reaped that number may belong to something
     // else, and before setsid the tty cannot say it at all.
-    let group = runtime.child_group();
+    let teardown = Arc::new(super::spawn::TeardownWindow::open(runtime.child_group()));
     let (screen, mut reaper) = runtime.split();
     // The child is already running. If its own handles cannot be taken there
     // is no way to manage it, and leaving it is worse than never having
@@ -432,9 +432,8 @@ pub fn start(
     let (reader, mut writer) = match handles {
         Ok(handles) => handles,
         Err(error) => {
-            if let Some(group) = group {
-                group.hang_up();
-            }
+            teardown.hang_up();
+            teardown.close();
             let _ = reaper.wait();
             return Err(StartError::Terminal(error));
         }
@@ -456,11 +455,12 @@ pub fn start(
     });
 
     let from_pty = asks.clone();
+    let reaping = Arc::clone(&teardown);
     // Reading the PTY blocks, and so does reaping the child, so both live off
     // the thread that answers questions about the screen. A child that closes
     // its terminal and keeps running would otherwise freeze the session while
     // Corral waited for an exit that had not happened.
-    std::thread::spawn(move || read_pty(reader, reaper, group, from_pty));
+    std::thread::spawn(move || read_pty(reader, reaper, &reaping, from_pty));
 
     // Dropped when the screen thread ends, however it ends — a normal return
     // or a panic — so nobody has to remember to publish that it is gone.
@@ -472,7 +472,7 @@ pub fn start(
     let serving = published.clone();
     std::thread::spawn(move || {
         let _alive = held;
-        serve_screen(screen, group, to_child, geometry, questions, &serving)
+        serve_screen(screen, &teardown, to_child, geometry, questions, &serving)
     });
 
     Ok(SessionHandle {
@@ -494,7 +494,7 @@ pub fn start(
 fn read_pty(
     mut reader: Box<dyn std::io::Read + Send>,
     mut reaper: super::spawn::ChildReaper,
-    group: Option<super::spawn::ChildGroup>,
+    teardown: &super::spawn::TeardownWindow,
     asks: SyncSender<Ask>,
 ) {
     let mut buffer = [0_u8; 8192];
@@ -519,14 +519,13 @@ fn read_pty(
         // and block on a write forever — alive, unreachable, unlistable. That
         // is the case already ruled on for a session the registry refused, and
         // it is the same fact arriving by another route (ADR 0007).
-        //
-        // Signalling here is safe precisely because this is the only reaper:
-        // the group number is still the child's until the wait below, and
-        // never after (ADR 0007 L4).
-        if let Some(group) = group {
-            group.hang_up();
-        }
+        teardown.hang_up();
     }
+
+    // Closed before the wait, not after: from here the group number stops
+    // being the child's, and this is the only party that can say so
+    // (ADR 0007 L4).
+    teardown.close();
 
     // The terminal closed, so the child is finishing. Reaping is what turns
     // that into a fact: without it the daemon could never say more than that
@@ -546,7 +545,7 @@ fn read_pty(
 /// daemon's single reactor thread, freeze the daemon with it.
 fn serve_screen(
     screen: super::spawn::ManagedTerminal,
-    group: Option<super::spawn::ChildGroup>,
+    teardown: &super::spawn::TeardownWindow,
     to_child: SyncSender<Vec<u8>>,
     geometry: PtyGeometry,
     questions: Receiver<Ask>,
@@ -577,6 +576,20 @@ fn serve_screen(
                     // Queued, never written here: a child that has stopped
                     // reading must not be able to stop this loop.
                     let _ = to_child.try_send(reply.as_bytes().to_vec());
+                }
+                // The child can reshape the screen without anyone asking the
+                // pty: DECCOLM (`ESC[?3h`) makes the emulator 132 columns
+                // wide by itself. A shape change is an epoch boundary whoever
+                // caused it — a viewer holding a snapshot at the old width
+                // renders every wrapped line wrong, and `terminal.attach`
+                // would answer a size the screen no longer has.
+                if let Some(shape) = terminal.geometry()
+                    && shape != unpack_geometry(&published.geometry)
+                {
+                    published
+                        .geometry
+                        .store(pack_geometry(shape), Ordering::Release);
+                    stream.open_epoch();
                 }
             }
             Ask::Finished(status) => {
@@ -648,12 +661,12 @@ fn serve_screen(
                 let _ = reply.send(terminal.title().map(<[u8]>::to_vec));
             }
             Ask::ShutDown => {
-                // Reachable only while the runtime is live — the arm above
-                // returns the moment it is not — so the group is still the
-                // child's and has not been reaped (ADR 0007 L4).
-                if let Some(group) = group {
-                    group.hang_up();
-                }
+                // Whether the group is still the child's is not this thread's
+                // to judge: `Finished` is observed when it is dequeued, not
+                // when the reap happened, so a ShutDown queued in between
+                // would otherwise signal a pid that had already been released.
+                // The window itself knows (ADR 0007 L4).
+                teardown.hang_up();
                 return;
             }
 
@@ -778,8 +791,11 @@ impl ManagedSessions {
             })
             .collect();
         // A stable order so a list is not a different list each time it is
-        // asked; the daemon has no opinion about ranking yet.
-        described.sort_by_key(|session| session.session.to_string());
+        // asked; the daemon has no opinion about ranking yet. Cached because
+        // `sort_by_key` calls its key on every comparison, not once per
+        // element — an id formatted O(n log n) times for a list that is
+        // answered on every `session.list`.
+        described.sort_by_cached_key(|session| session.session.to_string());
         described
     }
 }

@@ -14,7 +14,7 @@
 
 use std::cell::Cell;
 
-use corrald::runtime::{AuthoritativeTerminal, PtyGeometry, encode};
+use corrald::runtime::{AuthoritativeTerminal, PtyGeometry};
 use libfuzzer_sys::fuzz_target;
 
 thread_local! {
@@ -97,16 +97,26 @@ fuzz_target!(|data: &[u8]| {
         }
     });
 
+    // Also inside `contained`, and for the same reason as the feed above:
+    // reflow and serialization walk the same packed pages, and Corral contains
+    // a panic from any of the three (ADR 0007 L5). A door left outside would
+    // let a panic Corral *handles* reach libfuzzer's aborting hook and turn the
+    // nightly job red for a defect that was contained.
+    //
     // A reflow touches every retained row, which is where a pathological
     // screen becomes unbounded work rather than a wrong screen.
-    if let Ok(reflowed) = PtyGeometry::new(
-        rows.saturating_add(7).min(500),
-        cols.saturating_add(13).min(1000),
-    ) {
-        terminal.resize(reflowed);
-    }
-
-    let snapshot = encode(&terminal);
+    let snapshot = contained(|| {
+        if let Ok(reflowed) = PtyGeometry::new(
+            rows.saturating_add(7).min(500),
+            cols.saturating_add(13).min(1000),
+        ) {
+            terminal.resize(reflowed);
+        }
+        // The contained entrance the daemon uses, not the free serializer:
+        // a target that took the uncontained path would be asserting about
+        // code no production caller reaches.
+        terminal.snapshot()
+    });
 
     // The property Corral owns: a screen whose parser failed is never read
     // from again. Reading a structure a panic left half-modified is unsound,

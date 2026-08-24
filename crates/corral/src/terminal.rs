@@ -103,9 +103,12 @@ pub fn split_at_detach(bytes: &[u8]) -> LocalInput {
 pub fn apply(frame: &TerminalFrame, out: &mut impl Write) -> std::io::Result<()> {
     match frame.kind {
         FrameKind::Snapshot => {
-            // Clear first: a snapshot is the whole screen, and replaying it
-            // over stale text would leave rows nothing overwrote.
-            out.write_all(b"\x1b[H\x1b[2J\x1b[3J")?;
+            // Clear the visible screen only. `ESC[3J` would also erase saved
+            // lines — the person's own shell history, from before they ever
+            // attached — and every resize and resync replays a snapshot, so
+            // resizing a window would wipe it again and again. Corral does not
+            // own that buffer.
+            out.write_all(b"\x1b[H\x1b[2J")?;
             out.write_all(&frame.payload)?;
             out.flush()
         }
@@ -166,7 +169,7 @@ fn drain_frames(
     epoch: &mut Epoch,
 ) -> std::io::Result<()> {
     loop {
-        match TerminalFrame::decode(pending) {
+        match TerminalFrame::decode_from_daemon(pending) {
             // Not yet a whole frame: the rest is still on its way.
             Ok(None) => return Ok(()),
             Ok(Some((frame, consumed))) => {

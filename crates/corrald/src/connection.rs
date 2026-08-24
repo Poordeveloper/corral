@@ -69,10 +69,9 @@ pub async fn serve(
         // two framings from ever having to share a stream.
         Some(grant) => {
             let (mut raw_reader, leftover) = reader.into_parts();
-            let mut raw_writer = writer.into_inner();
             crate::terminal_channel::serve(
                 &mut raw_reader,
-                &mut raw_writer,
+                writer.into_inner(),
                 leftover,
                 grant.session,
                 grant.run,
@@ -197,6 +196,21 @@ async fn bootstrap(
                     ProtocolError::new(
                         ErrorCode::InvalidParams,
                         format!("this daemon does not serve the {kind} role"),
+                    ),
+                ))
+                .await;
+            return None;
+        }
+        // The kind is one this build serves; what is missing is the client's
+        // own field. Saying so is the difference between a client fixing its
+        // bug and a client concluding the daemon is too old.
+        Some(ConnectionRole::Malformed { kind }) => {
+            let _ = writer
+                .write_frame(&Frame::error(
+                    request.id,
+                    ProtocolError::new(
+                        ErrorCode::InvalidParams,
+                        format!("the {kind} role needs an attach token"),
                     ),
                 ))
                 .await;

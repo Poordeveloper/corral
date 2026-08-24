@@ -195,3 +195,54 @@ fn a_stream_with_no_viewers_still_advances() {
 
     assert_eq!(stream.next_sequence(), Sequence(1));
 }
+
+/// The per-viewer limit that actually refuses is the byte budget, not the
+/// frame count. A viewer holding more deliveries than the old 256-frame bound
+/// but well under four megabytes is keeping up by the policy Corral states.
+#[test]
+fn a_viewer_holding_more_frames_than_bytes_is_not_desynchronised() {
+    let mut stream = TerminalStream::new();
+    let viewer = stream.attach();
+    let chunk = vec![0_u8; 8192];
+
+    // Past the frame bound the byte budget used to be dominated by; 2.4 MiB,
+    // still under SUBSCRIBER_QUEUE_BYTES.
+    for _ in 0..300 {
+        let sequence = stream.advance();
+        stream.deliver(sequence, &chunk);
+    }
+
+    assert_eq!(
+        stream.viewers(),
+        1,
+        "a viewer was dropped by a frame count while its byte budget was two thirds free"
+    );
+    drop(viewer);
+}
+
+/// And the byte budget does still refuse: it is the limit, not decoration.
+#[test]
+fn a_viewer_past_its_byte_budget_is_desynchronised() {
+    let mut stream = TerminalStream::new();
+    let viewer = stream.attach();
+    let chunk = vec![0_u8; 8192];
+
+    for _ in 0..(SUBSCRIBER_QUEUE_BYTES / 8192 + 2) {
+        let sequence = stream.advance();
+        stream.deliver(sequence, &chunk);
+    }
+
+    assert_eq!(stream.viewers(), 0, "the byte budget never refused");
+    drop(viewer);
+}
+
+/// Nothing is copied for a session nobody is watching — which is most of them.
+#[test]
+fn delivering_with_no_viewers_is_a_no_op() {
+    let mut stream = TerminalStream::new();
+
+    let sequence = stream.advance();
+    stream.deliver(sequence, b"nobody is here");
+
+    assert_eq!(stream.viewers(), 0);
+}

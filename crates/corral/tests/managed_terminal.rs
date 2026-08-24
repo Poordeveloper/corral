@@ -722,3 +722,111 @@ fn input_frame(payload: &[u8]) -> Vec<u8> {
     frame.extend_from_slice(payload);
     frame
 }
+
+/// The daemon must keep reading a client that has stopped reading it.
+///
+/// A `write_all` awaited inside the serve loop's `select!` owns that loop while
+/// it blocks, so a client that stops draining makes the daemon stop reading —
+/// at exactly the moment that client is waiting for the daemon to read. Both
+/// sides then wait forever, with no timeout on either, and the person has to
+/// kill the process. Writes leave through a task of their own so the loop can
+/// only ever queue.
+#[test]
+fn a_client_that_stops_reading_does_not_stop_the_daemon_reading_it() {
+    let account = TestAccount::new("no-write-deadlock");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+
+    // A screenful worth writing, then quiet: the daemon has a large snapshot
+    // to push and no deltas competing with this test's own timing.
+    let started = start_session(
+        &mut client,
+        1,
+        &[
+            "/bin/sh",
+            "-c",
+            "i=0; while [ $i -lt 900 ]; do \
+             printf 'llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll\\r\\n'; \
+             i=$((i+1)); done; sleep 30",
+        ],
+    );
+    let session = session_id(&started);
+    let granted = attach_token(&mut client, 2, &session);
+    let token = result(&granted)
+        .get("attach_token")
+        .and_then(Value::as_str)
+        .expect("a token")
+        .to_owned();
+
+    let mut channel = open_channel(&account, &token);
+
+    // Wait until the screen really holds what the child wrote. Resyncing
+    // against an empty screen would ask the daemon for snapshots small enough
+    // to fit any socket buffer, and then nothing below is under test.
+    let deadline = Instant::now() + SETTLE;
+    let mut screenful = false;
+    while Instant::now() < deadline && !screenful {
+        channel
+            .writer
+            .write_all(&resync_frame())
+            .expect("the resync was sent");
+        while let Some((kind, payload)) = read_frame(&mut channel) {
+            if kind == 1 && payload.len() > 32 * 1024 {
+                screenful = true;
+                break;
+            }
+            if kind == 1 {
+                break;
+            }
+        }
+    }
+    assert!(
+        screenful,
+        "the child never filled a screen worth writing, so nothing here is under test"
+    );
+
+    channel
+        .writer
+        .set_write_timeout(Some(SETTLE))
+        .expect("a write deadline");
+
+    // From here this client never reads again. Ask for many fresh snapshots so
+    // the daemon has far more to write than any socket buffer holds — one
+    // screenful might simply fit, and then nothing would be under test.
+    for _ in 0..40 {
+        match channel.writer.write_all(&resync_frame()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return,
+            Err(error) => panic!("the daemon stopped reading its client: {error}"),
+        }
+    }
+
+    // Then push far more than any socket buffer holds. If the daemon has
+    // stopped reading, these block; the timeout is what makes that a failure
+    // rather than a hang.
+    let payload = vec![b'k'; 64 * 1024];
+    for _ in 0..64 {
+        match channel.writer.write_all(&input_frame(&payload)) {
+            Ok(()) => {}
+            // The daemon closed this channel: it read, decided this client was
+            // not keeping up, and said so. Also not a deadlock.
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return,
+            Err(error) => panic!(
+                "the daemon stopped reading a client that had stopped reading it: {error} \
+                 ({:?})",
+                error.kind()
+            ),
+        }
+    }
+}
+
+/// A resync request: kind 5, epoch 0, sequence 0, no payload.
+fn resync_frame() -> Vec<u8> {
+    let mut frame = Vec::new();
+    frame.push(5_u8);
+    frame.extend_from_slice(&0_u64.to_be_bytes());
+    frame.extend_from_slice(&0_u64.to_be_bytes());
+    frame.extend_from_slice(&0_u32.to_be_bytes());
+    frame
+}

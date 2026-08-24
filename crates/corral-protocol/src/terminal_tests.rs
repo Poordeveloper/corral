@@ -28,7 +28,7 @@ fn a_frame_round_trips_with_its_epoch_sequence_and_payload() {
     let original = frame(FrameKind::Delta, b"\x1b[2Jhello\n\x00\xff");
 
     let encoded = original.encode().expect("encode");
-    let (decoded, consumed) = TerminalFrame::decode(&encoded)
+    let (decoded, consumed) = TerminalFrame::decode_from_daemon(&encoded)
         .expect("decode")
         .expect("a complete frame");
 
@@ -44,7 +44,7 @@ fn a_payload_of_arbitrary_bytes_survives_unchanged() {
     let original = frame(FrameKind::Delta, &payload);
 
     let encoded = original.encode().expect("encode");
-    let (decoded, _) = TerminalFrame::decode(&encoded)
+    let (decoded, _) = TerminalFrame::decode_from_daemon(&encoded)
         .expect("decode")
         .expect("a complete frame");
 
@@ -61,7 +61,7 @@ fn an_unknown_frame_kind_decodes_and_is_skippable() {
         .expect("encode");
     encoded[0] = 200;
 
-    let (decoded, consumed) = TerminalFrame::decode(&encoded)
+    let (decoded, consumed) = TerminalFrame::decode_from_daemon(&encoded)
         .expect("decode")
         .expect("a complete frame");
 
@@ -89,7 +89,8 @@ fn a_stream_survives_an_unknown_kind_between_known_ones() {
 
     let mut offset = 0;
     let mut payloads = Vec::new();
-    while let Some((decoded, consumed)) = TerminalFrame::decode(&stream[offset..]).expect("decode")
+    while let Some((decoded, consumed)) =
+        TerminalFrame::decode_from_daemon(&stream[offset..]).expect("decode")
     {
         if !decoded.kind.is_skippable() {
             payloads.push(decoded.payload);
@@ -130,7 +131,7 @@ fn a_partial_frame_is_not_yet_a_frame() {
 
     for truncated in 0..encoded.len() {
         assert!(
-            TerminalFrame::decode(&encoded[..truncated])
+            TerminalFrame::decode_from_daemon(&encoded[..truncated])
                 .expect("a short buffer is not a fault")
                 .is_none(),
             "{truncated} bytes decoded as a complete frame"
@@ -149,7 +150,7 @@ fn a_frame_declaring_more_than_the_limit_is_refused_before_allocating() {
     let declared = (MAX_TERMINAL_FRAME_BYTES + 1) as u32;
     encoded[17..21].copy_from_slice(&declared.to_be_bytes());
 
-    let error = TerminalFrame::decode(&encoded).expect_err("refused");
+    let error = TerminalFrame::decode_from_daemon(&encoded).expect_err("refused");
 
     assert!(
         matches!(error, TerminalFrameError::Oversize { .. }),
@@ -174,5 +175,46 @@ fn the_terminal_limit_admits_a_frame_the_rpc_limit_would_refuse() {
     assert!(
         frame.encode().is_ok(),
         "a snapshot larger than an RPC frame was refused by the terminal channel"
+    );
+}
+
+/// The client direction is bounded by what a client may make the daemon hold,
+/// and the bound is applied to the declared length — before the body is waited
+/// for, and before any of it is copied. A header alone must not be able to
+/// reserve sixteen megabytes per connection.
+#[test]
+fn a_client_frame_past_the_client_limit_is_refused_on_its_header_alone() {
+    let mut header = frame(FrameKind::Resize, b"").encode().expect("encode");
+    let declared = (MAX_CLIENT_FRAME_BYTES + 1) as u32;
+    header[17..21].copy_from_slice(&declared.to_be_bytes());
+
+    // The header alone, with none of the body it declares.
+    let error = TerminalFrame::decode_from_client(&header).expect_err("refused");
+
+    assert!(
+        matches!(
+            error,
+            TerminalFrameError::Oversize {
+                limit: MAX_CLIENT_FRAME_BYTES,
+                ..
+            }
+        ),
+        "{error}"
+    );
+}
+
+/// The same declaration is legitimate from the daemon: a snapshot is the
+/// largest message on this channel, and the two directions answer different
+/// questions.
+#[test]
+fn the_same_length_is_admitted_from_the_daemon() {
+    let mut header = frame(FrameKind::Snapshot, b"").encode().expect("encode");
+    let declared = (MAX_CLIENT_FRAME_BYTES + 1) as u32;
+    header[17..21].copy_from_slice(&declared.to_be_bytes());
+
+    // `Ok(None)`: within the limit, body not yet arrived.
+    assert_eq!(
+        TerminalFrame::decode_from_daemon(&header).expect("admitted"),
+        None
     );
 }

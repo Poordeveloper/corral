@@ -355,6 +355,7 @@ fn a_lost_screen_ends_the_run_rather_than_leaving_it_blocked() {
     )
     .expect("the child starts");
     let group = runtime.child_group();
+    let teardown = std::sync::Arc::new(super::super::spawn::TeardownWindow::open(group));
     let (screen, reaper) = runtime.split();
     let reader = screen.reader().expect("clone the reader");
     // What a lost screen thread looks like from here: the end this reader
@@ -363,8 +364,9 @@ fn a_lost_screen_ends_the_run_rather_than_leaving_it_blocked() {
     drop(questions);
 
     let (done, waited) = std::sync::mpsc::channel();
+    let reaping = std::sync::Arc::clone(&teardown);
     std::thread::spawn(move || {
-        read_pty(reader, reaper, group, asks);
+        read_pty(reader, reaper, &reaping, asks);
         let _ = done.send(());
     });
 
@@ -378,5 +380,23 @@ fn a_lost_screen_ends_the_run_rather_than_leaving_it_blocked() {
     assert!(
         ended,
         "the child outlived the screen that was the only thing draining it"
+    );
+}
+
+/// A child can reshape the authoritative screen without anyone touching the
+/// pty: DECCOLM makes the emulator 132 columns wide by itself. Corral must
+/// follow, or it answers `terminal.attach` with a size the screen no longer
+/// has and hands the client a snapshot that wraps into garbage.
+#[test]
+fn a_child_that_reshapes_the_screen_moves_the_published_geometry() {
+    // Enable mode 3, then set it: DECCOLM's own two-step.
+    let handle = started(r"printf '\033[?40h\033[?3h'; sleep 30");
+
+    let widened = wait_for(|| (handle.last_geometry().cols() == 132).then_some(()));
+
+    assert!(
+        widened.is_some(),
+        "the daemon still reports {:?} for a screen the child widened",
+        handle.last_geometry()
     );
 }

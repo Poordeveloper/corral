@@ -84,6 +84,12 @@ pub struct Snapshot {
 pub enum SnapshotError {
     ViewportExceedsCeiling {
         encoded_bytes: usize,
+        /// The ceiling that refused it.
+        ///
+        /// Carried rather than read from the module constant: the budget is a
+        /// parameter, so a message quoting the default would state a limit the
+        /// encoder did not apply.
+        ceiling_bytes: usize,
     },
     /// The screen cannot be read at all: its parser panicked and left the
     /// structure half-modified. Refused rather than serialized, because
@@ -163,6 +169,7 @@ pub fn encode_within(
     if rows == 0 && payload.len() > budget.ceiling_bytes {
         return Err(SnapshotError::ViewportExceedsCeiling {
             encoded_bytes: payload.len(),
+            ceiling_bytes: budget.ceiling_bytes,
         });
     }
 
@@ -238,9 +245,12 @@ fn render(terminal: &AuthoritativeTerminal, scrollback_rows: usize) -> Vec<u8> {
 impl std::fmt::Display for SnapshotError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ViewportExceedsCeiling { encoded_bytes } => write!(
+            Self::ViewportExceedsCeiling {
+                encoded_bytes,
+                ceiling_bytes,
+            } => write!(
                 f,
-                "the viewport alone encodes to {encoded_bytes} bytes, past the {SNAPSHOT_CEILING_BYTES}-byte ceiling"
+                "the viewport alone encodes to {encoded_bytes} bytes, past the {ceiling_bytes}-byte ceiling"
             ),
             Self::ScreenPoisoned(Poisoned::ParserPanicked) => f.write_str(
                 "this terminal's parser failed on provider output and its screen can no longer be read",

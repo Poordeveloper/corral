@@ -293,3 +293,29 @@ fn a_refused_request_never_reaches_the_backend() {
         LaunchRejection::WorkingDirectoryMissing(_)
     ));
 }
+
+/// The teardown window closes before the reaper waits, and a signal that
+/// arrives afterwards does nothing. Otherwise a hang-up queued between the
+/// reap and its announcement would target a pid the kernel has released
+/// (ADR 0007 L4).
+#[test]
+fn a_closed_teardown_window_signals_nothing() {
+    let mut runtime = started(&request("/bin/sh", &["-c", "sleep 30"])).expect("the child starts");
+    let group = runtime.group.expect("a pid");
+    let window = TeardownWindow::open(Some(group));
+
+    window.close();
+    window.hang_up();
+
+    // Still ours to end: the window refused, so nothing was signalled.
+    assert_eq!(
+        runtime.screen.process_group_leader().map(|it| it as u32),
+        Some(group.as_pid()),
+        "the child was hung up through a window that had closed"
+    );
+
+    // And an open window does signal, so the assertion above is not vacuous.
+    let open = TeardownWindow::open(Some(group));
+    open.hang_up();
+    let _ = runtime.reaper.wait();
+}

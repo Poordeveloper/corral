@@ -36,7 +36,10 @@ pub use snapshot::{
 };
 pub use spawn::{
     ChildReaper, ImpossibleGeometry, MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, ManagedTerminal,
-    PtyGeometry, SpawnError, SpawnedRuntime, spawn,
+    PtyGeometry, SpawnError, SpawnedRuntime, TeardownWindow, spawn,
 };
-pub use stream::{Delivery, Desynchronised, SUBSCRIBER_QUEUE_BYTES, TerminalStream, Viewer};
+pub use stream::{
+    Delivery, Desynchronised, SUBSCRIBER_QUEUE_BYTES, SUBSCRIBER_QUEUE_FRAMES, TerminalStream,
+    Viewer,
+};
 pub use terminal::{AuthoritativeTerminal, DeviceReply, Poisoned, RETAINED_SCROLLBACK_BYTES};
