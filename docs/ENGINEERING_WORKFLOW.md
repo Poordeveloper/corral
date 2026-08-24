@@ -396,6 +396,13 @@ invalidates merged history; it produces a finding, may freeze the affected
 owner's autonomous merge pending triage, and follows the P1 process if it is
 a real correctness defect.
 
+A fuzz- or soak-discovered correctness failure has one durable product: a
+minimized deterministic reproducer added to the permanent corpus that
+`./scripts/verify` runs. Full campaign logs stay in the CI/artifact system.
+Only evidence backing a milestone or material engineering claim enters
+`docs/evidence/` (class definition: `docs/GOVERNANCE.md`); routine
+successful runs produce no repository files.
+
 ### 7.1 Verification budget
 
 Budgets are review pressure, never a licence to delete coverage:
