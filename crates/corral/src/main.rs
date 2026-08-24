@@ -70,8 +70,15 @@ async fn new_session(connection: &mut Connection, argv: Vec<String>) -> ExitCode
         .ok()
         .map(|path| path.to_string_lossy().into_owned());
 
+    // Minted per invocation, and the same id is what a retry would carry: it
+    // is what stops a lost response from starting a second agent. This surface
+    // does not retry yet, so nothing here re-sends it — the id is the daemon's
+    // protection against a client that does (ADR 0002, Q13).
+    let command_id = uuid::Uuid::new_v4().as_hyphenated().to_string();
+
     let started = match connection
         .session_new(SessionNewParams {
+            command_id,
             argv,
             cwd,
             rows: geometry.map(|geometry| geometry.rows),

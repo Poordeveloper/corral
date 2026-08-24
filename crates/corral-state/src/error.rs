@@ -2,7 +2,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 use corral_core::{
-    Assurance, BindingId, CommandId, CorralSessionId, EvidenceSource, NodeId, RunId,
+    Assurance, BindingId, CommandId, CorralSessionId, EvidenceSource, NodeId, ReservedNamespace,
+    RunId,
 };
 
 /// Everything the registry store can answer with other than the fact asked
@@ -114,6 +115,14 @@ pub enum Refusal {
     ControlCapableRuntimeBindingExists {
         session: CorralSessionId,
         existing: BindingId,
+    },
+    /// A binding sits wrongly in the reserved `corral` provider namespace.
+    /// The namespace records who minted an identity, and a managed runtime
+    /// whose provider says otherwise — or a provider identity claiming the
+    /// namespace — would leave one field meaning two things (ADR 0008 D3).
+    ReservedProviderNamespace {
+        binding: BindingId,
+        misuse: ReservedNamespace,
     },
     /// The store's own integrity rules rejected the write. The transaction
     /// rolled back whole, so neither the event nor the projection landed.
@@ -265,6 +274,24 @@ impl fmt::Display for Refusal {
                 f,
                 "session {session} already has the control-capable runtime binding {existing}"
             ),
+            Self::ReservedProviderNamespace { binding, misuse } => match misuse {
+                ReservedNamespace::Respected => write!(
+                    f,
+                    "binding {binding} respects the reserved provider namespace"
+                ),
+                ReservedNamespace::ManagedRuntimeWithoutIt => write!(
+                    f,
+                    "binding {binding} is a runtime Corral created, so its provider must be \
+                     the reserved {reserved}",
+                    reserved = corral_core::ProviderId::RESERVED_FOR_CORRAL
+                ),
+                ReservedNamespace::ClaimedByAnotherIdentity => write!(
+                    f,
+                    "binding {binding} is not a runtime Corral created, so it may not take the \
+                     reserved provider {reserved}",
+                    reserved = corral_core::ProviderId::RESERVED_FOR_CORRAL
+                ),
+            },
             Self::Constraint { detail } => write!(f, "the store refused the write: {detail}"),
         }
     }

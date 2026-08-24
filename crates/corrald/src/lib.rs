@@ -14,9 +14,11 @@
 //! new `corrald` reconstructs nothing from its predecessor's runtime.
 
 mod connection;
+mod in_flight;
 mod lifecycle;
 mod platform;
 mod policy;
+mod run_lifecycle;
 /// The managed runtime. Public because the lifecycle scenarios this crate owes
 /// — detach, disconnect, restart, crash, unverifiable exit — are integration
 /// tests, and an integration test reaches only what the library exposes.
@@ -100,6 +102,18 @@ fn start() -> Result<ExitCode, StartupError> {
     paths.ensure_state_dir().map_err(StartupError::Rendezvous)?;
     let state = Arc::new(DaemonState::open(paths.registry()).map_err(StartupError::State)?);
 
+    // Before the endpoint is bound, and only by the daemon holding the claim.
+    // Every managed episode still open belongs to a daemon that is gone, and a
+    // managed runtime does not survive its owning daemon (ADR 0007 L6) — so
+    // these are closed as unverifiable, which is what Corral can say rather
+    // than a claim that any process exited (grill Q5).
+    for run in state
+        .reconcile_managed_runs()
+        .map_err(StartupError::State)?
+    {
+        info!(%run, "a managed run from a previous corrald is recorded as unverifiable");
+    }
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -114,6 +128,13 @@ fn start() -> Result<ExitCode, StartupError> {
     // owner and refuses to start a replacement, so nothing can bind into a
     // half-dismantled rendezvous (ADR 0001 D6).
     drop(runtime);
+    // Every connection is closed by now, so nothing new will be observed, and
+    // whatever is still queued is the last of it. Waiting is the difference
+    // between a fact recorded late and a fact nobody ever writes — and a wait
+    // that runs out is itself reported, in the exit status below.
+    if state.settle_observations() == runtime::Integrity::Lost {
+        error!("this daemon could not record everything it observed about its runs");
+    }
     // Best effort: the next claim winner owns whatever an abrupt death leaves
     // behind, so failing to unlink here costs nothing.
     let _ = std::fs::remove_file(paths.socket());

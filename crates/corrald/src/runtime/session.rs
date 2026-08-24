@@ -17,10 +17,11 @@ use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Instant;
 
-use corral_core::{CorralSessionId, RunId};
+use corral_core::{CorralSessionId, ExitCause, OccurrenceTime, RunEnd, RunId};
 use corral_protocol::terminal::{Epoch, Sequence};
 
 use super::launch::LaunchRequest;
+use super::occurrence::{RunObservations, RunOccurrence};
 use super::snapshot::{Snapshot, SnapshotError};
 use super::spawn::{PtyGeometry, SpawnError};
 
@@ -55,9 +56,9 @@ pub struct ManagedSession {
 enum Ask {
     /// Bytes the PTY produced.
     Output(Vec<u8>),
-    /// The PTY closed. Carries the exit status the reaper established, or
-    /// `None` when it could not be established at all.
-    Finished(Option<u32>),
+    /// The PTY closed. Carries how the child ended, or `None` when the reaper
+    /// could not establish that at all.
+    Finished(Option<ExitCause>),
     Snapshot(SyncSender<Result<Snapshot, SnapshotError>>),
     Resize(PtyGeometry, SyncSender<Result<Epoch, ResizeRefused>>),
     Input(Vec<u8>),
@@ -363,8 +364,13 @@ impl SessionHandle {
             // publishes it. If that thread is gone the value describes a past
             // nobody can extend, and losing the ability to manage a runtime is
             // not evidence about a process (ADR 0002, grill Q5).
-            _ if self.alive.upgrade().is_none() => ExecutionState::Unknown,
-            _ => ExecutionState::Running,
+            EXECUTION_RUNNING if self.alive.upgrade().is_some() => ExecutionState::Running,
+            // Everything else: a live claim whose publisher is gone, and any
+            // byte this module does not write. `Running` is the one answer a
+            // fallthrough must never give — it is the only value here that
+            // asserts a process exists, and a default that asserts is how an
+            // unknown becomes a lie (AGENTS.md §Runtime truth).
+            _ => ExecutionState::Unknown,
         }
     }
 
@@ -398,24 +404,33 @@ impl SessionHandle {
     }
 }
 
-/// Start a managed session: spawn the process, own its screen, serve it.
-pub fn start(
+/// A managed runtime that exists and whose Run is not yet a durable fact.
+///
+/// The gap between the two is deliberate and load-bearing. A concrete runtime
+/// occurrence has to exist before `RunStarted` may be written at all, and that
+/// start has to commit before anything can produce the `RunEnded` answering it
+/// — so between the two there is a spawned session nobody is serving yet
+/// (grill Q3, Q9).
+///
+/// Everything that can fail has already happened by the time one of these
+/// exists. What is left is starting threads, which cannot fail, so a Run whose
+/// start committed is always served.
+pub struct PendingSession {
+    screen: super::spawn::ManagedTerminal,
+    reaper: super::spawn::ChildReaper,
+    teardown: Arc<super::spawn::TeardownWindow>,
+    reader: Box<dyn std::io::Read + Send>,
+    writer: Box<dyn std::io::Write + Send>,
+    geometry: PtyGeometry,
+    title: String,
+}
+
+/// Create a managed runtime, without yet serving it.
+pub fn spawn_session(
     request: &LaunchRequest,
     geometry: PtyGeometry,
-    session: CorralSessionId,
-    run: RunId,
-) -> Result<SessionHandle, StartError> {
+) -> Result<PendingSession, StartError> {
     let runtime = super::spawn::spawn(request, geometry).map_err(StartError::Spawn)?;
-    // Bounded so a client that floods input cannot make the daemon allocate
-    // without limit; generous because the screen thread drains it in a tight
-    // loop and the PTY reader shares it.
-    let (asks, questions) = sync_channel(256);
-    let published = Published {
-        execution: Arc::new(AtomicU8::new(EXECUTION_RUNNING)),
-        geometry: Arc::new(AtomicU32::new(pack_geometry(geometry))),
-        screen: Arc::new(OnceLock::new()),
-    };
-    let title = request.display_title();
 
     // Captured before the split, while the runtime still knows the pid it
     // created: after the child is reaped that number may belong to something
@@ -429,7 +444,7 @@ pub fn start(
         let writer = screen.writer()?;
         Ok((reader, writer))
     });
-    let (reader, mut writer) = match handles {
+    let (reader, writer) = match handles {
         Ok(handles) => handles,
         Err(error) => {
             teardown.hang_up();
@@ -439,51 +454,113 @@ pub fn start(
         }
     };
 
-    // Writing to a PTY blocks when the child stops reading, and the child
-    // stops reading when its output is not drained — so a write on the thread
-    // that drains output can deadlock a session against itself. It gets its
-    // own thread and its own bounded queue: a client that floods a child that
-    // is not listening loses its keystrokes, and nothing else stops.
-    let (to_child, outbound) = sync_channel::<Vec<u8>>(64);
-    std::thread::spawn(move || {
-        while let Ok(bytes) = outbound.recv() {
-            if std::io::Write::write_all(&mut writer, &bytes).is_err() {
-                return;
-            }
-            let _ = std::io::Write::flush(&mut writer);
-        }
-    });
-
-    let from_pty = asks.clone();
-    let reaping = Arc::clone(&teardown);
-    // Reading the PTY blocks, and so does reaping the child, so both live off
-    // the thread that answers questions about the screen. A child that closes
-    // its terminal and keeps running would otherwise freeze the session while
-    // Corral waited for an exit that had not happened.
-    std::thread::spawn(move || read_pty(reader, reaper, &reaping, from_pty));
-
-    // Dropped when the screen thread ends, however it ends — a normal return
-    // or a panic — so nobody has to remember to publish that it is gone.
-    let alive = Arc::new(());
-    let held = Arc::clone(&alive);
-    let weak = Arc::downgrade(&alive);
-    drop(alive);
-
-    let serving = published.clone();
-    std::thread::spawn(move || {
-        let _alive = held;
-        serve_screen(screen, &teardown, to_child, geometry, questions, &serving)
-    });
-
-    Ok(SessionHandle {
-        session,
-        run,
-        title,
-        asks,
-        started_at: Instant::now(),
-        alive: weak,
-        published,
+    Ok(PendingSession {
+        screen,
+        reaper,
+        teardown,
+        reader,
+        writer,
+        geometry,
+        title: request.display_title(),
     })
+}
+
+impl PendingSession {
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// End a runtime whose Run never became a durable fact.
+    ///
+    /// The child is already running, so it is hung up and reaped here rather
+    /// than left alive, unreachable and unlistable. No occurrence is reported:
+    /// with no durable `RunStarted` there is no Run in the durable model to
+    /// end, and reporting one would ask the store to close an episode it never
+    /// opened (grill Q9).
+    pub fn abandon(mut self) {
+        self.teardown.hang_up();
+        // Closed before the wait, by the only party that waits (ADR 0007 L4).
+        self.teardown.close();
+        let _ = self.reaper.wait();
+    }
+
+    /// Own this runtime's screen and watch its end.
+    pub fn serve(
+        self,
+        session: CorralSessionId,
+        run: RunId,
+        observations: RunObservations,
+    ) -> SessionHandle {
+        let Self {
+            screen,
+            reaper,
+            teardown,
+            reader,
+            mut writer,
+            geometry,
+            title,
+        } = self;
+
+        // Bounded so a client that floods input cannot make the daemon
+        // allocate without limit; generous because the screen thread drains it
+        // in a tight loop and the PTY reader shares it.
+        let (asks, questions) = sync_channel(256);
+        let published = Published {
+            execution: Arc::new(AtomicU8::new(EXECUTION_RUNNING)),
+            geometry: Arc::new(AtomicU32::new(pack_geometry(geometry))),
+            screen: Arc::new(OnceLock::new()),
+        };
+
+        // Writing to a PTY blocks when the child stops reading, and the child
+        // stops reading when its output is not drained — so a write on the
+        // thread that drains output can deadlock a session against itself. It
+        // gets its own thread and its own bounded queue: a client that floods
+        // a child that is not listening loses its keystrokes, and nothing else
+        // stops.
+        let (to_child, outbound) = sync_channel::<Vec<u8>>(64);
+        std::thread::spawn(move || {
+            while let Ok(bytes) = outbound.recv() {
+                if std::io::Write::write_all(&mut writer, &bytes).is_err() {
+                    return;
+                }
+                let _ = std::io::Write::flush(&mut writer);
+            }
+        });
+
+        let from_pty = asks.clone();
+        let reaping = Arc::clone(&teardown);
+        // Reading the PTY blocks, and so does reaping the child, so both live
+        // off the thread that answers questions about the screen. A child that
+        // closes its terminal and keeps running would otherwise freeze the
+        // session while Corral waited for an exit that had not happened.
+        std::thread::spawn(move || {
+            read_pty(reader, reaper, &reaping, from_pty, run, &observations)
+        });
+
+        // Dropped when the screen thread ends, however it ends — a normal
+        // return or a panic — so nobody has to remember to publish that it is
+        // gone.
+        let alive = Arc::new(());
+        let held = Arc::clone(&alive);
+        let weak = Arc::downgrade(&alive);
+        drop(alive);
+
+        let serving = published.clone();
+        std::thread::spawn(move || {
+            let _alive = held;
+            serve_screen(screen, &teardown, to_child, geometry, questions, &serving)
+        });
+
+        SessionHandle {
+            session,
+            run,
+            title,
+            asks,
+            started_at: Instant::now(),
+            alive: weak,
+            published,
+        }
+    }
 }
 
 /// Carry PTY output to the screen, then establish how the child ended.
@@ -496,6 +573,8 @@ fn read_pty(
     mut reaper: super::spawn::ChildReaper,
     teardown: &super::spawn::TeardownWindow,
     asks: SyncSender<Ask>,
+    run: RunId,
+    observations: &RunObservations,
 ) {
     let mut buffer = [0_u8; 8192];
     let mut screen_gone = false;
@@ -531,6 +610,30 @@ fn read_pty(
     // that into a fact: without it the daemon could never say more than that
     // it stopped hearing anything — and the process would stay a zombie.
     let ended = reaper.wait().ok();
+
+    // Reported here rather than from the screen thread, because this is the
+    // one party that establishes the ending: the screen may already have been
+    // lost, or retired on a shut-down ask, and an end nobody reported is a
+    // durable Run that stays open forever.
+    //
+    // The instant is the reap's, and it is authoritative rather than merely
+    // observed: `wait` returns when the child ends, and the kernel's own exit
+    // status is the evidence. What Corral does not have is a time for an
+    // ending it could not establish at all, and that is `Unknown` rather than
+    // now (ADR 0002 D6).
+    observations.report(match ended {
+        Some(cause) => RunOccurrence::Exited {
+            run,
+            end: RunEnd::Exited(cause),
+            at: OccurrenceTime::Authoritative(std::time::SystemTime::now()),
+        },
+        None => RunOccurrence::Exited {
+            run,
+            end: RunEnd::Unverifiable,
+            at: OccurrenceTime::Unknown,
+        },
+    });
+
     if !screen_gone {
         let _ = asks.send(Ask::Finished(ended));
     }

@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 read_when:
   - creating or resolving a binding for a runtime Corral launched itself
   - adding a provider's own session identity to a Session
@@ -21,7 +21,9 @@ requires a Runtime `BindingId`, and no rule said what one for a managed session
 would name, so the durable path was never wired.
 
 Ruled in the durable-lifecycle grill, Q1 and Q12. Acceptance evidence:
-`docs/decisions/2026-08-24-pr3-durable-lifecycle-grill.md`.
+`docs/decisions/2026-08-24-pr3-durable-lifecycle-grill.md`, which carries the
+founder's rulings verbatim; accepted 2026-08-24 by merging the pull request
+that landed this ADR and instructing implementation to begin.
 
 **The invariant.** Corral names what it owns, and the name says only that. A
 managed runtime's identity must be stable enough to carry a Session's Runs

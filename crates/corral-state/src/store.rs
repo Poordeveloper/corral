@@ -2,9 +2,9 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use corral_core::{
-    Binding, BindingId, BindingKey, BindingKind, Command, CommandOutcome, CommandReceipt,
-    CorralSessionId, Evidence, EvidenceSource, NodeId, OccurrenceTime, Provenance, Run, RunEnd,
-    RunId, Session, SessionLineage,
+    Assurance, Binding, BindingId, BindingKey, BindingKind, Command, CommandOutcome,
+    CommandReceipt, CorralSessionId, Evidence, EvidenceSource, NodeId, OccurrenceTime, Provenance,
+    ReservedNamespace, Run, RunEnd, RunId, Session, SessionLineage,
 };
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
@@ -55,7 +55,6 @@ pub enum Durability {
 /// Not the `Run` itself: the closure that records it outlives the borrow, and
 /// these are the only parts of one the store may act on.
 struct WithheldRun {
-    id: RunId,
     session: CorralSessionId,
     end: Option<(RunEnd, OccurrenceTime)>,
 }
@@ -126,6 +125,46 @@ impl CommandAcceptance {
         match self {
             Self::Executed(receipt) | Self::Replayed(receipt) => receipt,
         }
+    }
+}
+
+/// What opening a managed session under a command produced.
+///
+/// The acceptance carries the receipt and says whether this call executed or
+/// replayed; the Session and Run are what the caller answers with, and are the
+/// same on both paths — a replay names what the first execution made rather
+/// than a second Session nobody asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartedManagedSession {
+    acceptance: CommandAcceptance,
+    session: CorralSessionId,
+    run: RunId,
+}
+
+impl StartedManagedSession {
+    #[must_use]
+    pub fn acceptance(&self) -> &CommandAcceptance {
+        &self.acceptance
+    }
+
+    #[must_use]
+    pub fn session(&self) -> CorralSessionId {
+        self.session
+    }
+
+    #[must_use]
+    pub fn run(&self) -> RunId {
+        self.run
+    }
+
+    /// Whether this call performed the command rather than answering from a
+    /// receipt.
+    ///
+    /// The caller's runtime is only real on the executed path: a replay must
+    /// never leave a second process running under one command id.
+    #[must_use]
+    pub fn executed(&self) -> bool {
+        matches!(self.acceptance, CommandAcceptance::Executed(_))
     }
 }
 
@@ -239,22 +278,39 @@ impl Store {
         self.read(|connection| read_events(connection, session))
     }
 
-    /// Create a Session under a client-supplied command id.
+    /// Open a managed session under a client-supplied command id: the Session,
+    /// the runtime binding Corral owns for it, and its first Run — one
+    /// accepted command, one transaction.
     ///
-    /// Reuse of the id with the same semantic command returns the original
-    /// receipt without creating a second Session; reuse with a different one
-    /// is a conflict that executes nothing and leaves the receipt untouched
-    /// (ADR 0002, Q12).
-    pub fn create_session(
+    /// The four facts are inseparable. A receipt written without its Run would
+    /// name a Session whose episode nothing can describe, and a retry after a
+    /// crash in that window could only answer with an outcome the accepted
+    /// vocabulary has no variant for. So either the whole command happened or
+    /// none of it did, and a retry that finds no receipt is a legitimate retry
+    /// (grill Q8, Q9).
+    ///
+    /// Reuse of the id with the same semantic command replays what it made,
+    /// executing nothing; reuse with a different one is a conflict that leaves
+    /// the receipt untouched (ADR 0002, Q12).
+    ///
+    /// `run` is minted by the caller, before the runtime it names exists.
+    /// Minting an id is not asserting that a runtime exists — the caller
+    /// reaches here only once its `spawn` has confirmed one, and a spawn that
+    /// failed simply leaves the id unused (grill Q3).
+    pub fn start_managed_session(
         &mut self,
         command: &Command,
+        run: RunId,
+        started: OccurrenceTime,
         at: SystemTime,
-    ) -> Result<CommandAcceptance, StateError> {
+    ) -> Result<StartedManagedSession, StateError> {
+        let node = self.node;
         // Inside the write, not before it: a store that has already concluded
         // it cannot vouch must answer that, not a refusal a caller would read
         // as "still fine, try again".
-        self.write(|transaction| {
+        self.write(move |transaction| {
             let at = encoding::as_stored(at)?;
+            let started = as_stored_occurrence(started)?;
             let length = command.fingerprint().as_str().len();
             if length > FINGERPRINT_LIMIT {
                 return Err(Refusal::FingerprintTooLarge {
@@ -264,31 +320,55 @@ impl Store {
                 .into());
             }
 
-            if let Some(receipt) = projection::receipt(transaction, command.id())? {
-                if receipt.fingerprint() == command.fingerprint() {
-                    return Ok(Written::nothing_to_record(CommandAcceptance::Replayed(
-                        receipt,
-                    )));
-                }
-                return Err(Refusal::CommandIdConflict {
-                    command: command.id().clone(),
-                }
-                .into());
+            if let Some(replayed) = already_started(transaction, command)? {
+                return Ok(Written::nothing_to_record(replayed));
             }
 
             let session = CorralSessionId::mint();
+            // The shape is the store's, not the caller's: ADR 0008 D1 fixes
+            // what a managed runtime binding is, and a caller that could
+            // supply its own provenance or assurance could create a managed
+            // runtime the durable rules do not describe.
+            let binding = Binding::new(
+                BindingId::mint(),
+                session,
+                BindingKey::mint_managed_runtime(node),
+                Provenance::CorralCreated,
+                as_stored_evidence(Evidence::new(
+                    EvidenceSource::CorralConstructed,
+                    Assurance::Deterministic,
+                    at,
+                ))?,
+                at,
+            );
+            refuse_reserved_namespace(&binding)?;
             let receipt = CommandReceipt::new(
                 command.id().clone(),
                 command.fingerprint().clone(),
                 CommandOutcome::SessionCreated(session),
                 at,
             );
+            // The two rules `start_run` enforces hold here by construction:
+            // Corral built this runtime, so the occurrence is
+            // `CorralConstructed` and the association is `Deterministic`.
+            // Nothing a caller passes can weaken either.
             Ok(Written::recording(
-                CommandAcceptance::Executed(receipt),
+                StartedManagedSession {
+                    acceptance: CommandAcceptance::Executed(receipt),
+                    session,
+                    run,
+                },
                 vec![
                     SessionEvent::SessionCreated {
                         session,
                         created_at: at,
+                    },
+                    SessionEvent::BindingAdded(binding.clone()),
+                    SessionEvent::RunStarted {
+                        session,
+                        run,
+                        runtime_binding: binding.id(),
+                        started_at: started.authoritative(),
                     },
                     SessionEvent::CommandAccepted {
                         command: command.id().clone(),
@@ -298,6 +378,62 @@ impl Store {
                     },
                 ],
             ))
+        })
+    }
+
+    /// What this command already did, if it has run before.
+    ///
+    /// The consult that has to happen *before* a second runtime side effect is
+    /// allowed. Spawning first and discovering afterwards that this command id
+    /// was already completed leaves two agents running, the second one nobody
+    /// asked for and nobody knows about (grill Q2).
+    ///
+    /// A read, so it can be made cheaply on every attempt. It is not the whole
+    /// answer on its own: two retries arriving at one live daemon can both see
+    /// nothing here, which is what the daemon's in-flight table closes.
+    pub fn completed_managed_session(
+        &mut self,
+        command: &Command,
+    ) -> Result<Option<StartedManagedSession>, StateError> {
+        self.read(|connection| already_started(connection, command))
+    }
+
+    /// Close every managed-runtime episode no daemon owns any more.
+    ///
+    /// Called once at startup, by the daemon that just won the singleton claim
+    /// (ADR 0001 D2). At that moment every open managed episode belongs to a
+    /// daemon that is gone, and a managed runtime does not survive its owning
+    /// daemon (ADR 0007 L6) — which is what makes closing them correct rather
+    /// than a guess about processes.
+    ///
+    /// `Unverifiable`, never an exit: Corral did not watch these end and may
+    /// not say that it did. The occurrence time stays unknown for the same
+    /// reason — a daemon's startup timestamp is not when a process stopped,
+    /// and the event sequence already records when Corral accepted the ending
+    /// (grill Q5).
+    ///
+    /// Scoped to what Corral owns as a managed episode, never to every
+    /// unfinished Run on the node: a discovered or provider-owned Run may
+    /// legitimately outlive a `corrald` restart.
+    ///
+    /// No `RunDetached` is fabricated for a viewer that never detached. A
+    /// projection reads attachments as inactive after `RunEnded`; it does not
+    /// need invented facts to get there (grill Q11).
+    pub fn end_unowned_managed_runs(&mut self) -> Result<Vec<RunId>, StateError> {
+        let node = self.node;
+        self.write(move |transaction| {
+            let open = projection::open_managed_runs(transaction, node)?;
+            let facts = open
+                .iter()
+                .map(|(session, run)| SessionEvent::RunEnded {
+                    session: *session,
+                    run: *run,
+                    end: RunEnd::Unverifiable,
+                    ended_at: None,
+                })
+                .collect();
+            let closed = open.iter().map(|(_, run)| *run).collect();
+            Ok(Written::recording(closed, facts))
         })
     }
 
@@ -343,6 +479,7 @@ impl Store {
                 evidence,
                 at,
             );
+            refuse_reserved_namespace(&binding)?;
             Ok(Written::recording(
                 SessionResolution::Created {
                     session,
@@ -385,6 +522,7 @@ impl Store {
             }
 
             let binding = Binding::new(BindingId::mint(), session, key, provenance, evidence, at);
+            refuse_reserved_namespace(&binding)?;
             refuse_second_control_capable_runtime_binding(transaction, &binding)?;
             Ok(Written::recording(
                 BindingResolution::Created(binding.clone()),
@@ -445,13 +583,19 @@ impl Store {
     /// association — an Attested binding rests on a hook naming the provider
     /// session, and a hook having fired is not a runtime being alive. Only
     /// construction or node-local runtime observation mints a Run (D2).
+    ///
+    /// The `RunId` is the caller's, minted before the runtime it names
+    /// existed. That separation is what lets a process that exits instantly be
+    /// recorded correctly: the id is available before the occurrence, and the
+    /// durable fact is written only once the occurrence is real (grill Q3).
     pub fn record_run_started(
         &mut self,
+        run: RunId,
         runtime_binding: BindingId,
         occurrence: EvidenceSource,
         started: OccurrenceTime,
     ) -> Result<RecordedRun, StateError> {
-        self.start_run(runtime_binding, None, occurrence, started)
+        self.start_run(run, runtime_binding, None, occurrence, started)
     }
 
     /// Append the facts of a Run the store withheld while its association was
@@ -476,13 +620,13 @@ impl Store {
         occurrence: EvidenceSource,
     ) -> Result<RecordedRun, StateError> {
         let withheld = WithheldRun {
-            id: run.id(),
             session: run.session(),
             end: run
                 .end()
                 .map(|end| (end, run.ended_at().unwrap_or(OccurrenceTime::Unknown))),
         };
         self.start_run(
+            run.id(),
             run.runtime_binding(),
             Some(withheld),
             occurrence,
@@ -492,6 +636,7 @@ impl Store {
 
     fn start_run(
         &mut self,
+        id: RunId,
         runtime_binding: BindingId,
         withheld: Option<WithheldRun>,
         occurrence: EvidenceSource,
@@ -512,21 +657,24 @@ impl Store {
             }
 
             let session = binding.session();
-            let (id, ending) = match withheld {
-                None => (RunId::mint(), None),
+            // Asked of every Run, not only the ones brought back: the id is
+            // the caller's now, so a repeat is possible on both paths and
+            // would otherwise append a second start for one episode.
+            if projection::recorded_run(transaction, id)?.is_some() {
+                return Err(Refusal::RunAlreadyRecorded(id).into());
+            }
+            let ending = match withheld {
+                None => None,
                 Some(withheld) => {
-                    if projection::recorded_run(transaction, withheld.id)?.is_some() {
-                        return Err(Refusal::RunAlreadyRecorded(withheld.id).into());
-                    }
                     if withheld.session != session {
                         return Err(Refusal::RunClaimsAnotherSession {
-                            run: withheld.id,
+                            run: id,
                             claimed: withheld.session,
                             binds: session,
                         }
                         .into());
                     }
-                    (withheld.id, withheld.end)
+                    withheld.end
                 }
             };
 
@@ -582,17 +730,19 @@ impl Store {
 
     /// Close a Run.
     ///
-    /// The Run is the caller's live state; the store decides only whether the
-    /// fact may be written. An end that cannot be established is recorded as
-    /// unverifiable, never as an exit.
+    /// Named by id rather than by a `Run` value: the store reads the Run back
+    /// from its own log anyway, and the runtime owner that establishes an end
+    /// holds an id and a fact, not a domain object it would have to assemble
+    /// to be allowed to speak.
+    ///
+    /// An end that cannot be established is recorded as unverifiable, never as
+    /// an exit.
     pub fn record_run_ended(
         &mut self,
-        run: &Run,
+        id: RunId,
         end: RunEnd,
         at: OccurrenceTime,
     ) -> Result<Durability, StateError> {
-        let id = run.id();
-
         self.write(move |transaction| {
             let at = as_stored_occurrence(at)?;
             let Some(recorded) = live_run_to_record(transaction, id)? else {
@@ -613,10 +763,9 @@ impl Store {
     /// A runtime binding became available for this Run.
     pub fn record_run_attached(
         &mut self,
-        run: &Run,
+        id: RunId,
         at: SystemTime,
     ) -> Result<Durability, StateError> {
-        let id = run.id();
         self.record_run_fact(id, move |session| {
             Ok(SessionEvent::RunAttached {
                 session,
@@ -630,10 +779,9 @@ impl Store {
     /// closing a surface never terminates managed work.
     pub fn record_run_detached(
         &mut self,
-        run: &Run,
+        id: RunId,
         at: SystemTime,
     ) -> Result<Durability, StateError> {
-        let id = run.id();
         self.record_run_fact(id, move |session| {
             Ok(SessionEvent::RunDetached {
                 session,
@@ -899,6 +1047,61 @@ fn live_run_to_record(connection: &Connection, run: RunId) -> Result<Option<Run>
 
 fn require_binding(connection: &Connection, id: BindingId) -> Result<Binding, StateError> {
     projection::binding(connection, id)?.ok_or_else(|| Refusal::UnknownBinding(id).into())
+}
+
+/// What a command already produced, read from its receipt.
+///
+/// One implementation for the pre-spawn consult and for the transaction that
+/// commits: a replay decided by two different pieces of code is a replay that
+/// can disagree with itself.
+fn already_started(
+    connection: &Connection,
+    command: &Command,
+) -> Result<Option<StartedManagedSession>, StateError> {
+    let Some(receipt) = projection::receipt(connection, command.id())? else {
+        return Ok(None);
+    };
+    if receipt.fingerprint() != command.fingerprint() {
+        return Err(Refusal::CommandIdConflict {
+            command: command.id().clone(),
+        }
+        .into());
+    }
+    let CommandOutcome::SessionCreated(session) = receipt.outcome();
+    // A receipt and its Run land in one transaction, so a receipt this command
+    // wrote and a Session with no Run cannot both be true. If they are, the log
+    // and the projections disagree, and minting a fresh Run to cover it would
+    // answer a question about a past that is not there.
+    let run =
+        projection::first_run_of(connection, session)?.ok_or_else(|| FatalState::Unreadable {
+            detail: format!(
+                "the receipt for command {} names session {session}, which holds no Run",
+                command.id().as_str()
+            ),
+        })?;
+    Ok(Some(StartedManagedSession {
+        acceptance: CommandAcceptance::Replayed(receipt),
+        session,
+        run,
+    }))
+}
+
+/// Keep the reserved `corral` provider namespace directional (ADR 0008 D3).
+///
+/// Checked where a binding is created and nowhere else: the namespace records
+/// who minted an identity, which is settled at creation. A read path that
+/// re-checked it would refuse to load a store rather than refuse to write one,
+/// and `STORAGE_EPOCH` is `dev` — a development database that predates this
+/// rule is reset, not reinterpreted.
+fn refuse_reserved_namespace(binding: &Binding) -> Result<(), StateError> {
+    match binding.reserved_namespace() {
+        ReservedNamespace::Respected => Ok(()),
+        misuse => Err(Refusal::ReservedProviderNamespace {
+            binding: binding.id(),
+            misuse,
+        }
+        .into()),
+    }
 }
 
 /// At most one control-capable runtime binding is active per Session.

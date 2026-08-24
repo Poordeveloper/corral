@@ -82,6 +82,45 @@ impl BindingKey {
     pub fn external_id(&self) -> &ExternalId {
         &self.external_id
     }
+
+    /// The key of the managed-runtime binding Corral owns for one Session
+    /// (ADR 0008 D1).
+    ///
+    /// Minted rather than derived: a runtime Corral launched has no external
+    /// system to have named it, and the two identities that would otherwise be
+    /// reached for are both forbidden — a pid is never identity, and a
+    /// `RunId` names one concrete occurrence rather than the binding that
+    /// outlives it (D2).
+    ///
+    /// One per Session, reused by a resume or a replacement Run. Minting a
+    /// second is what the store refuses.
+    #[must_use]
+    pub fn mint_managed_runtime(node: NodeId) -> Self {
+        Self::new(
+            node,
+            BindingKind::Runtime,
+            ProviderId::corral(),
+            ExternalId::mint(),
+        )
+    }
+}
+
+/// How a binding sits with respect to the reserved `corral` provider
+/// namespace (ADR 0008 D3).
+///
+/// The rule is directional rather than a blanket refusal of the string,
+/// because the Corral-owned runtime binding is precisely the thing that needs
+/// it. Stating it as a ban would have been simpler and wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReservedNamespace {
+    Respected,
+    /// A `CorralCreated` runtime binding that does not carry the reserved id.
+    /// Without it, what the binding's identity means rests on convention, and
+    /// the first provider phase is where conventions go.
+    ManagedRuntimeWithoutIt,
+    /// Anything else carrying it. Provider-derived identity never occupies the
+    /// namespace whose whole meaning is "Corral minted this name".
+    ClaimedByAnotherIdentity,
 }
 
 /// An edge from a Session to one external identity.
@@ -190,6 +229,25 @@ impl Binding {
     pub fn is_control_capable_runtime_binding(&self) -> bool {
         self.kind() == BindingKind::Runtime
             && self.control_eligibility() == ControlEligibility::Eligible
+    }
+
+    /// Whether this binding respects the reserved `corral` provider namespace.
+    ///
+    /// Asked of provenance and kind rather than of assurance: what the
+    /// namespace records is who minted the identity, which is settled when the
+    /// edge is created and never re-evaluated (ADR 0008 D3).
+    #[must_use]
+    pub fn reserved_namespace(&self) -> ReservedNamespace {
+        let managed_runtime =
+            self.kind() == BindingKind::Runtime && self.provenance == Provenance::CorralCreated;
+        match (
+            managed_runtime,
+            self.key.provider().is_reserved_for_corral(),
+        ) {
+            (true, true) | (false, false) => ReservedNamespace::Respected,
+            (true, false) => ReservedNamespace::ManagedRuntimeWithoutIt,
+            (false, true) => ReservedNamespace::ClaimedByAnotherIdentity,
+        }
     }
 }
 

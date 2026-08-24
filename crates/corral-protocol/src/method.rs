@@ -71,6 +71,20 @@ pub struct SessionListResult {
 /// `session.new`'s parameters.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionNewParams {
+    /// The client's own id for this mutation, unique in the node's durable
+    /// command namespace.
+    ///
+    /// Required, and required from the first version that serves a mutation:
+    /// without it a lost response makes a client retry, and the retry starts a
+    /// second agent that nobody asked for and nobody knows about. A UUID is
+    /// the recommended form; correctness rests on the fingerprint rather than
+    /// on UUIDs never colliding (ADR 0002, Q13).
+    ///
+    /// A retry repeats every other field unchanged. One id means one semantic
+    /// command, so the same id carrying a different `argv`, `cwd`, or geometry
+    /// is a conflict rather than a retry — including a geometry that changed
+    /// only because the person resized their terminal in between.
+    pub command_id: String,
     /// The program and its arguments. Never joined into a display label.
     pub argv: Vec<String>,
     /// Where the program runs. Absent means the caller has no preference and

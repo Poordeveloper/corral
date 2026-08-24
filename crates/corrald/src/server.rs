@@ -38,6 +38,10 @@ pub async fn serve(socket: &Path, policy: DaemonPolicy, state: Arc<DaemonState>)
         move || counted.live_sessions(),
     ));
     tokio::spawn(watch_signals(Arc::clone(&lifecycle)));
+    tokio::spawn(watch_run_lifecycle(
+        Arc::clone(&lifecycle),
+        state.observations().watch_integrity(),
+    ));
 
     info!(endpoint = %socket.display(), "corrald is serving");
 
@@ -87,6 +91,26 @@ pub async fn serve(socket: &Path, policy: DaemonPolicy, state: Arc<DaemonState>)
     lifecycle.mark_exited();
     debug_assert_eq!(lifecycle.phase(), Phase::Exited);
     Ok(())
+}
+
+/// Stop serving once a run lifecycle fact has been lost.
+///
+/// A queue that could not take an observation, or a fact the store would not
+/// write, means this daemon can no longer account for the runs it owns. That
+/// is not backpressure to ride out: it is the same conclusion as a store that
+/// cannot vouch, reached by another route, and it takes the same fail-closed
+/// path (grill Q10).
+async fn watch_run_lifecycle(
+    lifecycle: Arc<Lifecycle>,
+    mut integrity: tokio::sync::watch::Receiver<crate::runtime::Integrity>,
+) {
+    while integrity.changed().await.is_ok() {
+        if *integrity.borrow_and_update() == crate::runtime::Integrity::Lost {
+            error!("a managed run's lifecycle could not be recorded; corrald is stopping");
+            lifecycle.commit_shutdown(ShutdownReason::FatalState);
+            return;
+        }
+    }
 }
 
 /// SIGTERM and SIGINT enter the same committed path as an idle exit; the only

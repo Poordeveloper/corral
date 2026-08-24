@@ -137,16 +137,19 @@ fn spawn_bad_shebang_is_error() {
     assert!(matches!(error, SpawnError::Exec(_)), "{error}");
 }
 
-/// The other half of the pair. A program that really ran and exited 1 must
-/// stay distinguishable from one that never exec'd — same exit code,
-/// different fact.
+/// The other half of the pair. A program that really ran and failed must stay
+/// distinguishable from one that never exec'd: the first is a Run that ended,
+/// the second is a Run that never existed.
 #[test]
 fn spawn_exit_1_is_distinguishable_from_exec_failure() {
     let mut runtime =
         started(&request("/bin/sh", &["-c", "exit 1"])).expect("a real program starts");
     let output = drain(&runtime);
 
-    assert_eq!(runtime.reaper.wait().expect("reap the child"), 1);
+    assert_eq!(
+        runtime.reaper.wait().expect("reap the child"),
+        ExitCause::Failed
+    );
     let _ = output.recv_timeout(std::time::Duration::from_secs(5));
 
     let never_started = spawn(
@@ -164,12 +167,34 @@ fn spawn_exit_1_is_distinguishable_from_exec_failure() {
     );
 }
 
+/// Every nonzero exit is a Run that failed, whatever the number was. The
+/// platform's code is mapped here and goes no further: the domain describes an
+/// ending in `ExitCause`, and a number crossing that line would leave every
+/// consumer deciding for itself what `42` means (ADR 0002).
 #[test]
-fn spawn_exit_42_is_preserved() {
+fn any_nonzero_exit_is_a_run_that_failed() {
     let mut runtime = started(&request("/bin/sh", &["-c", "exit 42"])).expect("the program starts");
     let output = drain(&runtime);
 
-    assert_eq!(runtime.reaper.wait().expect("reap the child"), 42);
+    assert_eq!(
+        runtime.reaper.wait().expect("reap the child"),
+        ExitCause::Failed
+    );
+    let _ = output.recv_timeout(std::time::Duration::from_secs(5));
+}
+
+/// A signal is its own ending, including Corral's own hang-up. That a signal
+/// ended the child is a fact about the ending, not a claim about who sent it.
+#[test]
+fn a_signalled_child_ends_as_terminated() {
+    let mut runtime =
+        started(&request("/bin/sh", &["-c", "kill -TERM $$"])).expect("the program starts");
+    let output = drain(&runtime);
+
+    assert_eq!(
+        runtime.reaper.wait().expect("reap the child"),
+        ExitCause::Terminated
+    );
     let _ = output.recv_timeout(std::time::Duration::from_secs(5));
 }
 

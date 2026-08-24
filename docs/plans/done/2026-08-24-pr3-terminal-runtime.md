@@ -7,6 +7,18 @@ reads: [corral-core, corral-rendezvous, docs/adr/0003-terminal-snapshot-format.m
 
 # PR3 — PTY ownership, the authoritative VT, and the terminal channel
 
+> **Correction, added after this plan was marked done.** Design 7 did not
+> land, and neither did the persistence behind it: `corrald` performed no
+> durable write at all, and §Interfaces below contradicts Design 7 by saying
+> "Persistence: none". Four review rounds did not catch it, because a review
+> compares a diff to a goal and a design item that was never written is not in
+> the diff. It landed instead in
+> `docs/plans/done/2026-08-24-pr3-durable-run-lifecycle.md`, restated as the
+> advisory *attachment* seam it can honestly be: PR3 has no client identity, so
+> "the attach holder" was never implementable. The "attach lease" glossary row
+> this plan's Definition of Done required landed there too, as **Attachment
+> seam**.
+
 ## Goal
 
 `corrald` owns PTYs, processes, and the authoritative terminal state; a

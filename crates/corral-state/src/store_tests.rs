@@ -93,6 +93,20 @@ fn key(node: NodeId, kind: BindingKind, external: &str) -> BindingKey {
     )
 }
 
+/// The key of a runtime Corral created itself.
+///
+/// The external id is named here rather than minted, so a test can talk about
+/// the same managed binding twice. Its provider is the reserved one, because
+/// that is what a `CorralCreated` runtime binding must carry (ADR 0008 D3).
+fn managed_key(node: NodeId, external: &str) -> BindingKey {
+    BindingKey::new(
+        node,
+        BindingKind::Runtime,
+        ProviderId::corral(),
+        ExternalId::new(external).expect("usable"),
+    )
+}
+
 fn evidence(source: EvidenceSource, assurance: Assurance) -> Evidence {
     Evidence::new(source, assurance, instant(100))
 }
@@ -114,6 +128,20 @@ fn command(id: &str, cwd: &str) -> Command {
     )
 }
 
+/// Open a managed session under a command, the way `session.new` does.
+fn opened(
+    store: &mut Store,
+    command: &Command,
+    at: SystemTime,
+) -> Result<StartedManagedSession, StateError> {
+    store.start_managed_session(
+        command,
+        RunId::mint(),
+        OccurrenceTime::Authoritative(at),
+        at,
+    )
+}
+
 fn kinds(events: &[RecordedEvent]) -> Vec<&'static str> {
     events
         .iter()
@@ -121,28 +149,26 @@ fn kinds(events: &[RecordedEvent]) -> Vec<&'static str> {
         .collect()
 }
 
-/// A Session created under a runtime binding, with the Run the runtime
-/// binding names.
+/// A Session with the managed runtime binding Corral owns for it, and no Run
+/// yet.
+///
+/// Deliberately not `start_managed_session`: the Run tests below need a
+/// binding with nothing running under it, and one that already had a live Run
+/// would refuse the second episode they are about to open.
 fn managed_session(store: &mut Store, external: &str) -> (CorralSessionId, BindingId) {
     let node = store.node();
-    let accepted = store
-        .create_session(&command(&format!("cmd-{external}"), "/work"), instant(10))
-        .expect("created");
-    let CommandOutcome::SessionCreated(session) = accepted.receipt().outcome();
-    let binding = match store
-        .bind(
-            session,
-            key(node, BindingKind::Runtime, external),
+    let SessionResolution::Created { session, binding } = store
+        .resolve_or_create_session(
+            managed_key(node, external),
             Provenance::CorralCreated,
             owned_runtime(),
-            instant(11),
+            instant(10),
         )
-        .expect("bound")
-    {
-        BindingResolution::Created(binding) => binding,
-        BindingResolution::Existing(binding) => binding,
+        .expect("resolved")
+    else {
+        panic!("a new external identity is a new Session");
     };
-    (session, binding.id())
+    (session.id(), binding.id())
 }
 
 #[test]
@@ -221,7 +247,7 @@ fn a_session_holds_at_most_one_control_capable_runtime_binding() {
     let refusal = store
         .bind(
             session,
-            key(node, BindingKind::Runtime, "run-b"),
+            managed_key(node, "run-b"),
             Provenance::CorralCreated,
             owned_runtime(),
             instant(12),
@@ -299,6 +325,7 @@ fn a_run_exists_under_a_heuristic_binding_and_grants_no_control() {
 
     let recorded = store
         .record_run_started(
+            RunId::mint(),
             binding.id(),
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Unknown,
@@ -334,6 +361,7 @@ fn a_heuristically_bound_run_writes_no_durable_lifecycle_fact() {
 
     let recorded = store
         .record_run_started(
+            RunId::mint(),
             binding.id(),
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Unknown,
@@ -341,7 +369,7 @@ fn a_heuristically_bound_run_writes_no_durable_lifecycle_fact() {
         .expect("a Run exists");
     let ended = store
         .record_run_ended(
-            recorded.run(),
+            recorded.run().id(),
             RunEnd::Unverifiable,
             OccurrenceTime::Unknown,
         )
@@ -381,6 +409,7 @@ fn confirmation_makes_later_facts_durable_without_rewriting_earlier_ones() {
     };
     let withheld = store
         .record_run_started(
+            RunId::mint(),
             binding.id(),
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Unknown,
@@ -396,6 +425,7 @@ fn confirmation_makes_later_facts_durable_without_rewriting_earlier_ones() {
     let observed_start = instant(400);
     let recorded = store
         .record_run_started(
+            RunId::mint(),
             binding.id(),
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Authoritative(observed_start),
@@ -435,6 +465,7 @@ fn a_late_fact_may_carry_an_earlier_occurrence_time() {
 
     store
         .record_run_started(
+            RunId::mint(),
             binding,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(long_ago),
@@ -462,6 +493,7 @@ fn a_first_observed_time_is_never_stored_as_a_start_time() {
 
     store
         .record_run_started(
+            RunId::mint(),
             binding,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::FirstObserved(instant(500)),
@@ -493,6 +525,7 @@ fn semantic_evidence_cannot_mint_a_run() {
 
     let refusal = store
         .record_run_started(
+            RunId::mint(),
             binding.id(),
             EvidenceSource::ProviderHook,
             OccurrenceTime::Unknown,
@@ -523,6 +556,7 @@ fn only_a_runtime_binding_can_carry_a_run() {
 
     let refusal = store
         .record_run_started(
+            RunId::mint(),
             binding.id(),
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Unknown,
@@ -547,6 +581,7 @@ fn native_resume_opens_a_new_run_under_the_same_session() {
     let (session, binding) = managed_session(&mut store, "run-a");
     let first = store
         .record_run_started(
+            RunId::mint(),
             binding,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
@@ -554,7 +589,7 @@ fn native_resume_opens_a_new_run_under_the_same_session() {
         .expect("recorded");
     store
         .record_run_ended(
-            first.run(),
+            first.run().id(),
             RunEnd::Exited(ExitCause::Completed),
             OccurrenceTime::Authoritative(instant(30)),
         )
@@ -562,6 +597,7 @@ fn native_resume_opens_a_new_run_under_the_same_session() {
 
     let second = store
         .record_run_started(
+            RunId::mint(),
             binding,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(40)),
@@ -586,6 +622,7 @@ fn a_run_ends_once() {
     let (session, binding) = managed_session(&mut store, "run-a");
     let run = store
         .record_run_started(
+            RunId::mint(),
             binding,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
@@ -593,14 +630,18 @@ fn a_run_ends_once() {
         .expect("recorded");
     store
         .record_run_ended(
-            run.run(),
+            run.run().id(),
             RunEnd::Exited(ExitCause::Completed),
             OccurrenceTime::Authoritative(instant(30)),
         )
         .expect("recorded");
 
     let refusal = store
-        .record_run_ended(run.run(), RunEnd::Unverifiable, OccurrenceTime::Unknown)
+        .record_run_ended(
+            run.run().id(),
+            RunEnd::Unverifiable,
+            OccurrenceTime::Unknown,
+        )
         .expect_err("refused");
 
     assert!(matches!(
@@ -621,6 +662,7 @@ fn attachment_is_recorded_without_touching_the_projection() {
     let (session, binding) = managed_session(&mut store, "run-a");
     let run = store
         .record_run_started(
+            RunId::mint(),
             binding,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
@@ -628,10 +670,10 @@ fn attachment_is_recorded_without_touching_the_projection() {
         .expect("recorded");
 
     store
-        .record_run_attached(run.run(), instant(21))
+        .record_run_attached(run.run().id(), instant(21))
         .expect("recorded");
     store
-        .record_run_detached(run.run(), instant(22))
+        .record_run_detached(run.run().id(), instant(22))
         .expect("recorded");
 
     let runs = store.runs_of(session).expect("readable");
@@ -641,7 +683,6 @@ fn attachment_is_recorded_without_touching_the_projection() {
         kinds(&store.events_of(session).expect("readable")),
         [
             "session-created",
-            "command-accepted",
             "binding-added",
             "run-started",
             "run-attached",
@@ -795,6 +836,7 @@ fn attachment_cannot_follow_an_end() {
     let (session, binding) = managed_session(&mut store, "run-a");
     let run = store
         .record_run_started(
+            RunId::mint(),
             binding,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
@@ -802,14 +844,14 @@ fn attachment_cannot_follow_an_end() {
         .expect("recorded");
     store
         .record_run_ended(
-            run.run(),
+            run.run().id(),
             RunEnd::Exited(ExitCause::Completed),
             OccurrenceTime::Authoritative(instant(30)),
         )
         .expect("recorded");
 
     let refusal = store
-        .record_run_attached(run.run(), instant(31))
+        .record_run_attached(run.run().id(), instant(31))
         .expect_err("refused");
 
     assert!(matches!(
@@ -844,6 +886,7 @@ fn confirming_an_association_does_not_make_an_earlier_run_recordable() {
     };
     let withheld = store
         .record_run_started(
+            RunId::mint(),
             binding.id(),
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Unknown,
@@ -858,7 +901,7 @@ fn confirming_an_association_does_not_make_an_earlier_run_recordable() {
 
     let ended = store
         .record_run_ended(
-            withheld.run(),
+            withheld.run().id(),
             RunEnd::Exited(ExitCause::Completed),
             OccurrenceTime::Authoritative(instant(50)),
         )
@@ -888,6 +931,7 @@ fn a_withheld_run_becomes_durable_under_its_own_identity() {
     };
     let withheld = store
         .record_run_started(
+            RunId::mint(),
             binding.id(),
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Authoritative(instant(20)),
@@ -927,7 +971,7 @@ fn a_withheld_run_becomes_durable_under_its_own_identity() {
     assert_eq!(
         store
             .record_run_ended(
-                recorded.run(),
+                recorded.run().id(),
                 RunEnd::Exited(ExitCause::Completed),
                 OccurrenceTime::Authoritative(instant(30)),
             )
@@ -957,6 +1001,7 @@ fn a_withheld_run_that_already_ended_appends_whole() {
     };
     let past = store
         .record_run_started(
+            RunId::mint(),
             binding.id(),
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Authoritative(instant(20)),
@@ -974,6 +1019,7 @@ fn a_withheld_run_that_already_ended_appends_whole() {
         .expect("confirmed");
     let live = store
         .record_run_started(
+            RunId::mint(),
             binding.id(),
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Authoritative(instant(40)),
@@ -1010,6 +1056,7 @@ fn a_recorded_run_cannot_have_its_start_appended_again() {
     let (_, binding) = managed_session(&mut store, "run-a");
     let run = store
         .record_run_started(
+            RunId::mint(),
             binding,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
@@ -1150,6 +1197,7 @@ fn a_backfilled_run_takes_the_position_its_occurrence_earns() {
     };
     let early = store
         .record_run_started(
+            RunId::mint(),
             binding.id(),
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Authoritative(instant(20)),
@@ -1163,6 +1211,7 @@ fn a_backfilled_run_takes_the_position_its_occurrence_earns() {
         .expect("confirmed");
     let late = store
         .record_run_started(
+            RunId::mint(),
             binding.id(),
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Authoritative(instant(40)),
@@ -1170,7 +1219,7 @@ fn a_backfilled_run_takes_the_position_its_occurrence_earns() {
         .expect("recorded");
     store
         .record_run_ended(
-            late.run(),
+            late.run().id(),
             RunEnd::Exited(ExitCause::Completed),
             OccurrenceTime::Authoritative(instant(41)),
         )
@@ -1316,15 +1365,18 @@ fn a_first_execution_mutates_once_and_stores_a_receipt() {
     let mut store = TestStore::new("receipt-first");
     let command = command("cmd-1", "/work");
 
-    let accepted = store
-        .create_session(&command, instant(10))
-        .expect("created");
+    let accepted = opened(&mut store, &command, instant(10)).expect("created");
 
-    assert!(matches!(accepted, CommandAcceptance::Executed(_)));
+    assert!(accepted.executed());
     assert_eq!(store.sessions().expect("readable").len(), 1);
     assert_eq!(
         store.receipt(command.id()).expect("readable").as_ref(),
-        Some(accepted.receipt())
+        Some(accepted.acceptance().receipt())
+    );
+    assert_eq!(
+        store.runs_of(accepted.session()).expect("readable").len(),
+        1,
+        "a managed session's first Run lands with the receipt that made it"
     );
 }
 
@@ -1332,21 +1384,24 @@ fn a_first_execution_mutates_once_and_stores_a_receipt() {
 fn the_same_semantic_command_returns_the_original_receipt() {
     let mut store = TestStore::new("receipt-replay");
     let command = command("cmd-1", "/work");
-    let first = store
-        .create_session(&command, instant(10))
-        .expect("created");
+    let first = opened(&mut store, &command, instant(10)).expect("created");
 
-    let again = store
-        .create_session(&command, instant(99))
-        .expect("replayed");
+    let again = opened(&mut store, &command, instant(99)).expect("replayed");
 
-    assert!(matches!(again, CommandAcceptance::Replayed(_)));
-    assert_eq!(again.receipt(), first.receipt());
+    assert!(!again.executed());
+    assert_eq!(again.acceptance().receipt(), first.acceptance().receipt());
+    assert_eq!(again.session(), first.session());
+    assert_eq!(
+        again.run(),
+        first.run(),
+        "a replay names the Run the first execution made, not the one it minted"
+    );
     assert_eq!(
         store.sessions().expect("readable").len(),
         1,
         "a retry mutates nothing a second time"
     );
+    assert_eq!(store.runs_of(first.session()).expect("readable").len(), 1);
 }
 
 /// One command id means one immutable semantic command, for the life of the
@@ -1354,13 +1409,10 @@ fn the_same_semantic_command_returns_the_original_receipt() {
 #[test]
 fn the_same_id_with_a_different_command_conflicts_and_changes_nothing() {
     let mut store = TestStore::new("receipt-conflict");
-    let first = store
-        .create_session(&command("cmd-1", "/work"), instant(10))
-        .expect("created");
+    let first = opened(&mut store, &command("cmd-1", "/work"), instant(10)).expect("created");
 
-    let refusal = store
-        .create_session(&command("cmd-1", "/elsewhere"), instant(20))
-        .expect_err("refused");
+    let refusal =
+        opened(&mut store, &command("cmd-1", "/elsewhere"), instant(20)).expect_err("refused");
 
     assert!(matches!(
         refusal,
@@ -1372,7 +1424,7 @@ fn the_same_id_with_a_different_command_conflicts_and_changes_nothing() {
             .receipt(&CommandId::new("cmd-1").expect("usable"))
             .expect("readable")
             .as_ref(),
-        Some(first.receipt()),
+        Some(first.acceptance().receipt()),
         "the original receipt is untouched"
     );
 }
@@ -1397,12 +1449,12 @@ fn equivalent_descriptions_of_one_command_do_not_conflict() {
             .input("cwd", "/work")
             .build(),
     );
-    let first = store.create_session(&one, instant(10)).expect("created");
+    let first = opened(&mut store, &one, instant(10)).expect("created");
 
-    let again = store.create_session(&other, instant(20)).expect("replayed");
+    let again = opened(&mut store, &other, instant(20)).expect("replayed");
 
-    assert!(matches!(again, CommandAcceptance::Replayed(_)));
-    assert_eq!(again.receipt(), first.receipt());
+    assert!(!again.executed());
+    assert_eq!(again.acceptance().receipt(), first.acceptance().receipt());
 }
 
 /// A command id is unique in the node's durable command namespace, and a
@@ -1412,16 +1464,13 @@ fn equivalent_descriptions_of_one_command_do_not_conflict() {
 fn a_command_id_stays_taken_across_a_restart() {
     let mut store = TestStore::new("receipt-restart");
     let command = command("cmd-1", "/work");
-    let first = store
-        .create_session(&command, instant(10))
-        .expect("created");
+    let first = opened(&mut store, &command, instant(10)).expect("created");
 
     store.reopen();
-    let again = store
-        .create_session(&command, instant(20))
-        .expect("replayed");
+    let again = opened(&mut store, &command, instant(20)).expect("replayed");
 
-    assert_eq!(again.receipt(), first.receipt());
+    assert_eq!(again.acceptance().receipt(), first.acceptance().receipt());
+    assert_eq!(again.run(), first.run());
     assert_eq!(store.sessions().expect("readable").len(), 1);
 }
 
@@ -1445,45 +1494,33 @@ fn replaying_the_log_reproduces_the_projections() {
 fn every_durable_transition(store: &mut Store) -> Vec<CommandId> {
     let node = store.node();
     let created = command("cmd-managed", "/work");
-    let accepted = store
-        .create_session(&created, instant(10))
-        .expect("created");
-    let CommandOutcome::SessionCreated(managed) = accepted.receipt().outcome();
-    let BindingResolution::Created(runtime) = store
-        .bind(
-            managed,
-            key(node, BindingKind::Runtime, "run-a"),
-            Provenance::CorralCreated,
-            owned_runtime(),
-            instant(11),
-        )
-        .expect("bound")
-    else {
-        panic!("a new external identity is a new binding");
-    };
+    // Session, managed binding, first Run and receipt in one accepted command,
+    // exactly as `session.new` produces them.
+    let accepted = opened(store, &created, instant(10)).expect("created");
+    let managed = accepted.session();
+    let runtime = store
+        .bindings_of(managed)
+        .expect("readable")
+        .into_iter()
+        .next()
+        .expect("the managed runtime binding");
 
-    let run = store
-        .record_run_started(
-            runtime.id(),
-            EvidenceSource::CorralConstructed,
-            OccurrenceTime::Authoritative(instant(12)),
-        )
+    store
+        .record_run_attached(accepted.run(), instant(13))
         .expect("recorded");
     store
-        .record_run_attached(run.run(), instant(13))
-        .expect("recorded");
-    store
-        .record_run_detached(run.run(), instant(14))
+        .record_run_detached(accepted.run(), instant(14))
         .expect("recorded");
     store
         .record_run_ended(
-            run.run(),
+            accepted.run(),
             RunEnd::Exited(ExitCause::Terminated),
             OccurrenceTime::Authoritative(instant(15)),
         )
         .expect("recorded");
     store
         .record_run_started(
+            RunId::mint(),
             runtime.id(),
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Unknown,
@@ -1507,6 +1544,7 @@ fn every_durable_transition(store: &mut Store) -> Vec<CommandId> {
     };
     let withheld = store
         .record_run_started(
+            RunId::mint(),
             suspected.id(),
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Authoritative(instant(31)),
@@ -1524,6 +1562,7 @@ fn every_durable_transition(store: &mut Store) -> Vec<CommandId> {
         .expect("confirmed");
     store
         .record_run_started(
+            RunId::mint(),
             suspected.id(),
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Authoritative(instant(60)),
@@ -1628,6 +1667,7 @@ fn one_runtime_binding_runs_one_episode_at_a_time() {
     let (session, binding) = managed_session(&mut store, "run-a");
     let first = store
         .record_run_started(
+            RunId::mint(),
             binding,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(20)),
@@ -1636,6 +1676,7 @@ fn one_runtime_binding_runs_one_episode_at_a_time() {
 
     let refusal = store
         .record_run_started(
+            RunId::mint(),
             binding,
             EvidenceSource::CorralConstructed,
             OccurrenceTime::Authoritative(instant(21)),
@@ -1658,16 +1699,14 @@ fn a_receipt_survives_a_clock_finer_than_the_store() {
     let command = command("cmd-1", "/work");
     let precise = SystemTime::UNIX_EPOCH + Duration::new(1_766_000_000, 123_456_789);
 
-    let first = store.create_session(&command, precise).expect("created");
-    let again = store
-        .create_session(&command, precise + Duration::from_secs(5))
-        .expect("replayed");
+    let first = opened(&mut store, &command, precise).expect("created");
+    let again = opened(&mut store, &command, precise + Duration::from_secs(5)).expect("replayed");
 
-    assert!(matches!(again, CommandAcceptance::Replayed(_)));
-    assert_eq!(again.receipt(), first.receipt());
+    assert!(!again.executed());
+    assert_eq!(again.acceptance().receipt(), first.acceptance().receipt());
     assert_eq!(
         store.receipt(command.id()).expect("readable").as_ref(),
-        Some(first.receipt()),
+        Some(first.acceptance().receipt()),
         "the receipt the write returned is the receipt the store holds"
     );
 }
@@ -1709,9 +1748,7 @@ fn an_oversized_fingerprint_is_refused_before_anything_is_written() {
             .build(),
     );
 
-    let refusal = store
-        .create_session(&huge, instant(10))
-        .expect_err("refused");
+    let refusal = opened(&mut store, &huge, instant(10)).expect_err("refused");
 
     assert!(matches!(
         refusal,
@@ -1725,13 +1762,10 @@ fn an_oversized_fingerprint_is_refused_before_anything_is_written() {
 #[test]
 fn a_refusal_leaves_the_store_usable() {
     let mut store = TestStore::new("refusal-usable");
-    store
-        .create_session(&command("cmd-1", "/work"), instant(10))
-        .expect("created");
+    opened(&mut store, &command("cmd-1", "/work"), instant(10)).expect("created");
 
-    let refusal = store
-        .create_session(&command("cmd-1", "/elsewhere"), instant(20))
-        .expect_err("refused");
+    let refusal =
+        opened(&mut store, &command("cmd-1", "/elsewhere"), instant(20)).expect_err("refused");
 
     assert!(!refusal.is_fatal());
     assert_eq!(
@@ -1855,4 +1889,197 @@ fn a_store_in_a_directory_that_does_not_exist_is_refused() {
         error,
         StateError::Fatal(FatalState::Unopenable { .. })
     ));
+}
+
+/// The reserved provider namespace records who minted an identity. A runtime
+/// Corral created must carry it, or its durable meaning rests on convention —
+/// and the first provider phase is where conventions go (ADR 0008 D3).
+#[test]
+fn a_corral_created_runtime_binding_must_carry_the_reserved_provider() {
+    let mut store = TestStore::new("reserved-required");
+    let node = store.node();
+
+    let refusal = store
+        .resolve_or_create_session(
+            key(node, BindingKind::Runtime, "run-a"),
+            Provenance::CorralCreated,
+            owned_runtime(),
+            instant(10),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::ReservedProviderNamespace {
+            misuse: corral_core::ReservedNamespace::ManagedRuntimeWithoutIt,
+            ..
+        })
+    ));
+    assert_eq!(store.sessions().expect("readable"), Vec::new());
+}
+
+/// The other direction, which is the one PR5 would otherwise break: provider
+/// identity never occupies the namespace whose meaning is "Corral minted this".
+#[test]
+fn a_provider_binding_may_not_take_the_reserved_provider() {
+    let mut store = TestStore::new("reserved-claimed");
+    let node = store.node();
+    let (session, _) = managed_session(&mut store, "run-a");
+
+    let refusal = store
+        .bind(
+            session,
+            BindingKey::new(
+                node,
+                BindingKind::ProviderSession,
+                ProviderId::corral(),
+                ExternalId::new("sess-1").expect("usable"),
+            ),
+            Provenance::Discovered,
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+            instant(12),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::ReservedProviderNamespace {
+            misuse: corral_core::ReservedNamespace::ClaimedByAnotherIdentity,
+            ..
+        })
+    ));
+    assert_eq!(store.bindings_of(session).expect("readable").len(), 1);
+}
+
+/// A Run's id is the caller's now, so the store has to refuse one it already
+/// holds — otherwise one episode could acquire two starts.
+#[test]
+fn a_run_id_the_log_already_holds_is_refused() {
+    let mut store = TestStore::new("run-id-repeat");
+    let (_, binding) = managed_session(&mut store, "run-a");
+    let run = RunId::mint();
+    store
+        .record_run_started(
+            run,
+            binding,
+            EvidenceSource::CorralConstructed,
+            OccurrenceTime::Authoritative(instant(20)),
+        )
+        .expect("recorded");
+    store
+        .record_run_ended(
+            run,
+            RunEnd::Exited(ExitCause::Completed),
+            OccurrenceTime::Unknown,
+        )
+        .expect("recorded");
+
+    let refusal = store
+        .record_run_started(
+            run,
+            binding,
+            EvidenceSource::CorralConstructed,
+            OccurrenceTime::Authoritative(instant(40)),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::RunAlreadyRecorded(named)) if named == run
+    ));
+}
+
+/// A daemon does not outlive its managed runtimes, so every managed episode
+/// still open at startup belongs to a daemon that is gone (ADR 0007 L6).
+#[test]
+fn startup_closes_the_managed_episodes_a_departed_daemon_left_open() {
+    let mut store = TestStore::new("reconcile");
+    let command = command("cmd-1", "/work");
+    let accepted = opened(&mut store, &command, instant(10)).expect("created");
+    let session = accepted.session();
+
+    store.reopen();
+    let closed = store.end_unowned_managed_runs().expect("reconciled");
+
+    assert_eq!(closed, vec![accepted.run()]);
+    let runs = store.runs_of(session).expect("readable");
+    assert_eq!(runs[0].end(), Some(RunEnd::Unverifiable));
+    assert_eq!(
+        runs[0].ended_at(),
+        Some(OccurrenceTime::Unknown),
+        "a daemon's startup is not when a process stopped"
+    );
+    assert_eq!(
+        kinds(&store.events_of(session).expect("readable")),
+        [
+            "session-created",
+            "binding-added",
+            "run-started",
+            "command-accepted",
+            "run-ended"
+        ],
+        "the ending is appended, and no detach is invented for it"
+    );
+}
+
+/// The predicate is ownership, never "unfinished on this node". A discovered
+/// runtime is not Corral's to declare an ending for.
+#[test]
+fn startup_leaves_a_run_corral_does_not_manage_alone() {
+    let mut store = TestStore::new("reconcile-foreign");
+    let node = store.node();
+    let SessionResolution::Created { binding, .. } = store
+        .resolve_or_create_session(
+            key(node, BindingKind::Runtime, "pid-77"),
+            Provenance::Discovered,
+            evidence(EvidenceSource::NodeRuntimeObservation, Assurance::Attested),
+            instant(10),
+        )
+        .expect("resolved")
+    else {
+        panic!("a new external identity is a new Session");
+    };
+    let discovered = RunId::mint();
+    store
+        .record_run_started(
+            discovered,
+            binding.id(),
+            EvidenceSource::NodeRuntimeObservation,
+            OccurrenceTime::Authoritative(instant(11)),
+        )
+        .expect("recorded");
+
+    let closed = store.end_unowned_managed_runs().expect("reconciled");
+
+    assert_eq!(closed, Vec::new());
+    assert!(
+        store.runs_of(binding.session()).expect("readable")[0].is_live(),
+        "a Run Corral did not create is not Corral's to end"
+    );
+}
+
+/// Reconciliation runs on every start, and a store with nothing open must not
+/// be given a fact to record.
+#[test]
+fn startup_records_nothing_when_no_managed_episode_is_open() {
+    let mut store = TestStore::new("reconcile-empty");
+    let command = command("cmd-1", "/work");
+    let accepted = opened(&mut store, &command, instant(10)).expect("created");
+    store
+        .record_run_ended(
+            accepted.run(),
+            RunEnd::Exited(ExitCause::Completed),
+            OccurrenceTime::Authoritative(instant(20)),
+        )
+        .expect("recorded");
+    let before = store.events_of(accepted.session()).expect("readable").len();
+
+    assert_eq!(
+        store.end_unowned_managed_runs().expect("reconciled"),
+        Vec::new()
+    );
+    assert_eq!(
+        store.events_of(accepted.session()).expect("readable").len(),
+        before
+    );
 }
