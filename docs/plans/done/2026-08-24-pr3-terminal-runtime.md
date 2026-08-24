@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 class: B
 writes: [corrald, corral-protocol, corral-client, corral, corral-state, scripts-ci, canonical-docs]
 reads: [corral-core, corral-rendezvous, docs/adr/0003-terminal-snapshot-format.md, docs/decisions/2026-08-24-adr3-terminal-snapshot-acceptance.md, docs/decisions/2026-08-24-pr3-plan-grill.md]

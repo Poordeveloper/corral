@@ -19,6 +19,13 @@ cd "$(dirname "$0")/.."
 SECONDS_TO_RUN="${1:-1800}"
 TARGET="terminal_ingest"
 FUZZ_DIR="fuzz"
+# libFuzzer writes every interesting input it finds into the FIRST corpus
+# directory it is given. That must not be the curated corpus: those twenty
+# cases are chosen and reviewed, and a run that added a thousand machine-found
+# variants would bury them and slow every PR. So the working corpus is
+# scratch, and the curated one is passed after it as read-only seed input.
+WORKING_CORPUS="$FUZZ_DIR/corpus/$TARGET"
+SEEDS="crates/corrald/tests/corpus/terminal"
 
 if ! command -v cargo-fuzz >/dev/null 2>&1; then
     echo "fuzz-terminal: cargo-fuzz is not installed" >&2
@@ -35,13 +42,16 @@ if [ ! -d "$FUZZ_DIR" ]; then
     exit 1
 fi
 
-echo "==> fuzzing $TARGET for ${SECONDS_TO_RUN}s"
-echo "    corpus seeds: crates/corrald/tests/corpus/terminal"
+mkdir -p "$WORKING_CORPUS"
 
-# The permanent corpus seeds the run: every past finding is where the next
-# one is most likely to be near.
+echo "==> fuzzing $TARGET for ${SECONDS_TO_RUN}s"
+echo "    working corpus: $WORKING_CORPUS"
+echo "    seeds:          $SEEDS"
+
+# The curated corpus seeds the run: every past finding is where the next one
+# is most likely to be near.
 cargo +nightly fuzz run "$TARGET" \
-    crates/corrald/tests/corpus/terminal \
+    "$WORKING_CORPUS" "$SEEDS" \
     -- \
     -max_total_time="$SECONDS_TO_RUN" \
     -rss_limit_mb=4096 \

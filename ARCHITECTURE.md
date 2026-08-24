@@ -543,6 +543,10 @@ terms: `PRODUCT.md` §8.
 | **Link / unlink** | attach or detach a binding. Corral never merges or destroys provider data |
 | **NativeResume / ContextHandoff / RuntimeMove** | distinct continuation operations, never collapsed into a generic resume |
 | **Session lineage** | a Corral-owned edge from a Session to the one it continued from, carrying the assurance of that claim. Recorded only where Corral knows the parent; heuristic similarity records nothing |
+| **Snapshot epoch** | the screen shape a sequence is measured against. A resize reflows the emulator, so bytes recorded before it cannot be replayed into a screen shaped after it: the epoch advances and a fresh snapshot replaces the stream |
+| **Terminal data channel** | the connection carrying a session's terminal frames. A second connection to the canonical rendezvous, claimed by redeeming a one-time attach token, after which it never carries semantic RPC again |
+| **Attach token** | the single-use, short-lived capability that opens one terminal data channel. Bound to a Session *and* its concrete Run, because a Session outlives the process a token was minted for |
+| **Snapshot budget / ceiling** | the encoded size a normal snapshot aims at versus the absolute bound no successful snapshot may pass. Trimming sacrifices oldest scrollback first; a viewport alone past the ceiling is a typed failure, never a partial screen |
 | **Live synchronized control** | joining the same live provider session as a second synchronized surface; the preferred control path |
 | **First-response lease** | the bounded window (≤15s) during which Corral may hold an already-blocked interaction before failing open |
 | **Surface** | a client rendering the shared model: Desktop, Terminal/TUI, Tray, CLI, Mobile, Web. Holds presentation state only |
