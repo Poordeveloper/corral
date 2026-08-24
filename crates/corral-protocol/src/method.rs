@@ -9,8 +9,14 @@ pub const HELLO: &str = "hello";
 /// Liveness acknowledgement. Carries no product facts by design.
 pub const PING: &str = "ping";
 
-/// The session list. PR1 has no registry, so it is honestly empty.
+/// The session list.
 pub const SESSION_LIST: &str = "session.list";
+
+/// Start a managed session and its first Run.
+pub const SESSION_NEW: &str = "session.new";
+
+/// Obtain a one-time token for a terminal data channel.
+pub const TERMINAL_ATTACH: &str = "terminal.attach";
 
 /// `ping`'s result.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -28,15 +34,78 @@ impl PingResult {
     }
 }
 
+/// One session in a listing.
+///
+/// The first concrete shape the wire commits to. Three fields, because every
+/// field is a promise somebody has to keep: an identity, a label, and what the
+/// daemon can currently claim about execution.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionListItem {
+    /// The Corral-owned identity. The only field a client may key on.
+    pub session_id: String,
+    /// A human-readable, non-authoritative display label chosen by Corral.
+    ///
+    /// Never parsed, never used for identity or control. Where it comes from
+    /// may change — user naming, a provider-derived title — without the
+    /// field's meaning changing.
+    pub title: String,
+    /// `running`, `exited`, or `unknown`.
+    ///
+    /// `unknown` says Corral cannot currently make a reliable execution claim.
+    /// It is the execution dimension's own value: not an assurance, not the
+    /// attention model's unknown, and never a stand-in for a process whose
+    /// fate the daemon has not established. A value a peer does not recognise
+    /// is treated as `unknown` rather than guessed at.
+    pub execution_state: String,
+}
+
 /// `session.list`'s result.
 ///
-/// The element type is deliberately unassigned: PR1 serves no sessions, and
-/// giving a session an encoding here would commit the wire to a shape the
-/// phase that owns sessions has not decided yet. Older peers therefore decode
-/// a future daemon's sessions without claiming to understand them.
+/// Elements stay `Value` on the decode side so a future daemon may add fields
+/// without an older peer refusing the whole list.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SessionListResult {
     pub sessions: Vec<Value>,
+}
+
+/// `session.new`'s parameters.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionNewParams {
+    /// The program and its arguments. Never joined into a display label.
+    pub argv: Vec<String>,
+    /// Where the program runs. Absent means the caller has no preference and
+    /// the daemon supplies one — it is never silently replaced when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// The geometry the first attaching client wants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+}
+
+/// `session.new`'s result.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionNewResult {
+    pub session_id: String,
+    pub run_id: String,
+}
+
+/// `terminal.attach`'s parameters.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TerminalAttachParams {
+    pub session_id: String,
+}
+
+/// `terminal.attach`'s result: the token a second connection presents.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TerminalAttachResult {
+    /// Single-use, short-lived, and bound to the concrete Run — not to the
+    /// Session alone, which outlives it.
+    pub attach_token: String,
+    pub run_id: String,
+    pub rows: u16,
+    pub cols: u16,
 }
 
 impl SessionListResult {

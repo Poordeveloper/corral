@@ -17,6 +17,7 @@
 mod attach;
 mod launch;
 mod pump;
+mod session;
 mod snapshot;
 mod spawn;
 mod stream;
@@ -27,6 +28,9 @@ pub use attach::{
 };
 pub use launch::{LaunchRejection, LaunchRequest};
 pub use pump::{PumpEnd, pump};
+pub use session::{
+    ExecutionState, ManagedSession, ManagedSessions, SessionGone, SessionHandle, StartError, start,
+};
 pub use snapshot::{
     SNAPSHOT_CEILING_BYTES, SNAPSHOT_SCROLLBACK_ROWS, SNAPSHOT_TARGET_BYTES, Snapshot,
     SnapshotBudget, SnapshotError, encode, encode_within,

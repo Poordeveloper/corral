@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use corral_protocol::method::{self, PingResult, SessionListResult};
+use corral_protocol::method::{
+    self, PingResult, SessionListItem, SessionListResult, SessionNewParams, SessionNewResult,
+    TerminalAttachParams, TerminalAttachResult,
+};
 use corral_protocol::{
     ClientHello, Compatibility, ErrorCode, Frame, FrameError, FrameReader, FrameWriter,
     ProtocolError, Request, RequestId, ServerHello, compatible, local_versions,
@@ -12,6 +15,7 @@ use tracing::{debug, error, warn};
 
 use crate::lifecycle::{EstablishedGuard, Lifecycle, ShutdownReason};
 use crate::policy::DaemonPolicy;
+use crate::runtime::{AttachGrant, LaunchRequest, ManagedSession, PtyGeometry, StartError};
 use crate::state::{DaemonState, Vouched};
 
 /// What a dispatched request produced.
@@ -260,9 +264,7 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             // refused for any other reason is a store this build cannot
             // explain, and uncertainty resolves to the stricter path.
             Ok(()) => match state.vouch().await {
-                Ok(Vouched::Yes) => {
-                    Dispatch::Reply(Frame::result(id, SessionListResult::empty_wire_value()))
-                }
+                Ok(Vouched::Yes) => Dispatch::Reply(session_list(id, state)),
                 // A fixed message: the engine's own text names tables, columns
                 // and paths, and a protocol error crosses the socket.
                 Ok(Vouched::NotNow) => Dispatch::Reply(Frame::error(
@@ -273,6 +275,8 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             },
             Err(error) => Dispatch::Reply(Frame::error(id, error)),
         },
+        method::SESSION_NEW => Dispatch::Reply(session_new(request, state)),
+        method::TERMINAL_ATTACH => Dispatch::Reply(terminal_attach(request, state)),
         // A compatibility safety net, not how features are discovered: the
         // connection stays usable.
         other => Dispatch::Reply(Frame::error(
@@ -282,6 +286,195 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
                 format!("this daemon speaks protocol 1 and does not serve {other}"),
             ),
         )),
+    }
+}
+
+/// The sessions this daemon runs, in the wire's first concrete session shape.
+fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
+    let Some(described) = state.with_runtime(|runtime| runtime.sessions.describe()) else {
+        return Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::Busy, "the runtime could not be consulted"),
+        );
+    };
+
+    let sessions: Vec<serde_json::Value> = described.iter().map(encode_session).collect();
+    match serde_json::to_value(SessionListResult { sessions }) {
+        Ok(value) => Frame::result(id, value),
+        Err(source) => Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+        ),
+    }
+}
+
+fn encode_session(session: &ManagedSession) -> serde_json::Value {
+    serde_json::to_value(SessionListItem {
+        session_id: session.session.to_string(),
+        title: session.title.clone(),
+        execution_state: session.execution_state.as_str().to_owned(),
+    })
+    .unwrap_or_else(|_| serde_json::json!({}))
+}
+
+/// Start a managed session and its first Run.
+fn session_new(request: &Request, state: &Arc<DaemonState>) -> Frame {
+    let id = request.id;
+    let params: SessionNewParams = match request.params.clone() {
+        Some(params) => match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(source) => {
+                return Frame::error(
+                    id,
+                    ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+                );
+            }
+        },
+        None => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, "session.new needs a command"),
+            );
+        }
+    };
+
+    let Some((program, arguments)) = params.argv.split_first() else {
+        return Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::InvalidParams, "session.new needs a command"),
+        );
+    };
+
+    // An absent working directory is the caller having no preference, so the
+    // daemon supplies one. A directory the caller named and the daemon cannot
+    // use is refused rather than quietly replaced.
+    let working_directory = params
+        .cwd
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+
+    let launch = match LaunchRequest::new(
+        program,
+        arguments.iter().map(std::ffi::OsString::from),
+        &working_directory,
+    ) {
+        Ok(launch) => launch,
+        Err(refusal) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, refusal.to_string()),
+            );
+        }
+    };
+
+    let geometry = PtyGeometry {
+        rows: params.rows.unwrap_or(24),
+        cols: params.cols.unwrap_or(80),
+    };
+    let session = corral_core::CorralSessionId::mint();
+    let run = corral_core::RunId::mint();
+
+    let handle = match crate::runtime::start(&launch, geometry, session, run) {
+        Ok(handle) => handle,
+        Err(StartError::Spawn(error)) => {
+            // The command never ran, so no Run exists to report. Saying
+            // otherwise would record a runtime occurrence that never happened.
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, error.to_string()),
+            );
+        }
+    };
+
+    let stored = state.with_runtime(|runtime| runtime.sessions.insert(handle));
+    if stored.is_none() {
+        return Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::Busy, "the runtime could not be consulted"),
+        );
+    }
+
+    match serde_json::to_value(SessionNewResult {
+        session_id: session.to_string(),
+        run_id: run.to_string(),
+    }) {
+        Ok(value) => Frame::result(id, value),
+        Err(source) => Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+        ),
+    }
+}
+
+/// Issue a one-time token for a terminal data channel.
+fn terminal_attach(request: &Request, state: &Arc<DaemonState>) -> Frame {
+    let id = request.id;
+    let params: TerminalAttachParams = match request.params.clone() {
+        Some(params) => match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(source) => {
+                return Frame::error(
+                    id,
+                    ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+                );
+            }
+        },
+        None => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, "terminal.attach needs a session"),
+            );
+        }
+    };
+
+    let Ok(session) = params.session_id.parse::<corral_core::CorralSessionId>() else {
+        return Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::InvalidParams, "that is not a session id"),
+        );
+    };
+
+    let issued = state.with_runtime(|runtime| {
+        // The token names the Run, not just the Session: a Session outlives
+        // its Runs, and a token that survived a resume must not open the
+        // terminal of the process that replaced it (grill Q2).
+        let handle = runtime.sessions.get(session)?;
+        let run = handle.run();
+        let geometry = handle.geometry().ok()?;
+        let token = runtime
+            .attach_tokens
+            .issue(AttachGrant { session, run })
+            .ok()?;
+        Some((token, run, geometry))
+    });
+
+    match issued {
+        Some(Some((token, run, geometry))) => match serde_json::to_value(TerminalAttachResult {
+            attach_token: token.to_wire(),
+            run_id: run.to_string(),
+            rows: geometry.rows,
+            cols: geometry.cols,
+        }) {
+            Ok(value) => Frame::result(id, value),
+            Err(source) => Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+            ),
+        },
+        // No such session, a runtime that stopped answering, or an OS that
+        // could not supply randomness. Each is a refusal to open a channel;
+        // none of them says anything about a process's fate.
+        Some(None) => Frame::error(
+            id,
+            ProtocolError::new(
+                ErrorCode::InvalidParams,
+                "no terminal is available for that session",
+            ),
+        ),
+        None => Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::Busy, "the runtime could not be consulted"),
+        ),
     }
 }
 

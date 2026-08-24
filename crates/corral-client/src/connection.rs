@@ -119,6 +119,7 @@ pub(crate) async fn handshake(
         protocol_version: ours.protocol_version,
         min_compatible_peer_version: ours.min_compatible_peer_version,
         capabilities: Default::default(),
+        role: None,
     };
     let params = serde_json::to_value(&hello).map_err(|source| ActivationError::Handshake {
         endpoint: endpoint.to_path_buf(),

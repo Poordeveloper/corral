@@ -23,6 +23,23 @@ pub struct ClientHello {
     /// empty set — feature eligibility, never protocol incompatibility.
     #[serde(default)]
     pub capabilities: BTreeSet<String>,
+    /// The role this connection claims.
+    ///
+    /// Absent is the semantic RPC role every connection has always had, so an
+    /// older client's hello means exactly what it always meant. Present with
+    /// the terminal-data role plus a token turns this connection into a
+    /// terminal data channel — a one-way transition: it never carries RPC
+    /// again (ADR 0003, grill Q2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<ConnectionRole>,
+}
+
+/// What a connection is for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConnectionRole {
+    /// A terminal data channel, redeeming a token from `terminal.attach`.
+    TerminalData { attach_token: String },
 }
 
 /// The daemon's half, including the verdict it reached independently.

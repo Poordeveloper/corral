@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use corral_state::{FatalState, Refusal, StateError, Store};
 
+use crate::runtime::{AttachTokens, ManagedSessions};
+
 /// What the registry said when asked whether it can still vouch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Vouched {
@@ -28,6 +30,20 @@ pub struct DaemonState {
     /// own conclusions, but it never saw this one, and the exit status is read
     /// from here.
     unreachable: AtomicBool,
+    /// The sessions this daemon is running, and the tokens it has issued for
+    /// their terminals.
+    ///
+    /// Live runtime state, deliberately beside the store rather than in it:
+    /// a running process is runtime-owned truth and is never persisted as
+    /// fact (AGENTS.md §Durable state).
+    runtime: Mutex<Runtime>,
+}
+
+/// The live runtime a daemon owns for the length of its own life.
+#[derive(Default)]
+pub struct Runtime {
+    pub sessions: ManagedSessions,
+    pub attach_tokens: AttachTokens,
 }
 
 impl DaemonState {
@@ -40,6 +56,7 @@ impl DaemonState {
         Ok(Self {
             store: Mutex::new(Store::open(registry)?),
             unreachable: AtomicBool::new(false),
+            runtime: Mutex::new(Runtime::default()),
         })
     }
 
@@ -74,6 +91,22 @@ impl DaemonState {
     /// recorded: the conclusion has to survive the task that reached it being
     /// dropped mid-shutdown, or a daemon that stopped over an untrusted store
     /// could still exit as though nothing happened.
+    /// Work with the live runtime.
+    ///
+    /// Synchronous and short: these calls touch in-memory state and message a
+    /// session's own thread, so they never wait on a process the way a store
+    /// call can wait on a database.
+    pub fn with_runtime<T>(&self, work: impl FnOnce(&mut Runtime) -> T) -> Option<T> {
+        // A poisoned lock means a holder panicked mid-mutation, which is not
+        // something to paper over: the caller answers with what it says when
+        // the runtime cannot be consulted rather than reading state nobody
+        // finished writing.
+        self.runtime
+            .lock()
+            .ok()
+            .map(|mut runtime| work(&mut runtime))
+    }
+
     pub fn stopped_vouching(&self) -> bool {
         self.unreachable.load(Ordering::SeqCst) || self.lock().stopped_vouching()
     }
