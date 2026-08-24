@@ -17,9 +17,11 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
+corral-core = { workspace = true }
 corral-protocol = { workspace = true }
 corral-rendezvous = { workspace = true }
 corral-state = { workspace = true }
+getrandom = { workspace = true }
 portable-pty = { workspace = true }
 qwertty-term-vt = { workspace = true }
 # setsid: the daemon detaches itself, and no standard-library API exposes it.

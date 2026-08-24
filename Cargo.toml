@@ -42,6 +42,10 @@ portable-pty = { path = "third_party/portable-pty" }
 # Rust port of a serializing emulator (ADR 0003 D1). Its `unsafe` surface is
 # named there and fuzzed before PR3 ships.
 qwertty-term-vt = "0.4.0"
+# The OS CSPRNG for attach tokens. Already in the tree under `uuid`, so this
+# adds no supply chain; taken directly because a token needs a stated 128 bits,
+# and a v4 UUID spends six of them on version and variant bits.
+getrandom = "0.4"
 # The registry store. `bundled` compiles SQLite from source so every platform
 # runs the same engine and version, rather than whatever the host happens to
 # ship.

@@ -14,12 +14,17 @@
 //! backend patch keeps the second from impersonating the first
 //! (`third_party/portable-pty/CORRAL_PATCHES.md`).
 
+mod attach;
 mod launch;
 mod pump;
 mod snapshot;
 mod spawn;
+mod stream;
 mod terminal;
 
+pub use attach::{
+    ATTACH_TOKEN_TTL, AttachGrant, AttachRefused, AttachToken, AttachTokens, NoRandomness,
+};
 pub use launch::{LaunchRejection, LaunchRequest};
 pub use pump::{PumpEnd, pump};
 pub use snapshot::{
@@ -27,4 +32,5 @@ pub use snapshot::{
     SnapshotBudget, SnapshotError, encode, encode_within,
 };
 pub use spawn::{PtyGeometry, SpawnError, SpawnedRuntime, spawn};
+pub use stream::{Desynchronised, SUBSCRIBER_QUEUE_BYTES, Subscriber, TerminalStream};
 pub use terminal::{AuthoritativeTerminal, DeviceReply, RETAINED_SCROLLBACK_BYTES};

@@ -19,6 +19,7 @@ mod error;
 mod framing;
 mod hello;
 pub mod method;
+pub mod terminal;
 
 pub use envelope::{Frame, Notification, Outcome, Request, RequestId, Response};
 pub use error::{ErrorCode, ProtocolError};
