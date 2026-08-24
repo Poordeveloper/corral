@@ -183,6 +183,8 @@ pub async fn run(channel: tokio::net::UnixStream) -> std::io::Result<()> {
 
     let raw = RawMode::enter()?;
     let (mut from_daemon, mut to_daemon) = channel.into_split();
+    // The epoch the daemon's first snapshot names; every later snapshot
+    // updates it.
     let epoch = Epoch(0);
 
     // Bounded: a person cannot type faster than this drains, and an unbounded
@@ -217,6 +219,10 @@ pub async fn run(channel: tokio::net::UnixStream) -> std::io::Result<()> {
     let mut pending = Vec::new();
     let mut buffer = [0_u8; 65536];
     let mut local = Geometry::of(&std::io::stdin());
+    // Adopted from what arrives rather than assumed: a resize opens a new
+    // epoch, and input still labelled with the old one names a screen shape
+    // that no longer exists.
+    let mut epoch = epoch;
 
     loop {
         tokio::select! {
@@ -226,6 +232,9 @@ pub async fn run(channel: tokio::net::UnixStream) -> std::io::Result<()> {
                     pending.extend_from_slice(&buffer[..read]);
                     while let Ok(Some((frame, consumed))) = TerminalFrame::decode(&pending) {
                         pending.drain(..consumed);
+                        if frame.kind == FrameKind::Snapshot {
+                            epoch = frame.epoch;
+                        }
                         apply(&frame, &mut stdout)?;
                     }
                 }

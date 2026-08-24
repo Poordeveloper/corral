@@ -1,7 +1,7 @@
 use super::*;
 use crate::runtime::spawn::PtyGeometry;
 
-const GEOMETRY: PtyGeometry = PtyGeometry { rows: 24, cols: 80 };
+const GEOMETRY: PtyGeometry = PtyGeometry::expect_valid(24, 80);
 
 fn terminal_with(lines: usize) -> AuthoritativeTerminal {
     let mut terminal = AuthoritativeTerminal::new(GEOMETRY);
@@ -98,14 +98,11 @@ fn a_snapshot_does_not_carry_the_palette() {
 /// ceiling — not a proof that every legitimate viewport does.
 #[test]
 fn an_approved_large_geometry_extreme_stays_far_below_the_ceiling() {
-    let geometry = PtyGeometry {
-        rows: 140,
-        cols: 500,
-    };
+    let geometry = PtyGeometry::expect_valid(140, 500);
     let mut terminal = AuthoritativeTerminal::new(geometry);
 
-    for row in 0..geometry.rows {
-        for col in 0..geometry.cols {
+    for row in 0..geometry.rows() {
+        for col in 0..geometry.cols() {
             let red = (col % 256) as u8;
             let green = (row % 256) as u8;
             let blue = ((col + row) % 256) as u8;

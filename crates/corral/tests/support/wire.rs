@@ -120,6 +120,11 @@ impl RawClient {
         (self.writer, self.reader)
     }
 
+    /// Send a hello and report whether the daemon closed instead of
+    /// answering.
+    ///
+    /// The write itself may fail once the daemon has closed, which is the same
+    /// answer: the connection is gone.
     pub fn say_hello_expecting_close(&mut self) -> bool {
         let mut line = serde_json::to_vec(&json!({
             "type": "request",

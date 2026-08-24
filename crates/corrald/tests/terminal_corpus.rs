@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use corrald::runtime::{AuthoritativeTerminal, PtyGeometry, encode};
 
-const GEOMETRY: PtyGeometry = PtyGeometry { rows: 24, cols: 80 };
+const GEOMETRY: PtyGeometry = PtyGeometry::expect_valid(24, 80);
 
 /// Generous enough that a slow machine never fails, tight enough that
 /// quadratic behaviour on a 100 KB input does.
@@ -175,11 +175,8 @@ fn every_corpus_case_survives_a_reflow() {
         let mut terminal = consume_all(&bytes, 997);
 
         let started = Instant::now();
-        terminal.resize(PtyGeometry {
-            rows: 60,
-            cols: 200,
-        });
-        terminal.resize(PtyGeometry { rows: 5, cols: 20 });
+        terminal.resize(PtyGeometry::expect_valid(60, 200));
+        terminal.resize(PtyGeometry::expect_valid(5, 20));
         terminal.resize(GEOMETRY);
 
         assert!(

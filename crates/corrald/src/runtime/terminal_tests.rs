@@ -1,6 +1,6 @@
 use super::*;
 
-const GEOMETRY: PtyGeometry = PtyGeometry { rows: 24, cols: 80 };
+const GEOMETRY: PtyGeometry = PtyGeometry::expect_valid(24, 80);
 
 fn terminal() -> AuthoritativeTerminal {
     AuthoritativeTerminal::new(GEOMETRY)
@@ -80,17 +80,11 @@ fn resize_moves_the_authoritative_geometry() {
     let mut terminal = terminal();
     assert_eq!(terminal.geometry(), Some(GEOMETRY));
 
-    terminal.resize(PtyGeometry {
-        rows: 40,
-        cols: 120,
-    });
+    terminal.resize(PtyGeometry::expect_valid(40, 120));
 
     assert_eq!(
         terminal.geometry(),
-        Some(PtyGeometry {
-            rows: 40,
-            cols: 120
-        })
+        Some(PtyGeometry::expect_valid(40, 120))
     );
 }
 
@@ -132,8 +126,8 @@ fn output_past_the_viewport_becomes_retained_history() {
         .pages
         .total_rows();
     assert!(
-        retained > usize::from(GEOMETRY.rows),
+        retained > usize::from(GEOMETRY.rows()),
         "200 lines through a {}-row screen retained only {retained} rows",
-        GEOMETRY.rows
+        GEOMETRY.rows()
     );
 }

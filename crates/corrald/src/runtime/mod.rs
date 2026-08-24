@@ -16,7 +16,6 @@
 
 mod attach;
 mod launch;
-mod pump;
 mod session;
 mod snapshot;
 mod spawn;
@@ -27,14 +26,17 @@ pub use attach::{
     ATTACH_TOKEN_TTL, AttachGrant, AttachRefused, AttachToken, AttachTokens, NoRandomness,
 };
 pub use launch::{LaunchRejection, LaunchRequest};
-pub use pump::{PumpEnd, pump};
 pub use session::{
-    ExecutionState, ManagedSession, ManagedSessions, SessionGone, SessionHandle, StartError, start,
+    Attachment, ExecutionState, ManagedSession, ManagedSessions, ResizeRefused, SessionGone,
+    SessionHandle, StartError, start,
 };
 pub use snapshot::{
     SNAPSHOT_CEILING_BYTES, SNAPSHOT_SCROLLBACK_ROWS, SNAPSHOT_TARGET_BYTES, Snapshot,
     SnapshotBudget, SnapshotError, encode, encode_within,
 };
-pub use spawn::{PtyGeometry, SpawnError, SpawnedRuntime, spawn};
-pub use stream::{Desynchronised, SUBSCRIBER_QUEUE_BYTES, Subscriber, TerminalStream};
+pub use spawn::{
+    ChildReaper, ImpossibleGeometry, MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, ManagedTerminal,
+    PtyGeometry, SpawnError, SpawnedRuntime, spawn,
+};
+pub use stream::{Delivery, Desynchronised, SUBSCRIBER_QUEUE_BYTES, TerminalStream, Viewer};
 pub use terminal::{AuthoritativeTerminal, DeviceReply, Poisoned, RETAINED_SCROLLBACK_BYTES};

@@ -272,6 +272,106 @@ fn detaching_leaves_the_session_running() {
     );
 }
 
+/// The streaming half of the design, and the one thing a snapshot cannot
+/// prove: output produced *after* a client attached arrives on its own,
+/// without the client asking for anything.
+///
+/// This test exists because an earlier version of the daemon sent snapshots
+/// and never a single delta, and every other test here passed anyway by
+/// polling for fresh snapshots.
+#[test]
+fn output_after_attaching_arrives_as_a_delta_without_being_asked_for() {
+    let account = TestAccount::new("deltas-flow");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+
+    // The child waits for a line, then writes — so the writing happens after
+    // the channel is open and the snapshot is already sent.
+    let started = start_session(
+        &mut client,
+        1,
+        &[
+            "/bin/sh",
+            "-c",
+            "read line; printf 'AFTER-ATTACH-MARKER'; sleep 30",
+        ],
+    );
+    let session = session_id(&started);
+    let granted = attach_token(&mut client, 2, &session);
+    let token = result(&granted)
+        .get("attach_token")
+        .and_then(Value::as_str)
+        .expect("a token")
+        .to_owned();
+
+    let mut channel = open_channel(&account, &token);
+    let (kind, _) = read_frame(&mut channel).expect("a snapshot");
+    assert_eq!(kind, 1, "the first frame on a channel is a snapshot");
+
+    let payload = b"go\n";
+    let mut frame = Vec::new();
+    frame.push(3_u8);
+    frame.extend_from_slice(&0_u64.to_be_bytes());
+    frame.extend_from_slice(&0_u64.to_be_bytes());
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(payload);
+    channel
+        .writer
+        .write_all(&frame)
+        .expect("the input was sent");
+
+    // Nothing is requested from here on: any bytes that arrive are the daemon
+    // pushing them.
+    let deadline = Instant::now() + SETTLE;
+    let mut seen = String::new();
+    let mut saw_delta = false;
+    while Instant::now() < deadline {
+        let Some((kind, payload)) = read_frame(&mut channel) else {
+            break;
+        };
+        if kind == 2 {
+            saw_delta = true;
+            seen.push_str(&String::from_utf8_lossy(&payload));
+            if seen.contains("AFTER-ATTACH-MARKER") {
+                break;
+            }
+        }
+    }
+
+    assert!(saw_delta, "the daemon never sent a delta frame");
+    assert!(
+        seen.contains("AFTER-ATTACH-MARKER"),
+        "output produced after attaching never reached the client: {seen:?}"
+    );
+}
+
+/// A client cannot ask for a size the daemon will not build. Four bytes must
+/// not be able to request billions of cells, or zero.
+#[test]
+fn a_session_refuses_a_geometry_it_will_not_build() {
+    let account = TestAccount::new("geometry-refused");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+
+    for (rows, cols) in [(0_u16, 80_u16), (24, 0), (60000, 60000)] {
+        let refused = client
+            .request(
+                1,
+                "session.new",
+                Some(json!({ "argv": ["/bin/sh"], "rows": rows, "cols": cols })),
+            )
+            .expect("session.new answered");
+
+        assert_eq!(
+            error_code(&refused),
+            Some("invalid_params"),
+            "{rows}x{cols} was accepted: {refused}"
+        );
+    }
+}
+
 /// Input a client sends reaches the child, and what the child does with it
 /// comes back on the screen.
 #[test]

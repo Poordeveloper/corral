@@ -70,7 +70,14 @@ impl AttachTokens {
     /// guessable one, and does not die either: the attach fails and everything
     /// already running keeps running.
     pub fn issue(&mut self, grant: AttachGrant) -> Result<AttachToken, NoRandomness> {
-        self.issue_at(grant, Instant::now())
+        let now = Instant::now();
+        // Swept here rather than on a timer: issuing is the only moment the
+        // map grows, so it is the only moment it can grow without bound. A
+        // client that asks for a token and never opens a channel — a crashed
+        // CLI, a retry loop — would otherwise leave an entry for the daemon's
+        // whole life.
+        self.discard_expired_at(now);
+        self.issue_at(grant, now)
     }
 
     /// Redeem a token, or refuse it.
@@ -82,14 +89,6 @@ impl AttachTokens {
     /// half-consumed token would be a branch where a capability comes back.
     pub fn redeem(&mut self, token: &AttachToken) -> Result<AttachGrant, AttachRefused> {
         self.redeem_at(token, Instant::now())
-    }
-
-    /// Drop grants nobody redeemed.
-    ///
-    /// Expiry is enforced at redemption, so this only reclaims memory; a
-    /// daemon that never swept would still never honour an expired token.
-    pub fn discard_expired(&mut self) {
-        self.discard_expired_at(Instant::now());
     }
 
     pub fn outstanding(&self) -> usize {

@@ -20,10 +20,7 @@ use crate::runtime::launch::{LaunchRejection, LaunchRequest};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-const GEOMETRY: PtyGeometry = PtyGeometry {
-    rows: 31,
-    cols: 113,
-};
+const GEOMETRY: PtyGeometry = PtyGeometry::expect_valid(31, 113);
 
 /// A scratch file removed however the test ends.
 struct Scratch(PathBuf);
@@ -190,11 +187,11 @@ fn pty_resize_round_trips() {
     );
 
     runtime
-        .resize(PtyGeometry { rows: 24, cols: 80 })
+        .resize(PtyGeometry::expect_valid(24, 80))
         .expect("resize the terminal");
     assert_eq!(
         runtime.geometry().expect("read the geometry back"),
-        PtyGeometry { rows: 24, cols: 80 }
+        PtyGeometry::expect_valid(24, 80)
     );
 
     use std::io::Write;

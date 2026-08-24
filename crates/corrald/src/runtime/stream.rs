@@ -18,9 +18,11 @@
 //! overflows, that viewer loses its incremental state and resyncs while the
 //! PTY, the screen, and every other viewer proceed untouched.
 
+#[cfg(test)]
 use std::collections::VecDeque;
 
 use corral_protocol::terminal::{Epoch, Sequence};
+use tokio::sync::mpsc::error::TrySendError;
 
 /// What one subscriber may have queued before it is considered desynchronised.
 ///
@@ -36,7 +38,12 @@ pub enum Desynchronised {
     QueueOverflow,
 }
 
-/// One viewer's position in the stream.
+/// One viewer's position in the stream, as a value.
+///
+/// Kept for the queue-policy tests that exercise the rules in isolation; the
+/// production path holds viewers inside `TerminalStream` so one call can
+/// deliver to all of them.
+#[cfg(test)]
 pub struct Subscriber {
     epoch: Epoch,
     next_sequence: Sequence,
@@ -45,11 +52,39 @@ pub struct Subscriber {
     desynchronised: Option<Desynchronised>,
 }
 
-/// The authoritative sequence and epoch a session's stream is at.
-#[derive(Debug)]
+/// One frame on its way to a viewer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Delivery {
+    pub epoch: Epoch,
+    pub sequence: Sequence,
+    pub bytes: Vec<u8>,
+}
+
+/// A viewer's end of the stream, held by whoever is writing to that client.
+///
+/// A tokio channel rather than a std one: the screen is filled by a plain
+/// thread, which can send into it, while the side that drains it is a
+/// connection task that must be able to wait on this and on its client's
+/// bytes at the same time.
+pub type Viewer = tokio::sync::mpsc::Receiver<Delivery>;
+
+/// One attached viewer, from the stream's side.
+struct Attached {
+    /// Bounded, so a client that stops reading cannot make the daemon hold
+    /// output without limit.
+    outbox: tokio::sync::mpsc::Sender<Delivery>,
+    queued_bytes: usize,
+    /// Set once this viewer can no longer be given a correct stream. It is
+    /// never un-set by more output: only a fresh snapshot recovers it.
+    desynchronised: Option<Desynchronised>,
+}
+
+/// The authoritative sequence and epoch a session's stream is at, and the
+/// viewers waiting on it.
 pub struct TerminalStream {
     epoch: Epoch,
     next_sequence: Sequence,
+    attached: Vec<Attached>,
 }
 
 impl TerminalStream {
@@ -57,7 +92,64 @@ impl TerminalStream {
         Self {
             epoch: Epoch(0),
             next_sequence: Sequence(0),
+            attached: Vec::new(),
         }
+    }
+
+    /// Attach a viewer, returning the end it reads from.
+    ///
+    /// It joins at the stream's current position: whoever attaches has just
+    /// been sent a snapshot of exactly that point, and anything earlier is
+    /// already on it.
+    pub fn attach(&mut self) -> Viewer {
+        // Bounded by frames rather than bytes at this hop; the byte budget is
+        // enforced below, where the size of each delivery is known.
+        let (outbox, viewer) = tokio::sync::mpsc::channel(256);
+        self.attached.push(Attached {
+            outbox,
+            queued_bytes: 0,
+            desynchronised: None,
+        });
+        viewer
+    }
+
+    pub fn viewers(&self) -> usize {
+        self.attached.len()
+    }
+
+    /// Hand output to every attached viewer.
+    ///
+    /// A viewer that cannot keep up loses its whole stream rather than a piece
+    /// of its middle: bytes missing from the centre would render a screen that
+    /// looks plausible and is wrong, which is worse than a visible resync. Its
+    /// neighbours and this call are unaffected — nothing a viewer does becomes
+    /// backpressure on the process producing the output.
+    pub fn deliver(&mut self, sequence: Sequence, bytes: &[u8]) {
+        let epoch = self.epoch;
+        for viewer in &mut self.attached {
+            if viewer.desynchronised.is_some() {
+                continue;
+            }
+            if viewer.queued_bytes + bytes.len() > SUBSCRIBER_QUEUE_BYTES {
+                viewer.desynchronise(Desynchronised::QueueOverflow);
+                continue;
+            }
+            match viewer.outbox.try_send(Delivery {
+                epoch,
+                sequence,
+                bytes: bytes.to_vec(),
+            }) {
+                Ok(()) => viewer.queued_bytes += bytes.len(),
+                // A full channel is the same fact as a full budget: this
+                // viewer is not keeping up. A closed one means the client
+                // detached. Both end this viewer's stream.
+                Err(TrySendError::Full(_) | TrySendError::Closed(_)) => {
+                    viewer.desynchronise(Desynchronised::QueueOverflow);
+                }
+            }
+        }
+        self.attached
+            .retain(|viewer| viewer.desynchronised.is_none());
     }
 
     pub fn epoch(&self) -> Epoch {
@@ -78,13 +170,18 @@ impl TerminalStream {
     /// Begin a new epoch after a reflow.
     ///
     /// The sequence restarts because a sequence only means anything within the
-    /// screen shape it was recorded against.
+    /// screen shape it was recorded against. Every viewer is dropped: each one
+    /// is owed a fresh snapshot at the new shape, and delivering pre-reflow
+    /// bytes to a replica that has reflowed is the divergence the epoch exists
+    /// to prevent.
     pub fn open_epoch(&mut self) -> Epoch {
         self.epoch = Epoch(self.epoch.0 + 1);
         self.next_sequence = Sequence(0);
+        self.attached.clear();
         self.epoch
     }
 
+    #[cfg(test)]
     pub fn subscriber(&self) -> Subscriber {
         Subscriber {
             epoch: self.epoch,
@@ -96,12 +193,30 @@ impl TerminalStream {
     }
 }
 
+impl Attached {
+    fn desynchronise(&mut self, reason: Desynchronised) {
+        self.desynchronised = Some(reason);
+        self.queued_bytes = 0;
+    }
+}
+
+impl std::fmt::Debug for TerminalStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalStream")
+            .field("epoch", &self.epoch)
+            .field("next_sequence", &self.next_sequence)
+            .field("viewers", &self.attached.len())
+            .finish()
+    }
+}
+
 impl Default for TerminalStream {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl Subscriber {
     /// A subscriber joining a stream at a known epoch.
     ///
@@ -183,6 +298,7 @@ impl Subscriber {
     }
 }
 
+#[cfg(test)]
 impl std::fmt::Debug for Subscriber {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Subscriber")

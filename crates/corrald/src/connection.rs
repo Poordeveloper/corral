@@ -15,9 +15,7 @@ use tracing::{debug, error, warn};
 
 use crate::lifecycle::{EstablishedGuard, Lifecycle, ShutdownReason};
 use crate::policy::DaemonPolicy;
-use crate::runtime::{
-    AttachGrant, AttachToken, LaunchRequest, ManagedSession, PtyGeometry, StartError,
-};
+use crate::runtime::{AttachGrant, AttachToken, LaunchRequest, ManagedSession, PtyGeometry};
 use crate::state::{DaemonState, Vouched};
 
 /// What a dispatched request produced.
@@ -77,6 +75,7 @@ pub async fn serve(
                 &mut raw_writer,
                 leftover,
                 grant.session,
+                grant.run,
                 &state,
             )
             .await;
@@ -422,18 +421,26 @@ fn session_new(request: &Request, state: &Arc<DaemonState>) -> Frame {
         }
     };
 
-    let geometry = PtyGeometry {
-        rows: params.rows.unwrap_or(24),
-        cols: params.cols.unwrap_or(80),
+    // A size from the wire is a request, not a fact: zero rows builds a page
+    // list the emulator only null-checks in debug, and an unbounded one asks
+    // the daemon to allocate an active area of any size at all.
+    let geometry = match PtyGeometry::new(params.rows.unwrap_or(24), params.cols.unwrap_or(80)) {
+        Ok(geometry) => geometry,
+        Err(impossible) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, impossible.to_string()),
+            );
+        }
     };
     let session = corral_core::CorralSessionId::mint();
     let run = corral_core::RunId::mint();
 
     let handle = match crate::runtime::start(&launch, geometry, session, run) {
         Ok(handle) => handle,
-        Err(StartError::Spawn(error)) => {
-            // The command never ran, so no Run exists to report. Saying
-            // otherwise would record a runtime occurrence that never happened.
+        // The command never ran, so no Run exists to report. Saying otherwise
+        // would record a runtime occurrence that never happened.
+        Err(error) => {
             return Frame::error(
                 id,
                 ProtocolError::new(ErrorCode::InvalidParams, error.to_string()),
@@ -495,7 +502,11 @@ fn terminal_attach(request: &Request, state: &Arc<DaemonState>) -> Frame {
         // terminal of the process that replaced it (grill Q2).
         let handle = runtime.sessions.get(session)?;
         let run = handle.run();
-        let geometry = handle.geometry().ok()?;
+        // The last size the screen thread published, not a question asked of
+        // it: this runs on the daemon's one reactor thread while holding the
+        // runtime lock, so a round trip here would block every other
+        // connection behind whatever that session happens to be doing.
+        let geometry = handle.last_geometry();
         let token = runtime
             .attach_tokens
             .issue(AttachGrant { session, run })
@@ -507,8 +518,8 @@ fn terminal_attach(request: &Request, state: &Arc<DaemonState>) -> Frame {
         Some(Some((token, run, geometry))) => match serde_json::to_value(TerminalAttachResult {
             attach_token: token.to_wire(),
             run_id: run.to_string(),
-            rows: geometry.rows,
-            cols: geometry.cols,
+            rows: geometry.rows(),
+            cols: geometry.cols(),
         }) {
             Ok(value) => Frame::result(id, value),
             Err(source) => Frame::error(

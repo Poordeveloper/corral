@@ -71,8 +71,8 @@ pub struct AuthoritativeTerminal {
 impl AuthoritativeTerminal {
     pub fn new(geometry: PtyGeometry) -> Self {
         let terminal = Terminal::new(Options {
-            cols: geometry.cols,
-            rows: geometry.rows,
+            cols: geometry.cols(),
+            rows: geometry.rows(),
             max_scrollback: RETAINED_SCROLLBACK_BYTES,
             ..Options::default()
         });
@@ -138,7 +138,7 @@ impl AuthoritativeTerminal {
         }
         self.stream
             .terminal_mut()
-            .resize(geometry.cols, geometry.rows);
+            .resize(geometry.cols(), geometry.rows());
     }
 
     /// The screen's size, or `None` once the screen may no longer be read.
@@ -152,10 +152,9 @@ impl AuthoritativeTerminal {
             return None;
         }
         let terminal = &self.stream.handler.terminal;
-        Some(PtyGeometry {
-            rows: terminal.rows,
-            cols: terminal.cols,
-        })
+        // The emulator's own size, which came from a validated geometry and
+        // cannot have become invalid since.
+        Some(PtyGeometry::expect_valid(terminal.rows, terminal.cols))
     }
 
     /// The window title the child set, if it set one.

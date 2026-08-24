@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::*;
 
-const GEOMETRY: PtyGeometry = PtyGeometry { rows: 24, cols: 80 };
+const GEOMETRY: PtyGeometry = PtyGeometry::expect_valid(24, 80);
 
 fn request(program: &str, args: &[&str]) -> LaunchRequest {
     LaunchRequest::new(
@@ -76,12 +76,12 @@ fn the_session_title_is_the_program_not_its_arguments() {
 #[test]
 fn a_resize_opens_a_new_epoch_and_moves_the_authoritative_geometry() {
     let handle = started("sleep 30");
-    let wanted = PtyGeometry {
-        rows: 40,
-        cols: 120,
-    };
+    let wanted = PtyGeometry::expect_valid(40, 120);
 
-    let epoch = handle.resize(wanted).expect("the session answered");
+    let epoch = handle
+        .resize(wanted)
+        .expect("the session answered")
+        .expect("the terminal took the size");
 
     assert_eq!(epoch, Epoch(1), "the first resize opened the first epoch");
     assert_eq!(handle.geometry().expect("the session answered"), wanted);
@@ -92,14 +92,13 @@ fn successive_resizes_open_successive_epochs() {
     let handle = started("sleep 30");
 
     let first = handle
-        .resize(PtyGeometry { rows: 30, cols: 90 })
-        .expect("answered");
+        .resize(PtyGeometry::expect_valid(30, 90))
+        .expect("answered")
+        .expect("took");
     let second = handle
-        .resize(PtyGeometry {
-            rows: 50,
-            cols: 100,
-        })
-        .expect("answered");
+        .resize(PtyGeometry::expect_valid(50, 100))
+        .expect("answered")
+        .expect("took");
 
     assert!(second > first);
 }
@@ -155,8 +154,7 @@ fn an_observed_exit_is_reported_as_exited() {
     let mut sessions = ManagedSessions::new();
     let handle = started("printf 'done\r\n'");
 
-    let exited =
-        wait_for(|| matches!(handle.execution_state(), Ok(ExecutionState::Exited)).then_some(()));
+    let exited = wait_for(|| (handle.execution_state() == ExecutionState::Exited).then_some(()));
     assert!(exited.is_some(), "the daemon never observed the exit");
 
     sessions.insert(handle);
@@ -172,8 +170,7 @@ fn an_observed_exit_is_reported_as_exited() {
 fn a_finished_sessions_screen_is_still_readable() {
     let handle = started(r"printf '\033]2;finished\007'");
 
-    let exited =
-        wait_for(|| matches!(handle.execution_state(), Ok(ExecutionState::Exited)).then_some(()));
+    let exited = wait_for(|| (handle.execution_state() == ExecutionState::Exited).then_some(()));
     assert!(exited.is_some(), "the daemon never observed the exit");
 
     let snapshot = handle

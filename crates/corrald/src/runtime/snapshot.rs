@@ -187,7 +187,7 @@ fn retained_scrollback_rows(terminal: &AuthoritativeTerminal) -> usize {
         .active()
         .pages
         .total_rows()
-        .saturating_sub(usize::from(geometry.rows))
+        .saturating_sub(usize::from(geometry.rows()))
 }
 
 /// Serialize the viewport plus `scrollback_rows` of history.
@@ -196,7 +196,7 @@ fn render(terminal: &AuthoritativeTerminal, scrollback_rows: usize) -> Vec<u8> {
         return Vec::new();
     };
     let total_rows = inner.screens.active().pages.total_rows();
-    let viewport_rows = usize::from(geometry.rows);
+    let viewport_rows = usize::from(geometry.rows());
     let first_row = total_rows.saturating_sub(viewport_rows + scrollback_rows);
 
     let content = match total_rows.checked_sub(1) {
