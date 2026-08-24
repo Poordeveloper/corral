@@ -16,7 +16,7 @@
 | Instrumentation | AddressSanitizer (cargo-fuzz default), `-rss_limit_mb=4096`, `-timeout=30` |
 | Platform | macOS 15.5, arm64 (Apple silicon) |
 | Seeds | the twenty curated cases in `crates/corrald/tests/corpus/terminal` |
-| Duration | two runs: ~15 min and ~10 min wall clock |
+| Duration | three runs: ~15 min, ~10 min, and ~10 min wall clock |
 
 The target steers geometry and chunk size from the input rather than fixing
 them, because a sequence torn across a read is the ordinary case on a PTY and
@@ -95,13 +95,39 @@ What the user sees: the session's process keeps running and its execution
 state is unaffected, but its terminal cannot be attached or snapshotted. That
 is a real degradation, and it is the honest one.
 
+### What the target asserts now
+
+The first two runs rediscovered the same panic, because `libfuzzer-sys`
+prints and aborts on every panic before Corral's `catch_unwind` can see it.
+Left alone, the nightly job would fail every night on a defect that is
+already known, contained, and recorded — which trains people to ignore a
+red job, the worst outcome available.
+
+So the target checks **Corral's** contract rather than upstream's: it
+silences the panic hook, and asserts that a screen marked poisoned answers
+nothing — no snapshot, no geometry, no title. Silencing does not weaken it.
+`libfuzzer-sys` still wraps the body in its own `catch_unwind` and aborts on
+anything that escapes, so a panic Corral does *not* contain is still a crash.
+What changed is that a panic Corral *does* contain became a property under
+test instead of a run thrown away.
+
+The third run, after that change, executed 51,956 inputs in 601 seconds and found nothing.
+
 ## Open for the founder
 
 1. **Vendor `qwertty-term-vt` and patch the two slices, or wait for
    upstream?** Vendoring makes sessions survive long non-ASCII titles now, at
-   the cost of carrying 2.6 MB of third-party source. Waiting keeps the tree
-   small and leaves a reachable session-losing defect in place behind the
-   containment.
+   the cost of carrying 2.6 MB across 96 files — a different proposition from
+   the one-hunk `portable-pty` precedent. Waiting keeps the tree small and
+   leaves a reachable session-losing defect behind the containment.
+
+   A third option was examined and is **not** recommended: Corral could
+   implement the `Handler` trait itself, delegating all 83 methods to the
+   upstream handler and overriding only the two broken ones. Every method has
+   a default no-op body, so a delegation left out — by a mistake now, or by
+   upstream adding a method later — would silently drop terminal behaviour
+   rather than fail to compile. That is a worse failure mode than either
+   carrying the source or waiting.
 2. **Does the containment need a user-visible surface?** Today a poisoned
    terminal simply refuses. Whether a person is told *why* their session's
    screen went away belongs to the phase that owns attention and surfacing.

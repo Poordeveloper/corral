@@ -15,7 +15,22 @@
 use corrald::runtime::{AuthoritativeTerminal, PtyGeometry, encode};
 use libfuzzer_sys::fuzz_target;
 
+/// libfuzzer-sys prints and aborts on every panic, which would make this
+/// target rediscover a contained upstream defect forever
+/// (`docs/evidence/pr3-terminal-fuzz-2026-08-24.md`). Silencing the hook does
+/// not weaken the target: libfuzzer-sys still wraps the body in its own
+/// `catch_unwind` and aborts on anything that escapes, so a panic Corral does
+/// *not* contain is still a crash. What changes is that a panic Corral *does*
+/// contain becomes a property to check rather than a run to throw away.
+fn quiet_panics() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| std::panic::set_hook(Box::new(|_| {})));
+}
+
 fuzz_target!(|data: &[u8]| {
+    quiet_panics();
+
     if data.len() < 3 {
         return;
     }
@@ -42,5 +57,15 @@ fuzz_target!(|data: &[u8]| {
         cols: cols.saturating_add(13).min(1000),
     });
 
-    let _ = encode(&terminal);
+    let snapshot = encode(&terminal);
+
+    // The property Corral owns: a screen whose parser failed is never read
+    // from again. Reading a structure a panic left half-modified is unsound,
+    // so a poisoned screen that still answered anything would be a real
+    // finding — one this target must fail on.
+    if terminal.poisoned().is_some() {
+        assert!(snapshot.is_err(), "a poisoned screen produced a snapshot");
+        assert!(terminal.geometry().is_none(), "a poisoned screen stated a size");
+        assert!(terminal.title().is_none(), "a poisoned screen stated a title");
+    }
 });
