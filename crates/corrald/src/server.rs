@@ -31,7 +31,12 @@ pub async fn serve(socket: &Path, policy: DaemonPolicy, state: Arc<DaemonState>)
     let lifecycle = Lifecycle::new(Instant::now());
     let mut shutdown = lifecycle.subscribe();
 
-    tokio::spawn(watch_idle(Arc::clone(&lifecycle), policy.idle_grace));
+    let counted = Arc::clone(&state);
+    tokio::spawn(watch_idle(
+        Arc::clone(&lifecycle),
+        policy.idle_grace,
+        move || counted.live_sessions(),
+    ));
     tokio::spawn(watch_signals(Arc::clone(&lifecycle)));
 
     info!(endpoint = %socket.display(), "corrald is serving");
@@ -65,6 +70,20 @@ pub async fn serve(socket: &Path, policy: DaemonPolicy, state: Arc<DaemonState>)
         established = lifecycle.established_clients(),
         "corrald is shutting down"
     );
+    // Named one at a time, not counted. A managed run ending because the
+    // daemon did is the one shutdown consequence worth being able to see
+    // afterwards, and a number cannot tell anyone which run it was
+    // (ADR 0007 L6). Corral does not wait for these children and does not
+    // reap them, so it never claims they exited — their terminals are hung up
+    // by the kernel when this process closes the last descriptor of each.
+    for session in state.running_sessions() {
+        info!(
+            session = %session.session,
+            run = %session.run,
+            title = %session.title,
+            "a managed run is ending because corrald is",
+        );
+    }
     lifecycle.mark_exited();
     debug_assert_eq!(lifecycle.phase(), Phase::Exited);
     Ok(())

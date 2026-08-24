@@ -17,8 +17,13 @@ mod connection;
 mod lifecycle;
 mod platform;
 mod policy;
+/// The managed runtime. Public because the lifecycle scenarios this crate owes
+/// — detach, disconnect, restart, crash, unverifiable exit — are integration
+/// tests, and an integration test reaches only what the library exposes.
+pub mod runtime;
 mod server;
 mod state;
+mod terminal_channel;
 
 use std::fmt;
 use std::process::ExitCode;

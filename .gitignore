@@ -1,5 +1,13 @@
 # Build output
 /target/
+/fuzz/target/
+/fuzz/Cargo.lock
+
+# What a fuzz run found, before it has been minimized. The durable product of
+# a crash is its minimized reproducer in crates/corrald/tests/corpus/terminal,
+# not the raw artifact (docs/decisions/2026-08-24-pr3-plan-grill.md).
+/fuzz/artifacts/
+/fuzz/corpus/
 
 # macOS
 .DS_Store

@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use corral_state::{FatalState, Refusal, StateError, Store};
 
+use crate::runtime::{AttachTokens, ManagedSessions};
+
 /// What the registry said when asked whether it can still vouch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Vouched {
@@ -24,10 +26,25 @@ pub enum Vouched {
 /// other connection, the idle watchdog, and the signal handler along with it.
 pub struct DaemonState {
     store: Mutex<Store>,
+
     /// Set when a store call could not complete at all. The store latches its
     /// own conclusions, but it never saw this one, and the exit status is read
     /// from here.
     unreachable: AtomicBool,
+    /// The sessions this daemon is running, and the tokens it has issued for
+    /// their terminals.
+    ///
+    /// Live runtime state, deliberately beside the store rather than in it:
+    /// a running process is runtime-owned truth and is never persisted as
+    /// fact (AGENTS.md §Durable state).
+    runtime: Mutex<Runtime>,
+}
+
+/// The live runtime a daemon owns for the length of its own life.
+#[derive(Default)]
+pub struct Runtime {
+    pub sessions: ManagedSessions,
+    pub attach_tokens: AttachTokens,
 }
 
 impl DaemonState {
@@ -40,6 +57,7 @@ impl DaemonState {
         Ok(Self {
             store: Mutex::new(Store::open(registry)?),
             unreachable: AtomicBool::new(false),
+            runtime: Mutex::new(Runtime::default()),
         })
     }
 
@@ -65,6 +83,53 @@ impl DaemonState {
             Err(StateError::Refused(Refusal::Busy { .. })) => Ok(Vouched::NotNow),
             Err(other) => Err(other),
         }
+    }
+
+    /// How many managed runs are still running.
+    ///
+    /// Answered rather than announced: the idle check asks at the moment it
+    /// decides, so no caller can forget to report a change and leave a daemon
+    /// exiting under live work. Zero when the registry cannot be read, which
+    /// only delays an exit rather than causing one.
+    pub fn live_sessions(&self) -> usize {
+        self.runtime
+            .lock()
+            .map(|runtime| runtime.sessions.live())
+            .unwrap_or(0)
+    }
+
+    /// The managed runs this daemon still believes are running.
+    ///
+    /// For shutdown, which has to be able to name what it is about to end
+    /// rather than count it (ADR 0007 L6). Empty when the runtime cannot be
+    /// consulted: a shutdown does not stall on a lock, and silence is the
+    /// honest report when nothing can be read.
+    pub fn running_sessions(&self) -> Vec<crate::runtime::ManagedSession> {
+        self.with_runtime(|runtime| {
+            runtime
+                .sessions
+                .describe()
+                .into_iter()
+                .filter(|session| {
+                    session.execution_state == crate::runtime::ExecutionState::Running
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Work with the live runtime.
+    ///
+    /// Synchronous and short: these calls touch in-memory state and message a
+    /// session's own thread, so they never wait on a process the way a store
+    /// call can wait on a database.
+    pub fn with_runtime<T>(&self, work: impl FnOnce(&mut Runtime) -> T) -> Option<T> {
+        // A poisoned lock means a holder panicked mid-mutation, which is not
+        // something to paper over: the caller answers with what it says when
+        // the runtime cannot be consulted rather than reading state nobody
+        // finished writing.
+        let mut runtime = self.runtime.lock().ok()?;
+        Some(work(&mut runtime))
     }
 
     /// Whether the registry has concluded it can no longer vouch for durable

@@ -89,6 +89,32 @@ impl RawClient {
         self.receive().expect("the daemon answered the hello")
     }
 
+    /// A hello that claims the terminal-data role by redeeming a token.
+    pub fn say_hello_with_role(&mut self, attach_token: &str) -> Value {
+        let versions = corral_protocol::local_versions();
+        self.send(&json!({
+            "type": "request",
+            "id": 0,
+            "method": "hello",
+            "params": {
+                "protocol_version": versions.protocol_version,
+                "min_compatible_peer_version": versions.min_compatible_peer_version,
+                "role": { "kind": "terminal_data", "attach_token": attach_token },
+            },
+        }));
+        self.receive().expect("the daemon answered the hello")
+    }
+
+    /// Give up JSON framing and return the halves, for a connection that has
+    /// transitioned to terminal frames.
+    ///
+    /// The reader is the buffered one: the daemon sends the first snapshot
+    /// immediately after the hello, so those bytes may already be buffered and
+    /// dropping them would lose the screen the test came for.
+    pub fn into_parts(self) -> (UnixStream, BufReader<UnixStream>) {
+        (self.writer, self.reader)
+    }
+
     /// Send a hello and report whether the daemon closed instead of
     /// answering.
     ///

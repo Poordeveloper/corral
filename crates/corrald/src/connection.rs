@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
-use corral_protocol::method::{self, PingResult, SessionListResult};
+use corral_protocol::method::{
+    self, PingResult, SessionListItem, SessionListResult, SessionNewParams, SessionNewResult,
+    TerminalAttachParams, TerminalAttachResult,
+};
 use corral_protocol::{
-    ClientHello, Compatibility, ErrorCode, Frame, FrameError, FrameReader, FrameWriter,
-    ProtocolError, Request, RequestId, ServerHello, compatible, local_versions,
+    ClientHello, Compatibility, ConnectionRole, ErrorCode, Frame, FrameError, FrameReader,
+    FrameWriter, ProtocolError, Request, RequestId, ServerHello, compatible, local_versions,
 };
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -12,6 +15,7 @@ use tracing::{debug, error, warn};
 
 use crate::lifecycle::{EstablishedGuard, Lifecycle, ShutdownReason};
 use crate::policy::DaemonPolicy;
+use crate::runtime::{AttachGrant, AttachToken, LaunchRequest, ManagedSession, PtyGeometry};
 use crate::state::{DaemonState, Vouched};
 
 /// What a dispatched request produced.
@@ -44,12 +48,12 @@ pub async fn serve(
     let mut reader = FrameReader::new(read_half);
     let mut writer = FrameWriter::new(write_half);
 
-    let established = tokio::select! {
+    let (established, role) = tokio::select! {
         outcome = tokio::time::timeout(
             policy.pre_hello_deadline,
-            bootstrap(&mut reader, &mut writer, &lifecycle),
+            bootstrap(&mut reader, &mut writer, &lifecycle, &state),
         ) => match outcome {
-            Ok(Some(guard)) => guard,
+            Ok(Some(bootstrapped)) => bootstrapped,
             Ok(None) => return,
             Err(_elapsed) => {
                 debug!("a pending connection did not say hello before the deadline");
@@ -59,7 +63,27 @@ pub async fn serve(
         _ = shutdown.changed() => return,
     };
 
-    serve_established(&mut reader, &mut writer, &mut shutdown, &lifecycle, &state).await;
+    match role {
+        // A connection that redeemed a token stops being an RPC connection
+        // here, permanently. There is no path back, which is what keeps the
+        // two framings from ever having to share a stream.
+        Some(grant) => {
+            let (mut raw_reader, leftover) = reader.into_parts();
+            let mut raw_writer = writer.into_inner();
+            crate::terminal_channel::serve(
+                &mut raw_reader,
+                &mut raw_writer,
+                leftover,
+                grant.session,
+                grant.run,
+                &state,
+            )
+            .await;
+        }
+        None => {
+            serve_established(&mut reader, &mut writer, &mut shutdown, &lifecycle, &state).await;
+        }
+    }
     drop(established);
 }
 
@@ -72,7 +96,8 @@ async fn bootstrap(
     reader: &mut FrameReader<OwnedReadHalf>,
     writer: &mut FrameWriter<OwnedWriteHalf>,
     lifecycle: &Arc<Lifecycle>,
-) -> Option<EstablishedGuard> {
+    state: &Arc<DaemonState>,
+) -> Option<(EstablishedGuard, Option<AttachGrant>)> {
     let frame = match reader.read_frame().await {
         Ok(Some(frame)) => frame,
         Ok(None) => return None,
@@ -156,13 +181,67 @@ async fn bootstrap(
     // Establish before answering: between the decision and the answer, an idle
     // shutdown must not be able to commit behind this client's back.
     let guard = lifecycle.establish()?;
+
+    // Redeemed only now. A token is single-use, so consuming it before the
+    // connection is certain to be served would spend a client's capability on
+    // a connection that then closed with no answer at all.
+    let role = match hello.role.as_ref() {
+        None => None,
+        // A role this build does not serve carried no token at all, so saying
+        // the token is bad would send a client looking for a problem it does
+        // not have. The decode already keeps the two facts apart; so does this.
+        Some(ConnectionRole::Unknown { kind }) => {
+            let _ = writer
+                .write_frame(&Frame::error(
+                    request.id,
+                    ProtocolError::new(
+                        ErrorCode::InvalidParams,
+                        format!("this daemon does not serve the {kind} role"),
+                    ),
+                ))
+                .await;
+            return None;
+        }
+        Some(role) => match redeem_role(role, state) {
+            Some(grant) => Some(grant),
+            None => {
+                let _ = writer
+                    .write_frame(&Frame::error(
+                        request.id,
+                        ProtocolError::new(
+                            ErrorCode::ProtocolViolation,
+                            "the attach token is not redeemable",
+                        ),
+                    ))
+                    .await;
+                return None;
+            }
+        },
+    };
+
     if write_hello(writer, request.id, &server_hello)
         .await
         .is_err()
     {
         return None;
     }
-    Some(guard)
+    Some((guard, role))
+}
+
+/// Redeem a terminal-data role's token.
+///
+/// Redemption is one step and consumption is final: a caller whose channel
+/// then fails asks for another token rather than reviving a spent one
+/// (grill Q2).
+fn redeem_role(role: &ConnectionRole, state: &Arc<DaemonState>) -> Option<AttachGrant> {
+    // A role this build does not serve is refused as a role, not treated as a
+    // malformed hello: the client stated a version this daemon can compare and
+    // asked for something it does not have.
+    let ConnectionRole::TerminalData { attach_token } = role else {
+        return None;
+    };
+    let token = AttachToken::from_wire(attach_token)?;
+    state.with_runtime(|runtime| runtime.attach_tokens.redeem(&token).ok())?
 }
 
 async fn write_hello(
@@ -260,9 +339,7 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             // refused for any other reason is a store this build cannot
             // explain, and uncertainty resolves to the stricter path.
             Ok(()) => match state.vouch().await {
-                Ok(Vouched::Yes) => {
-                    Dispatch::Reply(Frame::result(id, SessionListResult::empty_wire_value()))
-                }
+                Ok(Vouched::Yes) => Dispatch::Reply(session_list(id, state)),
                 // A fixed message: the engine's own text names tables, columns
                 // and paths, and a protocol error crosses the socket.
                 Ok(Vouched::NotNow) => Dispatch::Reply(Frame::error(
@@ -273,6 +350,26 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             },
             Err(error) => Dispatch::Reply(Frame::error(id, error)),
         },
+        // A mutation must not be admitted under the condition a read is
+        // refused. Without this, a daemon that cannot vouch for durable truth
+        // would still fork children and mint terminal capabilities while
+        // refusing to list what it had just created.
+        method::SESSION_NEW => match state.vouch().await {
+            Ok(Vouched::Yes) => Dispatch::Reply(session_new(request, state).await),
+            Ok(Vouched::NotNow) => Dispatch::Reply(Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::Busy, "the registry is held by another writer"),
+            )),
+            Err(error) => Dispatch::FailClosed(error),
+        },
+        method::TERMINAL_ATTACH => match state.vouch().await {
+            Ok(Vouched::Yes) => Dispatch::Reply(terminal_attach(request, state)),
+            Ok(Vouched::NotNow) => Dispatch::Reply(Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::Busy, "the registry is held by another writer"),
+            )),
+            Err(error) => Dispatch::FailClosed(error),
+        },
         // A compatibility safety net, not how features are discovered: the
         // connection stays usable.
         other => Dispatch::Reply(Frame::error(
@@ -282,6 +379,237 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
                 format!("this daemon speaks protocol 1 and does not serve {other}"),
             ),
         )),
+    }
+}
+
+/// The sessions this daemon runs, in the wire's first concrete session shape.
+fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
+    let Some(described) = state.with_runtime(|runtime| runtime.sessions.describe()) else {
+        return Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::Busy, "the runtime could not be consulted"),
+        );
+    };
+
+    let sessions: Vec<serde_json::Value> = described.iter().map(encode_session).collect();
+    match serde_json::to_value(SessionListResult { sessions }) {
+        Ok(value) => Frame::result(id, value),
+        Err(source) => Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+        ),
+    }
+}
+
+fn encode_session(session: &ManagedSession) -> serde_json::Value {
+    serde_json::to_value(SessionListItem {
+        session_id: session.session.to_string(),
+        title: session.title.clone(),
+        execution_state: session.execution_state.as_str().to_owned(),
+    })
+    .unwrap_or_else(|_| serde_json::json!({}))
+}
+
+/// Create a session on the blocking pool.
+///
+/// `openpty` plus fork and exec can take a while under memory pressure, and
+/// `LaunchRequest::new` stats the working directory. On the daemon's one
+/// reactor thread that window is one where nothing else is served — the same
+/// cost every other call here goes out of its way to avoid.
+async fn start_off_the_reactor(
+    launch: LaunchRequest,
+    geometry: PtyGeometry,
+    session: corral_core::CorralSessionId,
+    run: corral_core::RunId,
+) -> Result<crate::runtime::SessionHandle, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::runtime::start(&launch, geometry, session, run).map_err(|error| error.to_string())
+    })
+    .await
+    .unwrap_or_else(|_| Err("the session could not be started".to_owned()))
+}
+
+/// Start a managed session and its first Run.
+async fn session_new(request: &Request, state: &Arc<DaemonState>) -> Frame {
+    let id = request.id;
+    let params: SessionNewParams = match request.params.clone() {
+        Some(params) => match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(source) => {
+                return Frame::error(
+                    id,
+                    ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+                );
+            }
+        },
+        None => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, "session.new needs a command"),
+            );
+        }
+    };
+
+    let Some((program, arguments)) = params.argv.split_first() else {
+        return Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::InvalidParams, "session.new needs a command"),
+        );
+    };
+
+    // An absent working directory is the caller having no preference, so the
+    // daemon supplies one. A directory the caller named and the daemon cannot
+    // use is refused rather than quietly replaced.
+    let working_directory = params
+        .cwd
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+
+    let launch = match LaunchRequest::new(
+        program,
+        arguments.iter().map(std::ffi::OsString::from),
+        &working_directory,
+    ) {
+        Ok(launch) => launch,
+        Err(refusal) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, refusal.to_string()),
+            );
+        }
+    };
+
+    // A size from the wire is a request, not a fact: zero rows builds a page
+    // list the emulator only null-checks in debug, and an unbounded one asks
+    // the daemon to allocate an active area of any size at all.
+    let geometry = match PtyGeometry::new(params.rows.unwrap_or(24), params.cols.unwrap_or(80)) {
+        Ok(geometry) => geometry,
+        Err(impossible) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, impossible.to_string()),
+            );
+        }
+    };
+    let session = corral_core::CorralSessionId::mint();
+    let run = corral_core::RunId::mint();
+
+    let handle = match start_off_the_reactor(launch, geometry, session, run).await {
+        Ok(handle) => handle,
+        // The command never ran, so no Run exists to report. Saying otherwise
+        // would record a runtime occurrence that never happened.
+        Err(error) => {
+            return Frame::error(id, ProtocolError::new(ErrorCode::InvalidParams, error));
+        }
+    };
+
+    // The child is already running by now, so the handle must not simply be
+    // dropped if the registry cannot take it: the reader thread holds another
+    // sender, so dropping this one would leave a live process and its screen
+    // running unreachable for the daemon's lifetime.
+    // Held outside the closure so a lock the daemon could not take does not
+    // drop it: the closure would never run and the handle would go with it.
+    let mut pending = Some(handle);
+    let stored = state.with_runtime(|runtime| {
+        if let Some(handle) = pending.take() {
+            runtime.sessions.insert(handle);
+        }
+    });
+    if stored.is_none() {
+        if let Some(orphaned) = pending.take() {
+            orphaned.shut_down();
+        }
+        return Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::Busy, "the runtime could not be consulted"),
+        );
+    }
+
+    match serde_json::to_value(SessionNewResult {
+        session_id: session.to_string(),
+        run_id: run.to_string(),
+    }) {
+        Ok(value) => Frame::result(id, value),
+        Err(source) => Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+        ),
+    }
+}
+
+/// Issue a one-time token for a terminal data channel.
+fn terminal_attach(request: &Request, state: &Arc<DaemonState>) -> Frame {
+    let id = request.id;
+    let params: TerminalAttachParams = match request.params.clone() {
+        Some(params) => match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(source) => {
+                return Frame::error(
+                    id,
+                    ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+                );
+            }
+        },
+        None => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, "terminal.attach needs a session"),
+            );
+        }
+    };
+
+    let Ok(session) = params.session_id.parse::<corral_core::CorralSessionId>() else {
+        return Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::InvalidParams, "that is not a session id"),
+        );
+    };
+
+    let issued = state.with_runtime(|runtime| {
+        // The token names the Run, not just the Session: a Session outlives
+        // its Runs, and a token that survived a resume must not open the
+        // terminal of the process that replaced it (grill Q2).
+        let handle = runtime.sessions.get(session)?;
+        let run = handle.run();
+        // The last size the screen thread published, not a question asked of
+        // it: this runs on the daemon's one reactor thread while holding the
+        // runtime lock, so a round trip here would block every other
+        // connection behind whatever that session happens to be doing.
+        let geometry = handle.last_geometry();
+        let token = runtime
+            .attach_tokens
+            .issue(AttachGrant { session, run })
+            .ok()?;
+        Some((token, run, geometry))
+    });
+
+    match issued {
+        Some(Some((token, run, geometry))) => match serde_json::to_value(TerminalAttachResult {
+            attach_token: token.to_wire(),
+            run_id: run.to_string(),
+            rows: geometry.rows(),
+            cols: geometry.cols(),
+        }) {
+            Ok(value) => Frame::result(id, value),
+            Err(source) => Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+            ),
+        },
+        // No such session, a runtime that stopped answering, or an OS that
+        // could not supply randomness. Each is a refusal to open a channel;
+        // none of them says anything about a process's fate.
+        Some(None) => Frame::error(
+            id,
+            ProtocolError::new(
+                ErrorCode::InvalidParams,
+                "no terminal is available for that session",
+            ),
+        ),
+        None => Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::Busy, "the runtime could not be consulted"),
+        ),
     }
 }
 

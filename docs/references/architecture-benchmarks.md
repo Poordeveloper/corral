@@ -57,7 +57,7 @@ rejected alternative → confidence → remaining gap.
 - Evidence: Herdr: one server owns every PTY (thread-per-PTY poll actor), process groups / Windows Job Objects (KILL_ON_JOB_CLOSE), ghostty-vt per pane, detach/reattach + live handoff, e2e-tested (`tests/live_handoff.rs` counts /proc ptmx fds). Zed: client-owned PTYs die on disconnect — the product gap Corral closes; remote_server holds no PTYs and is killed on reconnect. Orca: 4-way split ownership → second protocol, 23-defect endpoint-ownership saga.
 - Decision: one corrald owns PTYs + process lifetime + authoritative VT + runtime truth; upgrades via Herdr-style live handoff (Unix); crash = no survival guarantee + no-lying reconciliation; Windows (deferred) = job objects + restore + provider resume, **no ConPTY handoff**.
 - Rejected: second permanent PTY daemon; client-owned PTYs; Electron-app-as-runtime.
-- Confidence: high (three independent confirmations incl. one by counterexample). Gap closed by ADR 0003 (D6/D7): attach/resync carries up to 2,000 recent rows under an encoded budget, with honest truncation metadata.
+- Confidence: high (three independent confirmations incl. one by counterexample). Gap closed by ADR 0003 (D6/D7): attach/resync carries up to 2,000 recent rows under an encoded budget, with honest truncation metadata. One deliberate divergence from Herdr, fixed by ADR 0007 (L2): Corral's per-PTY actor ends with the runtime it serves rather than persisting — a finished run's screen is a published value, so a daemon holding many finished sessions holds snapshots, not threads and emulators.
 
 ### 4. Daemon / client boundary
 - Strongest: Codex (primary), Herdr (guardrail), OpenCode (layering + in-memory transport).

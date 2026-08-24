@@ -23,6 +23,77 @@ pub struct ClientHello {
     /// empty set — feature eligibility, never protocol incompatibility.
     #[serde(default)]
     pub capabilities: BTreeSet<String>,
+    /// The role this connection claims.
+    ///
+    /// Absent is the semantic RPC role every connection has always had, so an
+    /// older client's hello means exactly what it always meant. Present with
+    /// the terminal-data role plus a token turns this connection into a
+    /// terminal data channel — a one-way transition: it never carries RPC
+    /// again (ADR 0003, grill Q2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<ConnectionRole>,
+}
+
+/// What a connection is for.
+///
+/// An unknown kind decodes into `Unknown` rather than failing, so a client
+/// that claims a role a newer build serves is answered — refused for the role
+/// it asked for, not rejected as though its hello were malformed. A malformed
+/// hello and an unsupported role are different facts and get different
+/// answers (AGENTS.md §Protocol).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConnectionRole {
+    /// A terminal data channel, redeeming a token from `terminal.attach`.
+    TerminalData { attach_token: String },
+    /// A role this build does not serve. The kind is kept because it is the
+    /// only thing a diagnostic can report.
+    Unknown { kind: String },
+}
+
+/// The wire form: a tagged object whose unknown tags survive decoding.
+#[derive(Serialize, Deserialize)]
+struct RoleOnTheWire {
+    kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attach_token: Option<String>,
+}
+
+impl ConnectionRole {
+    /// The wire tag for the terminal-data role.
+    ///
+    /// One constant, used by both the encoder and the decoder, so a published
+    /// spelling cannot drift from what serde actually emits.
+    pub const TERMINAL_DATA: &'static str = "terminal_data";
+}
+
+impl Serialize for ConnectionRole {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let wire = match self {
+            Self::TerminalData { attach_token } => RoleOnTheWire {
+                kind: Self::TERMINAL_DATA.to_owned(),
+                attach_token: Some(attach_token.clone()),
+            },
+            Self::Unknown { kind } => RoleOnTheWire {
+                kind: kind.clone(),
+                attach_token: None,
+            },
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ConnectionRole {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = RoleOnTheWire::deserialize(deserializer)?;
+        if wire.kind == Self::TERMINAL_DATA {
+            // A terminal-data role without a token is not that role: the token
+            // is the whole claim. Kept as unknown rather than invented.
+            if let Some(attach_token) = wire.attach_token {
+                return Ok(Self::TerminalData { attach_token });
+            }
+        }
+        Ok(Self::Unknown { kind: wire.kind })
+    }
 }
 
 /// The daemon's half, including the verdict it reached independently.

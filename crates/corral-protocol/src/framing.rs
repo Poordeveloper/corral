@@ -92,6 +92,17 @@ pub struct FrameReader<R> {
 }
 
 impl<R: AsyncRead + Unpin> FrameReader<R> {
+    /// Give up framing and return the transport, plus whatever was read past
+    /// the last frame boundary.
+    ///
+    /// Those leftover bytes are the reason this returns a pair: a connection
+    /// that changes what its bytes mean must not lose the ones already in
+    /// hand, and a client is free to send its first frame in the same write as
+    /// its hello (ADR 0003, grill Q2).
+    pub fn into_parts(self) -> (R, Vec<u8>) {
+        (self.inner, self.pending)
+    }
+
     pub fn new(inner: R) -> Self {
         Self {
             inner,
@@ -141,6 +152,12 @@ pub struct FrameWriter<W> {
 impl<W: AsyncWrite + Unpin> FrameWriter<W> {
     pub fn new(inner: W) -> Self {
         Self { inner }
+    }
+
+    /// Give up framing and return the transport. Every frame written through
+    /// this type was flushed, so nothing is buffered here to lose.
+    pub fn into_inner(self) -> W {
+        self.inner
     }
 
     pub async fn write_frame(&mut self, frame: &Frame) -> Result<(), FrameError> {

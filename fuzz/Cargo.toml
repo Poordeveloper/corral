@@ -1,0 +1,21 @@
+[package]
+name = "corral-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+corrald = { path = "../crates/corrald" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "terminal_ingest"
+path = "fuzz_targets/terminal_ingest.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

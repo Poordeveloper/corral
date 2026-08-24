@@ -1,0 +1,4 @@
+# Corral-added, not upstream. Vendored code is built, never reformatted: its
+# diff against upstream must stay exactly the patches CORRAL_PATCHES.md
+# declares.
+disable_all_formatting = true

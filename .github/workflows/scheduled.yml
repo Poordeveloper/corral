@@ -18,12 +18,18 @@ on:
   push:
     branches: [main]
   schedule:
+    # Weekly macOS verification, and nightly fuzzing: the two amplify
+    # different things and are worth different cadences.
     - cron: "0 6 * * 1"
+    - cron: "0 3 * * *"
   workflow_dispatch:
 
 jobs:
   verify-macos:
     name: verify (macos)
+    # Not on the nightly cron: a macOS runner bills at ten times the rate, and
+    # what the nightly schedule exists for is fuzzing.
+    if: github.event.schedule != '0 3 * * *'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,7 +54,39 @@ jobs:
 
   quarantine-leases:
     name: quarantine leases
+    if: github.event.schedule != '0 3 * * *'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: ./scripts/check-quarantines
+
+  # The third layer of the terminal's fuzz requirement (ADR 0003 D9). It
+  # discovers; it is never the only coverage of a merge-critical invariant,
+  # which is what the deterministic corpus in ./scripts/verify is for. A crash
+  # here is a P1, and its minimized reproducer joins that corpus — which is
+  # how a finding becomes something that cannot come back quietly.
+  fuzz-terminal:
+    name: fuzz (terminal)
+    # Nightly only: the weekly macOS run does not need to carry this too.
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 3 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the nightly toolchain
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # The script owns target selection, seeds, and limits; this job only
+      # calls it (AGENTS.md §Verification).
+      - run: ./scripts/fuzz-terminal 1800
+
+      - name: Keep any crash a run found
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-terminal-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

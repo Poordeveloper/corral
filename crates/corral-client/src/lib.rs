@@ -20,7 +20,7 @@ mod policy;
 mod spawn;
 
 pub use activation::activate;
-pub use connection::Connection;
+pub use connection::{Connection, TerminalChannel};
 pub use endpoint::{ENDPOINT_OVERRIDE, EndpointSelection};
 pub use error::{
     ActivationContext, ActivationError, HandshakeFault, OwnerEvidence, RequestError, SpawnOutcome,

@@ -9,6 +9,17 @@ members = [
     "crates/corrald",
     "crates/corral",
 ]
+# Vendored third-party code is built, never governed: a path dependency inside
+# the repository would otherwise become an implicit member and inherit Corral's
+# lints and formatting. Its `unsafe` is upstream's, and Corral-owned crates keep
+# `#![forbid(unsafe_code)]` (docs/decisions/2026-08-24-pr3-spawn-gate.md).
+exclude = [
+    "third_party/portable-pty",
+    # The fuzz target is its own workspace: cargo-fuzz builds it with a
+    # nightly toolchain and sanitizer flags that must not reach the crates
+    # a normal `cargo build` produces.
+    "fuzz",
+]
 
 [workspace.package]
 version = "0.0.0"
@@ -25,6 +36,22 @@ corral-rendezvous = { path = "crates/corral-rendezvous" }
 corral-state = { path = "crates/corral-state" }
 
 clap = { version = "4.5", features = ["derive"] }
+# Vendored with one patch so a failed exec is reported as a spawn error
+# instead of an ordinary child exit; provenance and removal condition in
+# third_party/portable-pty/CORRAL_PATCHES.md. Alternatives considered: a
+# Corral-authored unsafe PTY crate (needs an ADR and hands us
+# controlling-terminal/EIO platform work), and a pinned WezTerm fork
+# (adds a git source and a fork lifecycle for one reviewable hunk).
+portable-pty = { path = "third_party/portable-pty" }
+# The authoritative VT. Selected by spike S1 against four candidates: it is the
+# only one that round-trips every dimension ROADMAP names, and the only pure
+# Rust port of a serializing emulator (ADR 0003 D1). Its `unsafe` surface is
+# named there and fuzzed before PR3 ships.
+qwertty-term-vt = "0.4.0"
+# The OS CSPRNG for attach tokens. Already in the tree under `uuid`, so this
+# adds no supply chain; taken directly because a token needs a stated 128 bits,
+# and a v4 UUID spends six of them on version and variant bits.
+getrandom = "0.4"
 # The registry store. `bundled` compiles SQLite from source so every platform
 # runs the same engine and version, rather than whatever the host happens to
 # ship.
@@ -33,6 +60,9 @@ rustix = { version = "1.1", default-features = false, features = [
     "std",
     "fs",
     "process",
+    # Raw mode for the interactive attach client: a terminal that keeps
+    # line discipline would swallow the keystrokes an agent is waiting for.
+    "termios",
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

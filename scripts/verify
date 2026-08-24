@@ -32,6 +32,12 @@ cargo test --workspace --all-targets --features "$TEST_SUPPORT"
 echo "==> doctests"
 cargo test --workspace --doc --features "$TEST_SUPPORT"
 
+# The fuzz crate is outside the workspace, so nothing above compiles it — and
+# a gate that cannot build is a gate that silently stopped existing. Checking
+# it costs seconds and needs no nightly toolchain or sanitizer.
+echo "==> fuzz targets compile"
+(cd fuzz && cargo check --quiet)
+
 echo "==> test-support boundary"
 ./scripts/check-test-support-boundary
 
