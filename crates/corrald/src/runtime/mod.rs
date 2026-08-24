@@ -16,10 +16,15 @@
 
 mod launch;
 mod pump;
+mod snapshot;
 mod spawn;
 mod terminal;
 
 pub use launch::{LaunchRejection, LaunchRequest};
 pub use pump::{PumpEnd, pump};
+pub use snapshot::{
+    SNAPSHOT_CEILING_BYTES, SNAPSHOT_SCROLLBACK_ROWS, SNAPSHOT_TARGET_BYTES, Snapshot,
+    SnapshotBudget, SnapshotError, encode, encode_within,
+};
 pub use spawn::{PtyGeometry, SpawnError, SpawnedRuntime, spawn};
 pub use terminal::{AuthoritativeTerminal, DeviceReply, RETAINED_SCROLLBACK_BYTES};
