@@ -27,6 +27,16 @@ pub struct Connection {
     _daemon: Option<SpawnedDaemon>,
 }
 
+/// A terminal data channel, plus any bytes that arrived with its hello.
+///
+/// The leftover is carried rather than dropped because the daemon sends the
+/// first snapshot immediately after the handshake: those bytes belong to the
+/// terminal framing and losing them would lose the screen.
+pub struct TerminalChannel {
+    pub stream: UnixStream,
+    pub leftover: Vec<u8>,
+}
+
 impl Connection {
     /// Keep a daemon this surface started alive for reaping purposes.
     pub(crate) fn attach_daemon(&mut self, daemon: Option<SpawnedDaemon>) {
@@ -66,7 +76,7 @@ impl Connection {
     pub async fn open_terminal_channel(
         endpoint: &Path,
         attach_token: &str,
-    ) -> Result<UnixStream, RequestError> {
+    ) -> Result<TerminalChannel, RequestError> {
         let stream =
             UnixStream::connect(endpoint)
                 .await
@@ -110,17 +120,18 @@ impl Connection {
             }
         }
 
+        // The daemon writes the first snapshot immediately after this
+        // response, so those bytes are routinely already in the socket buffer
+        // when the hello is read. They are the screen the caller asked for —
+        // refusing them would make `attach` fail on a timing race.
         let (read_half, leftover) = reader.into_parts();
-        if !leftover.is_empty() {
-            return Err(RequestError::Protocol {
-                detail: "the daemon sent terminal bytes before the channel opened".to_owned(),
-            });
-        }
-        read_half
-            .reunite(writer.into_inner())
-            .map_err(|source| RequestError::Protocol {
-                detail: format!("the terminal channel could not be reassembled: {source}"),
-            })
+        let stream =
+            read_half
+                .reunite(writer.into_inner())
+                .map_err(|source| RequestError::Protocol {
+                    detail: format!("the terminal channel could not be reassembled: {source}"),
+                })?;
+        Ok(TerminalChannel { stream, leftover })
     }
 
     /// Start a managed session and its first Run.

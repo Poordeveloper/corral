@@ -17,6 +17,7 @@ corral-client = { workspace = true }
 corral-protocol = { workspace = true }
 # Raw mode and the terminal's own size: no standard-library API exposes either.
 rustix = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]

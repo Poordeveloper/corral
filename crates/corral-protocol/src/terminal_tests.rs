@@ -65,7 +65,8 @@ fn an_unknown_frame_kind_decodes_and_is_skippable() {
         .expect("decode")
         .expect("a complete frame");
 
-    assert_eq!(decoded.kind, FrameKind::Unknown(200));
+    assert!(matches!(decoded.kind, FrameKind::Unknown(_)));
+    assert_eq!(decoded.kind.as_byte(), 200);
     assert!(decoded.kind.is_skippable());
     assert_eq!(
         consumed,
@@ -79,7 +80,7 @@ fn an_unknown_frame_kind_decodes_and_is_skippable() {
 #[test]
 fn a_stream_survives_an_unknown_kind_between_known_ones() {
     let mut stream = frame(FrameKind::Delta, b"before").encode().expect("encode");
-    let mut future = frame(FrameKind::Unknown(77), b"a kind from later")
+    let mut future = frame(FrameKind::from_byte(77), b"a kind from later")
         .encode()
         .expect("encode");
     let mut after = frame(FrameKind::Delta, b"after").encode().expect("encode");
@@ -97,6 +98,28 @@ fn a_stream_survives_an_unknown_kind_between_known_ones() {
     }
 
     assert_eq!(payloads, vec![b"before".to_vec(), b"after".to_vec()]);
+}
+
+/// Every byte is either an assigned kind that round-trips, or an unknown one
+/// that stays unknown. Nothing in between: a kind that re-encoded as a
+/// different one would be a frame that lies about itself.
+#[test]
+fn every_byte_is_either_an_assigned_kind_or_stays_unknown() {
+    for raw in 0..=u8::MAX {
+        let kind = FrameKind::from_byte(raw);
+
+        assert_eq!(kind.as_byte(), raw, "byte {raw} did not survive");
+        assert_eq!(
+            FrameKind::from_byte(kind.as_byte()),
+            kind,
+            "byte {raw} decoded to something else on the way back"
+        );
+        assert_eq!(
+            kind.is_skippable(),
+            matches!(kind, FrameKind::Unknown(_)),
+            "byte {raw} disagrees about whether it may be skipped"
+        );
+    }
 }
 
 #[test]

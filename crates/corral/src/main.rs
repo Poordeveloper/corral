@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use corral_client::{ActivationError, ClientActivationPolicy, Connection, RequestError, activate};
-use corral_protocol::method::SessionNewParams;
+use corral_protocol::method::{SessionListItem, SessionNewParams};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -188,15 +188,38 @@ async fn list(connection: &mut Connection) -> ExitCode {
     if sessions.sessions.is_empty() {
         // An empty list is a fact the daemon reported, not a missing answer.
         println!("No sessions.");
-    } else {
-        // A daemon newer than this build may know about sessions whose shape
-        // this build cannot render; saying so is better than pretending.
-        println!(
-            "{} session(s) reported by a daemon this build cannot render yet.",
-            sessions.sessions.len()
-        );
+        return ExitCode::SUCCESS;
+    }
+
+    let mut unrenderable = 0;
+    for session in &sessions.sessions {
+        match serde_json::from_value::<SessionListItem>(session.clone()) {
+            Ok(item) => println!(
+                "{}  {:<8}  {}",
+                short_id(&item.session_id),
+                item.execution_state,
+                item.title
+            ),
+            // A daemon newer than this build may describe a session in a shape
+            // this build cannot read. Counting those is better than dropping
+            // them silently or guessing at their fields.
+            Err(_) => unrenderable += 1,
+        }
+    }
+    if unrenderable > 0 {
+        println!("{unrenderable} session(s) this build cannot render yet.");
     }
     ExitCode::SUCCESS
+}
+
+/// Enough of an id to type, with the whole thing still available to copy.
+///
+/// The full id stays the identity; this is only what a person reads. `attach`
+/// accepts any unambiguous prefix, so the two agree.
+fn short_id(session_id: &str) -> &str {
+    session_id
+        .split_once('-')
+        .map_or(session_id, |(head, _)| head)
 }
 
 fn render_capabilities(peer: &corral_protocol::ServerHello) -> String {

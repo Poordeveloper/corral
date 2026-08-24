@@ -154,6 +154,22 @@ pub fn resize_frame(epoch: Epoch, geometry: Geometry) -> TerminalFrame {
     }
 }
 
+/// Apply every complete frame in the buffer, tracking the epoch snapshots name.
+fn drain_frames(
+    pending: &mut Vec<u8>,
+    out: &mut impl Write,
+    epoch: &mut Epoch,
+) -> std::io::Result<()> {
+    while let Ok(Some((frame, consumed))) = TerminalFrame::decode(pending) {
+        pending.drain(..consumed);
+        if frame.kind == FrameKind::Snapshot {
+            *epoch = frame.epoch;
+        }
+        apply(&frame, out)?;
+    }
+    Ok(())
+}
+
 /// Read what the local terminal has, without blocking the caller forever.
 pub fn read_local(input: &mut impl Read, buffer: &mut [u8]) -> LocalInput {
     match input.read(buffer) {
@@ -178,14 +194,11 @@ mod tests;
 /// person typing must not wait for the screen, and the screen must not wait
 /// for a keystroke. Reading the local terminal blocks, so it runs on its own
 /// thread and hands bytes over.
-pub async fn run(channel: tokio::net::UnixStream) -> std::io::Result<()> {
+pub async fn run(channel: corral_client::TerminalChannel) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let raw = RawMode::enter()?;
-    let (mut from_daemon, mut to_daemon) = channel.into_split();
-    // The epoch the daemon's first snapshot names; every later snapshot
-    // updates it.
-    let epoch = Epoch(0);
+    let (mut from_daemon, mut to_daemon) = channel.stream.into_split();
 
     // Bounded: a person cannot type faster than this drains, and an unbounded
     // queue in front of a socket only moves where the memory grows.
@@ -216,13 +229,24 @@ pub async fn run(channel: tokio::net::UnixStream) -> std::io::Result<()> {
     });
 
     let mut stdout = std::io::stdout();
-    let mut pending = Vec::new();
+    // Bytes that arrived with the handshake are already terminal frames.
+    let mut pending = channel.leftover;
     let mut buffer = [0_u8; 65536];
     let mut local = Geometry::of(&std::io::stdin());
     // Adopted from what arrives rather than assumed: a resize opens a new
     // epoch, and input still labelled with the old one names a screen shape
     // that no longer exists.
-    let mut epoch = epoch;
+    let mut epoch = Epoch(0);
+
+    // Whatever came in with the handshake is already a frame.
+    drain_frames(&mut pending, &mut stdout, &mut epoch)?;
+
+    // A person who resizes their window and then just watches must still get a
+    // correct screen, so the local size is checked on a tick rather than only
+    // when a key is pressed. Polling instead of SIGWINCH keeps the client
+    // single-threaded about its own geometry.
+    let mut geometry_check = tokio::time::interval(std::time::Duration::from_millis(250));
+    geometry_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -230,33 +254,29 @@ pub async fn run(channel: tokio::net::UnixStream) -> std::io::Result<()> {
                 Ok(0) | Err(_) => break,
                 Ok(read) => {
                     pending.extend_from_slice(&buffer[..read]);
-                    while let Ok(Some((frame, consumed))) = TerminalFrame::decode(&pending) {
-                        pending.drain(..consumed);
-                        if frame.kind == FrameKind::Snapshot {
-                            epoch = frame.epoch;
-                        }
-                        apply(&frame, &mut stdout)?;
-                    }
+                    drain_frames(&mut pending, &mut stdout, &mut epoch)?;
                 }
             },
+            _ = geometry_check.tick() => {
+                // A resize is sent only when this terminal's own size changed —
+                // never because the daemon reported one, which would make two
+                // differently sized viewers reassert forever (grill Q6). On a
+                // tick rather than only on a keystroke: a person who resizes
+                // and then just watches still needs a correct screen.
+                let now = Geometry::of(&std::io::stdin());
+                if now != local {
+                    if let Some(geometry) = now
+                        && let Ok(frame) = resize_frame(epoch, geometry).encode()
+                        && to_daemon.write_all(&frame).await.is_err()
+                    {
+                        break;
+                    }
+                    local = now;
+                }
+            }
             bytes = keystrokes.recv() => match bytes {
                 None => break,
                 Some(bytes) => {
-                    // A resize is sent only when this terminal's own size
-                    // changed — never because the daemon reported one, which
-                    // would make two differently sized viewers reassert
-                    // forever (grill Q6). Checking here rather than on SIGWINCH
-                    // keeps the client single-threaded about its own geometry.
-                    let now = Geometry::of(&std::io::stdin());
-                    if now != local {
-                        if let Some(geometry) = now
-                            && let Ok(frame) = resize_frame(epoch, geometry).encode()
-                        {
-                            let _ = to_daemon.write_all(&frame).await;
-                        }
-                        local = now;
-                    }
-
                     match input_frame(epoch, bytes).encode() {
                         Ok(frame) => {
                             if to_daemon.write_all(&frame).await.is_err() {

@@ -904,6 +904,7 @@ permitted CI additions and are closed-listed here.
 | schema/durable-event human gate | diff guard (`scripts/check-schema-gate`) on schema/migration/durable-event paths requiring the `DURABLE-APPROVED-BY:` marker in the PR body | CI PR check |
 | risk-surface human gate (§8.2 list) | risk-surface detector setting `HUMAN_REVIEW_REQUIRED`; fails closed | CI PR check |
 | quarantine is human-approved and leased | quarantine registry check (owner, deadline, release-critical flag) | CI PR check |
+| the fuzz targets still build | `cargo check` in `fuzz/`, which the workspace excludes | verify |
 | terminal parser hardening beyond the corpus | `scripts/fuzz-terminal` (nightly; findings distil into the corpus above) | scheduled |
 | flake evidence | `scripts/flake-probe` records | diagnostic tooling |
 | stale owner claims | claim staleness check over active plan frontmatter | scheduled (not yet implemented — lands with the first concurrent-claim usage) |

@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 use support::wire::{RawClient, error_code};
-use support::{SETTLE, TestAccount, run, stdout};
+use support::{SETTLE, TestAccount, run, stderr, stdout};
 
 /// The frame header the terminal channel uses: kind, epoch, sequence, length.
 const HEADER_BYTES: usize = 1 + 8 + 8 + 4;
@@ -440,15 +440,81 @@ fn input_from_a_client_reaches_the_child() {
 }
 
 /// The CLI's own path: `corral list` renders what the daemon serves.
+///
+/// Asserting the content, not just the exit status: an earlier version exited
+/// zero while printing "a daemon this build cannot render yet", so a person
+/// could not find the id that `attach` needs.
 #[test]
 fn the_cli_lists_a_session_it_started() {
     let account = TestAccount::new("cli-list");
     let _daemon = account.start_daemon();
     let mut client = RawClient::connect(&account.socket());
     client.establish();
-    let _started = start_session(&mut client, 1, &["/bin/sh", "-c", "sleep 30"]);
+    let started = start_session(&mut client, 1, &["/bin/sh", "-c", "sleep 30"]);
+    let session = session_id(&started);
 
     let listed = run(account.corral().arg("list"));
+    let rendered = stdout(&listed);
 
-    assert!(listed.status.success(), "{}", stdout(&listed));
+    assert!(listed.status.success(), "{rendered}");
+    assert!(
+        rendered.contains("sh"),
+        "the title is missing: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("running"),
+        "the execution state is missing: {rendered:?}"
+    );
+    let prefix = session.split('-').next().expect("an id has a first group");
+    assert!(
+        rendered.contains(prefix),
+        "nothing a person could pass to attach: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("cannot render"),
+        "the daemon served a shape this build knows and the CLI refused it: {rendered:?}"
+    );
+}
+
+/// `corral new` runs the whole path a person does — session.new, the token, the
+/// second connection, the snapshot — and detaches. It is the only test that
+/// covers the client's own channel handshake, where the daemon's first snapshot
+/// routinely arrives in the same read as the hello response.
+#[test]
+fn the_cli_starts_a_session_and_leaves_it_running() {
+    let account = TestAccount::new("cli-new");
+    let _daemon = account.start_daemon();
+
+    // No terminal on stdin, so the attach loop reads EOF and returns rather
+    // than waiting for a person; what is under test is everything before that.
+    let started = run(account
+        .corral()
+        .arg("new")
+        .arg("--")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg("sleep 30"));
+
+    let reported = stderr(&started);
+    assert!(started.status.success(), "{reported}");
+    assert!(
+        reported.contains("session "),
+        "the session id was never reported: {reported:?}"
+    );
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    let listed = client
+        .request(1, "session.list", None)
+        .expect("session.list answered");
+    let sessions = result(&listed)
+        .get("sessions")
+        .and_then(Value::as_array)
+        .expect("a session array");
+
+    assert_eq!(sessions.len(), 1, "the CLI's session did not survive it");
+    assert_eq!(
+        sessions[0].get("execution_state").and_then(Value::as_str),
+        Some("running")
+    );
 }

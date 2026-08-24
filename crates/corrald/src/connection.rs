@@ -218,7 +218,12 @@ async fn bootstrap(
 /// then fails asks for another token rather than reviving a spent one
 /// (grill Q2).
 fn redeem_role(role: &ConnectionRole, state: &Arc<DaemonState>) -> Option<AttachGrant> {
-    let ConnectionRole::TerminalData { attach_token } = role;
+    // A role this build does not serve is refused as a role, not treated as a
+    // malformed hello: the client stated a version this daemon can compare and
+    // asked for something it does not have.
+    let ConnectionRole::TerminalData { attach_token } = role else {
+        return None;
+    };
     let token = AttachToken::from_wire(attach_token)?;
     state.with_runtime(|runtime| runtime.attach_tokens.redeem(&token).ok())?
 }
@@ -329,8 +334,26 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             },
             Err(error) => Dispatch::Reply(Frame::error(id, error)),
         },
-        method::SESSION_NEW => Dispatch::Reply(session_new(request, state)),
-        method::TERMINAL_ATTACH => Dispatch::Reply(terminal_attach(request, state)),
+        // A mutation must not be admitted under the condition a read is
+        // refused. Without this, a daemon that cannot vouch for durable truth
+        // would still fork children and mint terminal capabilities while
+        // refusing to list what it had just created.
+        method::SESSION_NEW => match state.vouch().await {
+            Ok(Vouched::Yes) => Dispatch::Reply(session_new(request, state)),
+            Ok(Vouched::NotNow) => Dispatch::Reply(Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::Busy, "the registry is held by another writer"),
+            )),
+            Err(error) => Dispatch::FailClosed(error),
+        },
+        method::TERMINAL_ATTACH => match state.vouch().await {
+            Ok(Vouched::Yes) => Dispatch::Reply(terminal_attach(request, state)),
+            Ok(Vouched::NotNow) => Dispatch::Reply(Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::Busy, "the registry is held by another writer"),
+            )),
+            Err(error) => Dispatch::FailClosed(error),
+        },
         // A compatibility safety net, not how features are discovered: the
         // connection stays usable.
         other => Dispatch::Reply(Frame::error(
@@ -448,8 +471,22 @@ fn session_new(request: &Request, state: &Arc<DaemonState>) -> Frame {
         }
     };
 
-    let stored = state.with_runtime(|runtime| runtime.sessions.insert(handle));
+    // The child is already running by now, so the handle must not simply be
+    // dropped if the registry cannot take it: the reader thread holds another
+    // sender, so dropping this one would leave a live process and its screen
+    // running unreachable for the daemon's lifetime.
+    // Held outside the closure so a lock the daemon could not take does not
+    // drop it: the closure would never run and the handle would go with it.
+    let mut pending = Some(handle);
+    let stored = state.with_runtime(|runtime| {
+        if let Some(handle) = pending.take() {
+            runtime.sessions.insert(handle);
+        }
+    });
     if stored.is_none() {
+        if let Some(orphaned) = pending.take() {
+            orphaned.shut_down();
+        }
         return Frame::error(
             id,
             ProtocolError::new(ErrorCode::Busy, "the runtime could not be consulted"),

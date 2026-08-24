@@ -29,7 +29,7 @@ pub async fn serve(
     run: RunId,
     state: &Arc<DaemonState>,
 ) {
-    let Some(mut attachment) = attach(session, run, state) else {
+    let Some(mut attachment) = attach(session, run, state).await else {
         return;
     };
     if !send_snapshot(writer, &attachment).await {
@@ -52,7 +52,7 @@ pub async fn serve(
                     // screen is gone. Either way this viewer is owed a fresh
                     // snapshot rather than more deltas.
                     None => {
-                        match attach(session, run, state) {
+                        match attach(session, run, state).await {
                             Some(fresh) => {
                                 attachment = fresh;
                                 if !send_snapshot(writer, &attachment).await {
@@ -124,15 +124,16 @@ async fn handle(
         // prefix said exactly how much to drop, and refusing would make every
         // future frame kind a breaking change.
         FrameKind::Unknown(_) => Handled::Continue,
-        FrameKind::Input => match with_session(session, state, |handle| {
-            handle.write_input(frame.payload.clone())
-        }) {
-            // A session that no longer answers cannot receive keystrokes, and
-            // a channel that silently swallowed them would leave a person
-            // typing into nothing.
-            Some(Ok(())) => Handled::Continue,
-            _ => Handled::Close,
-        },
+        FrameKind::Input => {
+            let bytes = frame.payload.clone();
+            match ask_session(session, run, state, move |handle| handle.write_input(bytes)).await {
+                // A session that no longer answers cannot receive keystrokes,
+                // and a channel that silently swallowed them would leave a
+                // person typing into nothing.
+                Some(Ok(())) => Handled::Continue,
+                _ => Handled::Close,
+            }
+        }
         FrameKind::Resize => {
             let Some(geometry) = decode_geometry(&frame.payload) else {
                 // A size Corral will not build is ignored rather than acted
@@ -142,12 +143,12 @@ async fn handle(
             // The client asked because its own desired geometry changed. It
             // must never ask because it saw someone else's resize, or two
             // viewers of different sizes would reassert forever (grill Q6).
-            match with_session(session, state, |handle| handle.resize(geometry)) {
+            match ask_session(session, run, state, move |handle| handle.resize(geometry)).await {
                 Some(Ok(Ok(_epoch))) => {
                     // The reflow dropped every viewer, this one included. It
                     // rejoins at the new shape with a snapshot that belongs
                     // to it.
-                    match attach(session, run, state) {
+                    match attach(session, run, state).await {
                         Some(fresh) => {
                             *attachment = fresh;
                             if send_snapshot(writer, attachment).await {
@@ -178,7 +179,7 @@ async fn handle(
                 _ => Handled::Close,
             }
         }
-        FrameKind::ResyncRequest => match attach(session, run, state) {
+        FrameKind::ResyncRequest => match attach(session, run, state).await {
             Some(fresh) => {
                 *attachment = fresh;
                 if send_snapshot(writer, attachment).await {
@@ -195,20 +196,53 @@ async fn handle(
     }
 }
 
-/// Join the session's stream, refusing if this token's Run is not the one
-/// running.
+/// The handle for a session, if this token's Run is the one running.
 ///
 /// The Run is checked, not just carried: a Session outlives its Runs, so a
 /// token minted before a resume must never open the terminal of the process
 /// that replaced it (grill Q2).
-fn attach(session: CorralSessionId, run: RunId, state: &Arc<DaemonState>) -> Option<Attachment> {
+///
+/// Taken out from under the registry lock deliberately. Everything a handle
+/// can be asked waits on a screen thread, and waiting while holding that lock
+/// — on the daemon's one reactor thread — puts every other connection behind
+/// whatever that session happens to be doing.
+fn handle_for(
+    session: CorralSessionId,
+    run: RunId,
+    state: &Arc<DaemonState>,
+) -> Option<Arc<SessionHandle>> {
     state.with_runtime(|runtime| {
         let handle = runtime.sessions.get(session)?;
-        if handle.run() != run {
-            return None;
-        }
-        handle.attach().ok()
+        (handle.run() == run).then_some(handle)
     })?
+}
+
+/// Join the session's stream, off the reactor.
+///
+/// The blocking round trip happens on the blocking pool, so a screen thread
+/// busy writing to a PTY cannot stall the daemon's reactor.
+async fn attach(
+    session: CorralSessionId,
+    run: RunId,
+    state: &Arc<DaemonState>,
+) -> Option<Attachment> {
+    let handle = handle_for(session, run, state)?;
+    tokio::task::spawn_blocking(move || handle.attach().ok())
+        .await
+        .ok()?
+}
+
+/// Ask a session something, off the reactor.
+async fn ask_session<T: Send + 'static>(
+    session: CorralSessionId,
+    run: RunId,
+    state: &Arc<DaemonState>,
+    work: impl FnOnce(&SessionHandle) -> T + Send + 'static,
+) -> Option<T> {
+    let handle = handle_for(session, run, state)?;
+    tokio::task::spawn_blocking(move || work(&handle))
+        .await
+        .ok()
 }
 
 /// Send the snapshot an attachment carries, stamped with its own epoch.
@@ -257,14 +291,6 @@ async fn send(writer: &mut OwnedWriteHalf, frame: &TerminalFrame) -> bool {
             false
         }
     }
-}
-
-fn with_session<T>(
-    session: CorralSessionId,
-    state: &Arc<DaemonState>,
-    work: impl FnOnce(&SessionHandle) -> T,
-) -> Option<T> {
-    state.with_runtime(|runtime| runtime.sessions.get(session).map(work))?
 }
 
 /// A resize payload is two big-endian u16s: rows then columns.

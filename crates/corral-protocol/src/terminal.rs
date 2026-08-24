@@ -13,9 +13,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The capability a hello declares to claim a terminal data channel.
-pub const TERMINAL_DATA_ROLE: &str = "terminal-data";
-
 /// The most a terminal frame may carry.
 ///
 /// Derived from the snapshot ceiling rather than shared with the RPC channel's
@@ -64,7 +61,21 @@ pub enum FrameKind {
     /// Carried rather than rejected: a peer that learns a new frame kind must
     /// not become undecodable to an older one, and the only thing a diagnostic
     /// can report is the number itself.
-    Unknown(u8),
+    ///
+    /// The number is private so it cannot be an assigned one. An `Unknown(2)`
+    /// would re-encode as `Delta` and stop being skippable, which is a frame
+    /// that lies about itself.
+    Unknown(UnassignedKind),
+}
+
+/// A frame-kind number this version has not assigned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnassignedKind(u8);
+
+impl UnassignedKind {
+    pub fn as_byte(self) -> u8 {
+        self.0
+    }
 }
 
 impl FrameKind {
@@ -76,7 +87,7 @@ impl FrameKind {
             Self::Resize => 4,
             Self::ResyncRequest => 5,
             Self::ChannelError => 6,
-            Self::Unknown(raw) => raw,
+            Self::Unknown(raw) => raw.as_byte(),
         }
     }
 
@@ -88,7 +99,7 @@ impl FrameKind {
             4 => Self::Resize,
             5 => Self::ResyncRequest,
             6 => Self::ChannelError,
-            other => Self::Unknown(other),
+            other => Self::Unknown(UnassignedKind(other)),
         }
     }
 
@@ -113,15 +124,15 @@ pub struct TerminalFrame {
 }
 
 /// Why a frame could not be read.
-#[derive(Debug)]
+///
+/// One variant, because there is one way this fails: a length no peer may
+/// declare. A short buffer is not an error — it is `Ok(None)`, meaning the
+/// rest has not arrived — and transport failures belong to whoever owns the
+/// socket, not to the framing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalFrameError {
     /// A frame declared a length past the safety limit.
-    Oversize {
-        declared: usize,
-    },
-    /// The peer stopped mid-frame.
-    Truncated,
-    Io(std::io::Error),
+    Oversize { declared: usize },
 }
 
 /// The fixed-size header every frame carries: kind, epoch, sequence, length.
@@ -153,19 +164,19 @@ impl TerminalFrame {
             return Ok(None);
         }
 
-        let kind = FrameKind::from_byte(bytes[0]);
-        let epoch = Epoch(u64::from_be_bytes(
-            bytes[1..9].try_into().unwrap_or_default(),
-        ));
-        let sequence = Sequence(u64::from_be_bytes(
-            bytes[9..17].try_into().unwrap_or_default(),
-        ));
-        let length = u32::from_be_bytes(bytes[17..21].try_into().unwrap_or_default()) as usize;
+        // Fixed-size reads against the header length checked just above, so
+        // there is no failure to swallow: an `unwrap_or_default` here would
+        // silently decode a sequence as zero if that check ever loosened.
+        let (header, rest) = bytes.split_at(HEADER_BYTES);
+        let kind = FrameKind::from_byte(header[0]);
+        let epoch = Epoch(u64::from_be_bytes(read_eight(header, 1)));
+        let sequence = Sequence(u64::from_be_bytes(read_eight(header, 9)));
+        let length = u32::from_be_bytes([header[17], header[18], header[19], header[20]]) as usize;
 
         if length > MAX_TERMINAL_FRAME_BYTES {
             return Err(TerminalFrameError::Oversize { declared: length });
         }
-        if bytes.len() < HEADER_BYTES + length {
+        if rest.len() < length {
             return Ok(None);
         }
 
@@ -174,11 +185,21 @@ impl TerminalFrame {
                 kind,
                 epoch,
                 sequence,
-                payload: bytes[HEADER_BYTES..HEADER_BYTES + length].to_vec(),
+                payload: rest[..length].to_vec(),
             },
             HEADER_BYTES + length,
         )))
     }
+}
+
+/// Eight header bytes at a fixed offset, as an array.
+///
+/// The header's length is checked before this is called, so the indexing is an
+/// invariant rather than a possibility.
+fn read_eight(header: &[u8], at: usize) -> [u8; 8] {
+    let mut eight = [0_u8; 8];
+    eight.copy_from_slice(&header[at..at + 8]);
+    eight
 }
 
 impl std::fmt::Display for TerminalFrameError {
@@ -188,8 +209,6 @@ impl std::fmt::Display for TerminalFrameError {
                 f,
                 "a frame declared {declared} bytes, past the {MAX_TERMINAL_FRAME_BYTES}-byte limit"
             ),
-            Self::Truncated => f.write_str("the peer closed mid-frame"),
-            Self::Io(source) => write!(f, "transport failure: {source}"),
         }
     }
 }

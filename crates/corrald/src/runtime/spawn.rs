@@ -185,12 +185,6 @@ impl SpawnedRuntime {
     }
 
     /// The foreground process group of the managed terminal.
-    ///
-    /// Read from the terminal rather than remembered from the spawn, because
-    /// it is what the terminal currently reports: a child that starts its own
-    /// job control moves it. Teardown targets this group, which is why Corral
-    /// asks the tty rather than assuming the first pid it saw still speaks for
-    /// every descendant.
     pub fn process_group_leader(&self) -> Option<i32> {
         self.master.process_group_leader()
     }
@@ -256,6 +250,35 @@ impl ManagedTerminal {
         self.master
             .take_writer()
             .map_err(|error| io::Error::other(error.to_string()))
+    }
+}
+
+impl ManagedTerminal {
+    /// The foreground process group of this terminal.
+    ///
+    /// Read from the terminal rather than remembered from the spawn, because
+    /// it is what the terminal currently reports: a child that starts its own
+    /// job control moves it. Teardown targets this group, which is why Corral
+    /// asks the tty rather than assuming the first pid it saw still speaks for
+    /// every descendant.
+    pub fn process_group_leader(&self) -> Option<i32> {
+        self.master.process_group_leader()
+    }
+
+    /// End every process on this terminal.
+    ///
+    /// Corral owns descendant teardown, not the backend: the backend's own
+    /// kill targets one child, which is not the same as the group a shell may
+    /// have spawned (grill Q1). SIGHUP because that is what a terminal going
+    /// away means, and a process that chooses to ignore it is making a
+    /// decision Corral does not override.
+    pub fn hang_up(&self) {
+        let Some(leader) = self.process_group_leader() else {
+            return;
+        };
+        if let Some(pid) = rustix::process::Pid::from_raw(leader) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::HUP);
+        }
     }
 }
 

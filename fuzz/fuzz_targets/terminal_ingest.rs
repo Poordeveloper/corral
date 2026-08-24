@@ -43,7 +43,13 @@ fuzz_target!(|data: &[u8]| {
     let chunk = 1 + usize::from(data[2] % 64);
     let payload = &data[3..];
 
-    let mut terminal = AuthoritativeTerminal::new(PtyGeometry { rows, cols });
+    // Sizes Corral would refuse are not what this target is about: the daemon
+    // never builds one, so a screen that only exists here would be testing an
+    // input the product cannot produce.
+    let Ok(geometry) = PtyGeometry::new(rows, cols) else {
+        return;
+    };
+    let mut terminal = AuthoritativeTerminal::new(geometry);
     for piece in payload.chunks(chunk) {
         // Device replies are dropped here: what they are is the daemon's
         // business, that producing them does not crash is this target's.
@@ -52,10 +58,12 @@ fuzz_target!(|data: &[u8]| {
 
     // A reflow touches every retained row, which is where a pathological
     // screen becomes unbounded work rather than a wrong screen.
-    terminal.resize(PtyGeometry {
-        rows: rows.saturating_add(7).min(500),
-        cols: cols.saturating_add(13).min(1000),
-    });
+    if let Ok(reflowed) = PtyGeometry::new(
+        rows.saturating_add(7).min(500),
+        cols.saturating_add(13).min(1000),
+    ) {
+        terminal.resize(reflowed);
+    }
 
     let snapshot = encode(&terminal);
 

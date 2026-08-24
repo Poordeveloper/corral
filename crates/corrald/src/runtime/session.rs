@@ -60,8 +60,10 @@ enum Ask {
     Snapshot(SyncSender<Result<Snapshot, SnapshotError>>),
     Resize(PtyGeometry, SyncSender<Result<Epoch, ResizeRefused>>),
     Input(Vec<u8>),
-    Geometry(SyncSender<PtyGeometry>),
+    Geometry(SyncSender<Result<PtyGeometry, ScreenUnreadable>>),
     Title(SyncSender<Option<Vec<u8>>>),
+    /// End this session: hang up the terminal and stop serving.
+    ShutDown,
     /// A viewer wants the stream. Answered with a snapshot and the end it
     /// reads deltas from, minted together so nothing can arrive between them.
     Attach(SyncSender<Attachment>),
@@ -73,6 +75,14 @@ pub struct Attachment {
     pub epoch: Epoch,
     pub viewer: super::stream::Viewer,
 }
+
+/// The screen exists and cannot be read.
+///
+/// Its parser failed on provider output, so the structure behind it is not
+/// something anyone may look at. A separate answer from `SessionGone`: the
+/// runtime is still there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScreenUnreadable;
 
 /// Why a terminal did not take a new size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,7 +203,11 @@ impl SessionHandle {
         PtyGeometry::expect_valid((packed >> 16) as u16, packed as u16)
     }
 
-    pub fn geometry(&self) -> Result<PtyGeometry, SessionGone> {
+    /// The screen's size, or why there is none to state.
+    ///
+    /// Three outcomes, deliberately distinct: a size, a screen that can no
+    /// longer be read, and a runtime that is not answering at all.
+    pub fn geometry(&self) -> Result<Result<PtyGeometry, ScreenUnreadable>, SessionGone> {
         let (reply, answer) = sync_channel(1);
         self.ask(Ask::Geometry(reply))?;
         answer.recv().map_err(|_| SessionGone)
@@ -203,6 +217,15 @@ impl SessionHandle {
         let (reply, answer) = sync_channel(1);
         self.ask(Ask::Title(reply))?;
         answer.recv().map_err(|_| SessionGone)
+    }
+
+    /// End this session's runtime.
+    ///
+    /// For the one path where a session was started and the daemon cannot take
+    /// responsibility for it: a live child with no registry entry is
+    /// unreachable and unlistable, which is worse than not having started it.
+    pub fn shut_down(&self) {
+        let _ = self.ask(Ask::ShutDown);
     }
 
     /// Join this session's terminal stream.
@@ -401,12 +424,19 @@ fn serve_screen(
                 let _ = std::io::Write::flush(&mut writer);
             }
             Ask::Geometry(reply) => {
-                if let Some(geometry) = terminal.geometry() {
-                    let _ = reply.send(geometry);
-                }
+                // Always answered. Dropping the channel would report
+                // SessionGone — "the runtime is no longer answering" — for a
+                // runtime that is answering perfectly well and simply has no
+                // readable screen. Those are different facts (AGENTS.md
+                // §Runtime truth).
+                let _ = reply.send(terminal.geometry().ok_or(ScreenUnreadable));
             }
             Ask::Title(reply) => {
                 let _ = reply.send(terminal.title().map(<[u8]>::to_vec));
+            }
+            Ask::ShutDown => {
+                screen.hang_up();
+                return;
             }
             Ask::Attach(reply) => {
                 let _ = reply.send(Attachment {
@@ -450,9 +480,16 @@ fn apply_resize(
 }
 
 /// The sessions one daemon is running.
+/// The sessions one daemon is running.
+///
+/// Handles are behind `Arc` so a caller can take one out from under the
+/// registry lock before doing anything that waits. Asking a screen thread a
+/// question while holding that lock, on the daemon's one reactor thread, would
+/// put every other connection behind whatever that session happens to be
+/// doing.
 #[derive(Default)]
 pub struct ManagedSessions {
-    handles: HashMap<CorralSessionId, SessionHandle>,
+    handles: HashMap<CorralSessionId, Arc<SessionHandle>>,
 }
 
 impl ManagedSessions {
@@ -461,11 +498,12 @@ impl ManagedSessions {
     }
 
     pub fn insert(&mut self, handle: SessionHandle) {
-        self.handles.insert(handle.session, handle);
+        self.handles.insert(handle.session, Arc::new(handle));
     }
 
-    pub fn get(&self, session: CorralSessionId) -> Option<&SessionHandle> {
-        self.handles.get(&session)
+    /// A handle that outlives the lock this was called under.
+    pub fn get(&self, session: CorralSessionId) -> Option<Arc<SessionHandle>> {
+        self.handles.get(&session).map(Arc::clone)
     }
 
     pub fn len(&self) -> usize {
@@ -544,6 +582,16 @@ impl std::fmt::Display for ResizeRefused {
 }
 
 impl std::error::Error for ResizeRefused {}
+
+impl std::fmt::Display for ScreenUnreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "this terminal's parser failed on provider output and its screen can no longer be read",
+        )
+    }
+}
+
+impl std::error::Error for ScreenUnreadable {}
 
 #[cfg(test)]
 #[path = "session_tests.rs"]

@@ -89,11 +89,6 @@ impl RawClient {
         self.receive().expect("the daemon answered the hello")
     }
 
-    /// Send a hello and report whether the daemon closed instead of
-    /// answering.
-    ///
-    /// The write itself may fail once the daemon has closed, which is the same
-    /// answer: the connection is gone.
     /// A hello that claims the terminal-data role by redeeming a token.
     pub fn say_hello_with_role(&mut self, attach_token: &str) -> Value {
         let versions = corral_protocol::local_versions();

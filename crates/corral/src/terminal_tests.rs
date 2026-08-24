@@ -88,7 +88,7 @@ fn a_delta_is_replayed_byte_for_byte() {
 #[test]
 fn an_unknown_frame_writes_nothing() {
     let frame = TerminalFrame {
-        kind: FrameKind::Unknown(99),
+        kind: FrameKind::from_byte(99),
         epoch: Epoch(0),
         sequence: Sequence(0),
         payload: b"a kind from later".to_vec(),

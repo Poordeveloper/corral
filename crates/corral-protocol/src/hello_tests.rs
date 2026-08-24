@@ -80,3 +80,72 @@ fn a_server_hello_without_a_verdict_does_not_decode() {
 
     assert!(error.to_string().contains("compatibility_result"));
 }
+
+/// A hello with no role means what it always meant: an ordinary semantic
+/// connection. An older client's hello cannot become something else because a
+/// field was added after it.
+#[test]
+fn a_hello_without_a_role_still_decodes() {
+    let decoded: ClientHello =
+        serde_json::from_str(r#"{"protocol_version": 1, "min_compatible_peer_version": 1}"#)
+            .expect("decode");
+
+    assert!(decoded.role.is_none());
+}
+
+/// A role kind this build does not serve must not make the whole hello
+/// malformed: the client stated a version this daemon can compare and asked
+/// for something it does not have. Those are different answers.
+#[test]
+fn a_role_kind_this_build_does_not_know_decodes_as_unknown() {
+    let decoded: ClientHello = serde_json::from_str(
+        r#"{"protocol_version": 1, "min_compatible_peer_version": 1,
+            "role": {"kind": "terminal_control", "some_future_field": 7}}"#,
+    )
+    .expect("an unknown role kind is not a malformed hello");
+
+    assert_eq!(
+        decoded.role,
+        Some(ConnectionRole::Unknown {
+            kind: "terminal_control".to_owned()
+        })
+    );
+}
+
+/// The terminal-data role is its token. A claim without one is not that role,
+/// and inventing an empty token would open a channel on nothing.
+#[test]
+fn a_terminal_data_role_without_a_token_is_not_that_role() {
+    let decoded: ClientHello = serde_json::from_str(
+        r#"{"protocol_version": 1, "min_compatible_peer_version": 1,
+            "role": {"kind": "terminal_data"}}"#,
+    )
+    .expect("decode");
+
+    assert_eq!(
+        decoded.role,
+        Some(ConnectionRole::Unknown {
+            kind: "terminal_data".to_owned()
+        })
+    );
+}
+
+/// The published constant and what serde emits are the same string, so a
+/// non-Rust peer that trusts the constant is understood.
+#[test]
+fn the_role_encodes_under_the_name_it_publishes() {
+    let role = ConnectionRole::TerminalData {
+        attach_token: "abc".to_owned(),
+    };
+
+    let encoded = serde_json::to_value(&role).expect("encode");
+
+    assert_eq!(
+        encoded.get("kind").and_then(|kind| kind.as_str()),
+        Some(ConnectionRole::TERMINAL_DATA)
+    );
+    assert_eq!(
+        serde_json::from_value::<ConnectionRole>(encoded).expect("decode"),
+        role
+    );
+}

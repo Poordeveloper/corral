@@ -1,5 +1,17 @@
 use super::*;
 
+/// Drain a viewer, returning what it received.
+///
+/// Dropping each delivery is what returns its room, so this is also how a
+/// healthy client's budget recovers.
+fn drain(viewer: &mut Viewer) -> Vec<Vec<u8>> {
+    let mut received = Vec::new();
+    while let Ok(delivery) = viewer.try_recv() {
+        received.push(delivery.bytes.clone());
+    }
+    received
+}
+
 #[test]
 fn a_stream_starts_at_the_first_epoch_and_sequence() {
     let stream = TerminalStream::new();
@@ -31,113 +43,155 @@ fn a_reflow_opens_a_new_epoch_and_restarts_the_sequence() {
     assert_eq!(stream.next_sequence(), Sequence(0));
 }
 
-/// Each viewer gets its own snapshot and joins the same stream; neither owns
-/// the terminal (grill Q6).
+/// Each viewer gets the same output; neither owns the terminal (grill Q6).
 #[test]
-fn two_viewers_join_the_same_stream_independently() {
+fn every_attached_viewer_receives_the_same_output() {
     let mut stream = TerminalStream::new();
-    stream.advance();
-    let mut first = stream.subscriber();
-    let mut second = stream.subscriber();
+    let mut first = stream.attach();
+    let mut second = stream.attach();
 
-    assert_eq!(first.queue(b"output").expect("queued"), Sequence(1));
-    assert_eq!(second.queue(b"output").expect("queued"), Sequence(1));
-    assert_eq!(first.take_queued().as_deref(), Some(b"output".as_slice()));
+    let sequence = stream.advance();
+    stream.deliver(sequence, b"shared output");
+
+    assert_eq!(drain(&mut first), vec![b"shared output".to_vec()]);
     assert_eq!(
-        second.queued_bytes(),
-        b"output".len(),
-        "one viewer's read drained another's queue"
+        drain(&mut second),
+        vec![b"shared output".to_vec()],
+        "one viewer's read consumed another's copy"
     );
+}
+
+#[test]
+fn a_delivery_carries_the_epoch_and_sequence_it_belongs_to() {
+    let mut stream = TerminalStream::new();
+    let mut viewer = stream.attach();
+
+    let sequence = stream.advance();
+    stream.deliver(sequence, b"output");
+
+    let delivery = viewer.try_recv().expect("a delivery");
+    assert_eq!(delivery.epoch, Epoch(0));
+    assert_eq!(delivery.sequence, Sequence(0));
 }
 
 /// Bytes from a screen shape that no longer exists must not be replayed into a
-/// reflowed replica — the divergence the epoch exists to prevent.
+/// reflowed replica, so a reflow drops every viewer and each is owed a fresh
+/// snapshot.
 #[test]
-fn a_subscriber_rejects_frames_from_an_epoch_it_has_left() {
+fn a_reflow_ends_every_viewers_stream() {
     let mut stream = TerminalStream::new();
-    let mut subscriber = stream.subscriber();
-    let stale = stream.epoch();
+    let mut viewer = stream.attach();
+    assert_eq!(stream.viewers(), 1);
 
-    let fresh = stream.open_epoch();
-    subscriber.enter_epoch(fresh);
+    stream.open_epoch();
 
-    assert!(subscriber.accepts(fresh));
-    assert!(!subscriber.accepts(stale));
+    assert_eq!(stream.viewers(), 0);
+    let sequence = stream.advance();
+    stream.deliver(sequence, b"after the reflow");
+    assert!(
+        drain(&mut viewer).is_empty(),
+        "a viewer was fed bytes from a screen shape it had left"
+    );
 }
 
+/// The budget measures what is still waiting, not what has ever been sent. A
+/// viewer that keeps up must keep receiving for as long as it likes — an
+/// earlier version counted cumulative bytes and dropped a healthy client the
+/// moment a session had produced four megabytes in total.
 #[test]
-fn entering_an_epoch_discards_what_belonged_to_the_old_one() {
+fn a_viewer_that_keeps_up_is_never_dropped_however_much_flows() {
     let mut stream = TerminalStream::new();
-    let mut subscriber = stream.subscriber();
-    subscriber.queue(b"pre-resize output").expect("queued");
+    let mut viewer = stream.attach();
+    let chunk = vec![b'x'; 64 * 1024];
 
-    subscriber.enter_epoch(stream.open_epoch());
+    // Four times the whole budget, drained as it arrives.
+    let rounds = (SUBSCRIBER_QUEUE_BYTES / chunk.len()) * 4;
+    for _ in 0..rounds {
+        let sequence = stream.advance();
+        stream.deliver(sequence, &chunk);
+        assert!(!drain(&mut viewer).is_empty(), "a delivery went missing");
+    }
 
-    assert_eq!(subscriber.queued_bytes(), 0);
-    assert_eq!(subscriber.take_queued(), None);
+    assert_eq!(
+        stream.viewers(),
+        1,
+        "a viewer that read everything was dropped anyway"
+    );
 }
 
 /// A viewer missing bytes out of the middle would render a screen that looks
-/// plausible and is wrong. Losing the whole queue and resyncing is the visible,
-/// honest failure.
+/// plausible and is wrong. Losing the whole stream and resyncing is the
+/// visible, honest failure.
 #[test]
-fn an_overflowing_subscriber_loses_its_stream_rather_than_its_middle() {
-    let stream = TerminalStream::new();
-    let mut subscriber = stream.subscriber();
-    let chunk = vec![b'x'; 1024 * 1024];
+fn a_viewer_that_stops_reading_loses_its_stream_rather_than_its_middle() {
+    let mut stream = TerminalStream::new();
+    let mut viewer = stream.attach();
+    let chunk = vec![b'x'; 64 * 1024];
 
-    let mut overflowed = false;
-    for _ in 0..8 {
-        if subscriber.queue(&chunk).is_err() {
-            overflowed = true;
-            break;
-        }
+    // Never drained, so the budget fills and stays full.
+    for _ in 0..(SUBSCRIBER_QUEUE_BYTES / chunk.len() + 2) {
+        let sequence = stream.advance();
+        stream.deliver(sequence, &chunk);
     }
 
-    assert!(overflowed, "the queue never enforced its budget");
     assert_eq!(
-        subscriber.desynchronised(),
-        Some(Desynchronised::QueueOverflow)
-    );
-    assert_eq!(
-        subscriber.queued_bytes(),
+        stream.viewers(),
         0,
-        "a desynchronised subscriber kept a partial stream"
+        "a viewer past its budget kept receiving"
     );
-    assert_eq!(subscriber.take_queued(), None);
+    // What it did receive is a prefix, never a stream with a hole in it.
+    let received = drain(&mut viewer);
+    assert!(!received.is_empty());
+    assert!(received.iter().all(|bytes| bytes.len() == chunk.len()));
 }
 
 /// One stalled viewer must not shrink what another may buffer, and must not
 /// slow the stream itself.
 #[test]
-fn one_desynchronised_viewer_leaves_the_others_untouched() {
+fn one_stalled_viewer_leaves_the_others_untouched() {
     let mut stream = TerminalStream::new();
-    let mut stalled = stream.subscriber();
-    let mut healthy = stream.subscriber();
-    let chunk = vec![b'x'; SUBSCRIBER_QUEUE_BYTES + 1];
+    let _stalled = stream.attach();
+    let mut healthy = stream.attach();
+    let chunk = vec![b'x'; 64 * 1024];
 
-    assert!(stalled.queue(&chunk).is_err());
-
-    assert!(healthy.queue(b"still flowing").is_ok());
-    assert_eq!(healthy.desynchronised(), None);
-    assert_eq!(stream.advance(), Sequence(0), "the stream itself stalled");
-}
-
-#[test]
-fn a_desynchronised_subscriber_stays_refused_until_it_resyncs() {
-    let stream = TerminalStream::new();
-    let mut subscriber = stream.subscriber();
-    let chunk = vec![b'x'; SUBSCRIBER_QUEUE_BYTES + 1];
-    assert!(subscriber.queue(&chunk).is_err());
+    for _ in 0..(SUBSCRIBER_QUEUE_BYTES / chunk.len() + 2) {
+        let sequence = stream.advance();
+        stream.deliver(sequence, &chunk);
+        let _ = drain(&mut healthy);
+    }
 
     assert_eq!(
-        subscriber.queue(b"anything"),
-        Err(Desynchronised::QueueOverflow)
+        stream.viewers(),
+        1,
+        "the healthy viewer was dropped with the stalled one"
     );
+    let sequence = stream.advance();
+    stream.deliver(sequence, b"still flowing");
+    assert_eq!(drain(&mut healthy), vec![b"still flowing".to_vec()]);
+}
 
-    subscriber.enter_epoch(stream.epoch());
-    assert!(
-        subscriber.queue(b"after a resync").is_ok(),
-        "a resynced subscriber never recovered"
-    );
+/// A viewer whose client detached is dropped rather than accumulating output
+/// nobody will ever read.
+#[test]
+fn a_viewer_whose_client_left_is_dropped() {
+    let mut stream = TerminalStream::new();
+    let viewer = stream.attach();
+    drop(viewer);
+
+    let sequence = stream.advance();
+    stream.deliver(sequence, b"output");
+
+    assert_eq!(stream.viewers(), 0);
+}
+
+/// Delivering to nobody is not an error: a session runs whether or not anyone
+/// is watching, which is the point of the daemon owning the screen.
+#[test]
+fn a_stream_with_no_viewers_still_advances() {
+    let mut stream = TerminalStream::new();
+
+    let sequence = stream.advance();
+    stream.deliver(sequence, b"nobody is attached");
+
+    assert_eq!(stream.next_sequence(), Sequence(1));
 }

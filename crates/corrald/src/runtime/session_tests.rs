@@ -53,7 +53,10 @@ fn a_started_session_serves_a_snapshot() {
 fn a_started_session_reports_the_geometry_it_was_given() {
     let handle = started("sleep 30");
 
-    assert_eq!(handle.geometry().expect("the session answered"), GEOMETRY);
+    assert_eq!(
+        handle.geometry().expect("the session answered"),
+        Ok(GEOMETRY)
+    );
 }
 
 /// The title is the executable basename, never the arguments: argv carries
@@ -84,7 +87,7 @@ fn a_resize_opens_a_new_epoch_and_moves_the_authoritative_geometry() {
         .expect("the terminal took the size");
 
     assert_eq!(epoch, Epoch(1), "the first resize opened the first epoch");
-    assert_eq!(handle.geometry().expect("the session answered"), wanted);
+    assert_eq!(handle.geometry().expect("the session answered"), Ok(wanted));
 }
 
 #[test]
