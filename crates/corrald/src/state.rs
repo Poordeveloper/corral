@@ -98,6 +98,26 @@ impl DaemonState {
             .unwrap_or(0)
     }
 
+    /// The managed runs this daemon still believes are running.
+    ///
+    /// For shutdown, which has to be able to name what it is about to end
+    /// rather than count it (ADR 0007 L6). Empty when the runtime cannot be
+    /// consulted: a shutdown does not stall on a lock, and silence is the
+    /// honest report when nothing can be read.
+    pub fn running_sessions(&self) -> Vec<crate::runtime::ManagedSession> {
+        self.with_runtime(|runtime| {
+            runtime
+                .sessions
+                .describe()
+                .into_iter()
+                .filter(|session| {
+                    session.execution_state == crate::runtime::ExecutionState::Running
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
     /// Work with the live runtime.
     ///
     /// Synchronous and short: these calls touch in-memory state and message a

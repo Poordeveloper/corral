@@ -236,6 +236,10 @@ model. Fixed by ADR 3, with these rules:
   between daemon log and client parser.
 - **PTY byte streams travel on a dedicated framed data channel, never on
   the semantic RPC channel.**
+- **A finished run's screen is released, not kept served.** The screen
+  thread ends with the runtime it exists for; the session answers from the
+  final screen that thread published, and no viewer is offered a stream
+  that can never produce (ADR 0007).
 
 Deferred until remote/mobile requires them: ACK/credit flow control, remote
 backpressure, viewport claiming, paired parking, and any large binary opcode
@@ -546,6 +550,7 @@ terms: `PRODUCT.md` §8.
 | **Snapshot epoch** | the screen shape a sequence is measured against. A resize reflows the emulator, so bytes recorded before it cannot be replayed into a screen shaped after it: the epoch advances and a fresh snapshot replaces the stream |
 | **Terminal data channel** | the connection carrying a session's terminal frames. A second connection to the canonical rendezvous, claimed by redeeming a one-time attach token, after which it never carries semantic RPC again |
 | **Attach token** | the single-use, short-lived capability that opens one terminal data channel. Bound to a Session *and* its concrete Run, because a Session outlives the process a token was minted for |
+| **Final screen** | the snapshot a Run's screen thread publishes as its last act. A finished Run's screen is a value, not an actor: the emulator, its scrollback, and the thread that owned them are released when the runtime ends, and this is what a session answers from afterwards |
 | **Snapshot budget / ceiling** | the encoded size a normal snapshot aims at versus the absolute bound no successful snapshot may pass. Trimming sacrifices oldest scrollback first; a viewport alone past the ceiling is a typed failure, never a partial screen |
 | **Live synchronized control** | joining the same live provider session as a second synchronized surface; the preferred control path |
 | **First-response lease** | the bounded window (≤15s) during which Corral may hold an already-blocked interaction before failing open |

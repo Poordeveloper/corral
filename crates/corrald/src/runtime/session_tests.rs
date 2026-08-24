@@ -248,3 +248,135 @@ fn the_execution_states_have_stable_wire_spellings() {
     assert_eq!(ExecutionState::Exited.as_str(), "exited");
     assert_eq!(ExecutionState::Unknown.as_str(), "unknown");
 }
+
+/// The screen stops being an actor when its runtime ends (ADR 0007 L2). The
+/// thread, the emulator and the pty go; what a finished session answers from
+/// is the record that thread published on its way out.
+#[test]
+fn a_finished_run_releases_the_thread_that_served_its_screen() {
+    let handle = started(r"printf 'left-behind\r\n'").into_handle();
+
+    // The liveness proof is the thread's own stack: it drops when the thread
+    // returns, whatever returned it.
+    let retired = wait_for(|| handle.alive.upgrade().is_none().then_some(()));
+
+    assert!(
+        retired.is_some(),
+        "the screen thread outlived the runtime it existed to serve"
+    );
+    let snapshot = handle
+        .snapshot()
+        .expect("the record answers")
+        .expect("the screen encodes");
+    assert!(
+        String::from_utf8_lossy(snapshot.payload()).contains("left-behind"),
+        "the record lost what the run left on the screen"
+    );
+}
+
+/// An exit Corral watched happen stays watched. Retiring the thread that
+/// published it cannot make it unestablished again (ADR 0007 L3).
+#[test]
+fn a_retired_session_still_reports_the_exit_corral_observed() {
+    let handle = started("true").into_handle();
+
+    let retired = wait_for(|| handle.alive.upgrade().is_none().then_some(()));
+    assert!(retired.is_some(), "the screen thread never retired");
+
+    assert_eq!(
+        handle.execution_state(),
+        ExecutionState::Exited,
+        "the daemon un-established an exit it had already observed"
+    );
+}
+
+/// Attaching after the end gives the whole of what there is. There is no
+/// stream, and saying so is what stops a viewer waiting for deltas that can
+/// never come (ADR 0007 L2).
+#[test]
+fn attaching_after_the_run_ended_gives_a_final_screen_and_no_stream() {
+    let handle = started(r"printf 'left-behind\r\n'").into_handle();
+    assert!(
+        wait_for(|| handle.alive.upgrade().is_none().then_some(())).is_some(),
+        "the screen thread never retired"
+    );
+
+    let attachment = handle.attach().expect("the record answers");
+
+    assert!(
+        attachment.viewer.is_none(),
+        "a finished run offered a stream that can never produce"
+    );
+    let snapshot = attachment.snapshot.expect("the screen encodes");
+    assert!(String::from_utf8_lossy(snapshot.payload()).contains("left-behind"));
+}
+
+/// A person typing at a finished run is told what happened, and told the truth:
+/// the run ended, which is a different fact from a runtime that stopped
+/// answering (ADR 0007 L3).
+#[test]
+fn input_to_a_finished_run_is_refused_as_ended_rather_than_swallowed() {
+    let handle = started("true").into_handle();
+    assert!(
+        wait_for(|| handle.alive.upgrade().is_none().then_some(())).is_some(),
+        "the screen thread never retired"
+    );
+
+    assert_eq!(
+        handle.write_input(b"typed-at-a-corpse\n".to_vec()),
+        Err(InputRefused::RunEnded)
+    );
+}
+
+#[test]
+fn resizing_a_finished_run_says_the_run_ended() {
+    let handle = started("true").into_handle();
+    assert!(
+        wait_for(|| handle.alive.upgrade().is_none().then_some(())).is_some(),
+        "the screen thread never retired"
+    );
+
+    assert_eq!(
+        handle.resize(PtyGeometry::expect_valid(40, 120)),
+        Ok(Err(ResizeRefused::RunEnded))
+    );
+}
+
+/// A screen gone while its runtime is live leaves nothing draining the pty, so
+/// a child left running fills its buffer and blocks on a write forever —
+/// alive, unreachable, unlistable. The reaper ends it with the group it still
+/// owns, which is the ruling already made for a session the registry refused
+/// (ADR 0007 L4).
+#[test]
+fn a_lost_screen_ends_the_run_rather_than_leaving_it_blocked() {
+    let runtime = super::super::spawn::spawn(
+        &request("/bin/sh", &["-c", r"printf 'x'; sleep 30"]),
+        GEOMETRY,
+    )
+    .expect("the child starts");
+    let group = runtime.child_group();
+    let (screen, reaper) = runtime.split();
+    let reader = screen.reader().expect("clone the reader");
+    // What a lost screen thread looks like from here: the end this reader
+    // sends to is already gone.
+    let (asks, questions) = sync_channel(1);
+    drop(questions);
+
+    let (done, waited) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        read_pty(reader, reaper, group, asks);
+        let _ = done.send(());
+    });
+
+    let ended = waited.recv_timeout(Duration::from_secs(10)).is_ok();
+    if !ended {
+        // Leave nothing running behind a failure.
+        if let Some(group) = group {
+            group.hang_up();
+        }
+    }
+    assert!(
+        ended,
+        "the child outlived the screen that was the only thing draining it"
+    );
+}

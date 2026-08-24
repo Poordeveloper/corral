@@ -77,7 +77,7 @@ impl std::fmt::Debug for Started {
 impl Drop for Started {
     fn drop(&mut self) {
         if let Some(group) = self.group {
-            self.screen.hang_up(group);
+            group.hang_up();
         }
         let _ = self.reaper.wait();
     }

@@ -85,9 +85,7 @@ impl AuthoritativeTerminal {
 
     /// Whether this screen may still be read or fed.
     ///
-    /// Fail-closed containment, not a repair: Corral never guesses what the
-    /// parser meant to do with the bytes that broke it (AGENTS.md §Scope
-    /// discipline). Root cause and follow-up:
+    /// Root cause and follow-up:
     /// `docs/evidence/pr3-terminal-fuzz-2026-08-24.md`.
     pub fn poisoned(&self) -> Option<Poisoned> {
         self.poisoned
@@ -101,30 +99,13 @@ impl AuthoritativeTerminal {
     /// the part every surface reads.
     #[must_use]
     pub fn consume(&mut self, bytes: &[u8]) -> DeviceReply {
-        if self.poisoned.is_some() {
-            return DeviceReply::default();
-        }
-
-        // The VT parser is third-party code with a large unsafe surface on the
-        // path every untrusted byte takes first (ADR 0003 D1). A panic there
-        // is contained rather than allowed to take the daemon's thread with
-        // it — but it is never treated as recoverable: the screen is marked
-        // and nothing reads it again, because a panic out of a half-modified
-        // structure makes even reading unsound.
-        let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        self.contain(|this| {
             for byte in bytes {
-                self.stream.next(*byte);
+                this.stream.next(*byte);
             }
-            self.stream.handler.take_output()
-        }));
-
-        match parsed {
-            Ok(reply) => DeviceReply(reply),
-            Err(_) => {
-                self.poisoned = Some(Poisoned::ParserPanicked);
-                DeviceReply::default()
-            }
-        }
+            DeviceReply(this.stream.handler.take_output())
+        })
+        .unwrap_or_default()
     }
 
     /// Reflow to a new geometry.
@@ -133,12 +114,62 @@ impl AuthoritativeTerminal {
     /// into a reflowed screen diverges, which is why resize is an epoch
     /// boundary rather than another delta (ADR 0003, `ARCHITECTURE.md` §3).
     pub fn resize(&mut self, geometry: PtyGeometry) {
-        if self.poisoned.is_some() {
-            return;
+        let _ = self.contain(|this| {
+            this.stream
+                .terminal_mut()
+                .resize(geometry.cols(), geometry.rows());
+        });
+    }
+
+    /// Serialize this screen, against the default budget.
+    pub fn snapshot(
+        &mut self,
+    ) -> Result<super::snapshot::Snapshot, super::snapshot::SnapshotError> {
+        self.snapshot_within(super::snapshot::SnapshotBudget::DEFAULT)
+    }
+
+    /// Serialize this screen against an explicit budget.
+    ///
+    /// Here rather than beside the serializer because serialization walks the
+    /// same packed pages that parsing writes, so it is one of the three ways
+    /// into the structure this type owns the poison flag for — and the flag is
+    /// what a contained panic has to be able to set (ADR 0007 L5).
+    pub fn snapshot_within(
+        &mut self,
+        budget: super::snapshot::SnapshotBudget,
+    ) -> Result<super::snapshot::Snapshot, super::snapshot::SnapshotError> {
+        match self.contain(|this| super::snapshot::encode_within(this, budget)) {
+            Some(snapshot) => snapshot,
+            // Asked again rather than answered here: the serializer already
+            // owns what a poisoned screen is refused with, and a second copy
+            // of that sentence is a second thing to keep true.
+            None => super::snapshot::encode_within(self, budget),
         }
-        self.stream
-            .terminal_mut()
-            .resize(geometry.cols(), geometry.rows());
+    }
+
+    /// Enter the emulator, or refuse to.
+    ///
+    /// The one door into the emulator's packed pages — parsing, reflow, and
+    /// serialization all walk them, so a boundary around only the first would
+    /// give three identical risks different answers. `None` means the screen
+    /// was already poisoned or has just become so; a poisoned screen is never
+    /// read again, because a panic out of a half-modified page makes even
+    /// reading unsound.
+    ///
+    /// Fail-closed containment, not a repair: Corral never guesses what the
+    /// parser meant to do with the bytes that broke it (AGENTS.md §Scope
+    /// discipline).
+    fn contain<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> Option<T> {
+        if self.poisoned.is_some() {
+            return None;
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(self))) {
+            Ok(outcome) => Some(outcome),
+            Err(_) => {
+                self.poisoned = Some(Poisoned::ParserPanicked);
+                None
+            }
+        }
     }
 
     /// The screen's size, or `None` once the screen may no longer be read.

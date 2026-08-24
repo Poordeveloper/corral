@@ -27,8 +27,8 @@ pub use attach::{
 };
 pub use launch::{LaunchRejection, LaunchRequest};
 pub use session::{
-    Attachment, ExecutionState, ManagedSession, ManagedSessions, ResizeRefused, ScreenUnreadable,
-    SessionGone, SessionHandle, StartError, start,
+    Attachment, ExecutionState, InputRefused, ManagedSession, ManagedSessions, ResizeRefused,
+    ScreenUnreadable, SessionGone, SessionHandle, StartError, start,
 };
 pub use snapshot::{
     SNAPSHOT_CEILING_BYTES, SNAPSHOT_SCROLLBACK_ROWS, SNAPSHOT_TARGET_BYTES, Snapshot,

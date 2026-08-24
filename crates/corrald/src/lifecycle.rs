@@ -119,7 +119,12 @@ impl Lifecycle {
         self.lock().established
     }
 
-    pub fn managed_sessions(&self) -> usize {
+    /// The live-run count the last idle check recorded.
+    ///
+    /// The number `busy` reads, exposed so the idle tests can assert on the
+    /// thing the decision is actually made from rather than on a proxy for it.
+    #[cfg(test)]
+    pub(crate) fn managed_sessions(&self) -> usize {
         self.lock().managed_sessions
     }
 

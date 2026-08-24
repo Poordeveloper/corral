@@ -55,10 +55,18 @@ struct Channel {
 
 /// Read one terminal frame, waiting up to the settle budget for it.
 fn read_frame(channel: &mut Channel) -> Option<(u8, Vec<u8>)> {
+    read_frame_within(channel, SETTLE)
+}
+
+/// The same, on a budget the caller picks.
+///
+/// For asserting that nothing arrives, where the settle budget is the cost of
+/// the assertion rather than headroom against a slow machine.
+fn read_frame_within(channel: &mut Channel, budget: Duration) -> Option<(u8, Vec<u8>)> {
     channel
         .reader
         .get_ref()
-        .set_read_timeout(Some(SETTLE))
+        .set_read_timeout(Some(budget))
         .expect("a read deadline");
     let stream = &mut channel.reader;
     let mut header = [0_u8; HEADER_BYTES];
@@ -621,4 +629,96 @@ fn the_cli_starts_a_session_and_leaves_it_running() {
         sessions[0].get("execution_state").and_then(Value::as_str),
         Some("running")
     );
+}
+
+/// The end of a run, seen from a person who was watching it happen.
+///
+/// The daemon retires the screen the moment its runtime ends (ADR 0007 L2), so
+/// the stream this client was reading closes and it is sent the final screen
+/// instead — unprompted, because the alternative is a viewer waiting on deltas
+/// that can never come. Typing afterwards is answered once and does not end
+/// the channel: the final screen is what they attached to read.
+#[test]
+fn a_run_ending_under_an_attached_client_leaves_it_the_final_screen() {
+    let account = TestAccount::new("run-ends-while-attached");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+
+    let started = start_session(
+        &mut client,
+        1,
+        &["/bin/sh", "-c", "read _; printf 'FINAL-SCREEN\\r\\n'"],
+    );
+    let session = session_id(&started);
+    let granted = attach_token(&mut client, 2, &session);
+    let token = result(&granted)
+        .get("attach_token")
+        .and_then(Value::as_str)
+        .expect("a token")
+        .to_owned();
+
+    let mut channel = open_channel(&account, &token);
+    let _first_snapshot = read_frame(&mut channel);
+
+    // Let the child finish.
+    channel
+        .writer
+        .write_all(&input_frame(b"\n"))
+        .expect("the input was sent");
+
+    // A snapshot nobody asked for: the stream ended, so the daemon replaced it
+    // with the whole of what is left. Pre-retirement the viewer never closed
+    // and this frame never came.
+    let deadline = Instant::now() + SETTLE;
+    let mut final_screen = false;
+    while Instant::now() < deadline && !final_screen {
+        match read_frame(&mut channel) {
+            Some((1, payload)) => {
+                final_screen = String::from_utf8_lossy(&payload).contains("FINAL-SCREEN");
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(
+        final_screen,
+        "the client was never sent the screen its run left behind"
+    );
+
+    channel
+        .writer
+        .write_all(&input_frame(b"typed-at-a-corpse"))
+        .expect("the input was sent");
+
+    let (kind, payload) = read_frame(&mut channel).expect("the daemon answered");
+    assert_eq!(kind, 6, "typing at a finished run was not answered");
+    assert!(
+        String::from_utf8_lossy(&payload).contains("run has ended"),
+        "the client was told something other than what happened: {}",
+        String::from_utf8_lossy(&payload)
+    );
+
+    // Told once. The message is written over the screen the person is reading,
+    // and the channel stays open so they can keep reading it.
+    channel
+        .writer
+        .write_all(&input_frame(b"and-again"))
+        .expect("the input was sent");
+    assert_eq!(
+        read_frame_within(&mut channel, Duration::from_secs(1)),
+        None,
+        "the daemon repeated itself over the screen the person is reading"
+    );
+}
+
+/// An input frame: kind 3, epoch 0, sequence 0, then the bytes.
+fn input_frame(payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::new();
+    frame.push(3_u8);
+    frame.extend_from_slice(&0_u64.to_be_bytes());
+    frame.extend_from_slice(&0_u64.to_be_bytes());
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(payload);
+    frame
 }

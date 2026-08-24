@@ -139,6 +139,27 @@ impl ChildGroup {
         // Non-negative by construction: it came from a pid Corral created.
         self.0.unsigned_abs()
     }
+
+    /// End every process in this group.
+    ///
+    /// Corral owns descendant teardown, not the backend: the backend's own
+    /// kill targets one child, which is not the same as the group a shell may
+    /// have spawned (grill Q1). SIGHUP because that is what a terminal going
+    /// away means, and a process that chooses to ignore it is making a
+    /// decision Corral does not override.
+    ///
+    /// Targets the group Corral created the child as, not whatever the tty
+    /// reports now. The tty answers nothing at all in the window between fork
+    /// and setsid, so a teardown that asked it would silently do nothing.
+    ///
+    /// Valid only until the child has been reaped, and the reaper is the only
+    /// party that waits — after that the number may name something else
+    /// (ADR 0007 L4).
+    pub fn hang_up(self) {
+        if let Some(pid) = rustix::process::Pid::from_raw(self.0) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::HUP);
+        }
+    }
 }
 
 /// The process half: the one thing that can establish how a child ended.
@@ -247,37 +268,16 @@ impl ManagedTerminal {
             .take_writer()
             .map_err(|error| io::Error::other(error.to_string()))
     }
-}
 
-impl ManagedTerminal {
-    /// The foreground process group of this terminal.
+    /// The foreground process group this terminal currently reports.
     ///
-    /// Read from the terminal rather than remembered from the spawn, because
-    /// it is what the terminal currently reports: a child that starts its own
-    /// job control moves it. Teardown targets this group, which is why Corral
-    /// asks the tty rather than assuming the first pid it saw still speaks for
-    /// every descendant.
+    /// Not what teardown targets — that is the group Corral created the child
+    /// as (`ChildGroup::hang_up`), which is knowable in the window where the
+    /// tty answers nothing. This is here so the spawn suite can assert that
+    /// the two agree at the start: a child that did not become its own group
+    /// leader on its own tty was not given a controlling terminal.
     pub fn process_group_leader(&self) -> Option<i32> {
         self.master.process_group_leader()
-    }
-
-    /// End every process on this terminal.
-    ///
-    /// Corral owns descendant teardown, not the backend: the backend's own
-    /// kill targets one child, which is not the same as the group a shell may
-    /// have spawned (grill Q1). SIGHUP because that is what a terminal going
-    /// away means, and a process that chooses to ignore it is making a
-    /// decision Corral does not override.
-    ///
-    /// Targets the group Corral created the child as, not whatever the tty
-    /// reports now. The tty answers nothing at all in the window between fork
-    /// and setsid, so a teardown that asked it would silently do nothing —
-    /// and once the child has been reaped its old group number may belong to
-    /// something else entirely.
-    pub fn hang_up(&self, group: ChildGroup) {
-        if let Some(pid) = rustix::process::Pid::from_raw(group.0) {
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::HUP);
-        }
     }
 }
 

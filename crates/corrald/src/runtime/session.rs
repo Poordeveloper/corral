@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Instant;
@@ -79,7 +80,44 @@ pub struct Attachment {
     /// snapshot stamped zero after eight thousand chunks tells any client that
     /// checks for gaps that it just missed eight thousand frames.
     pub sequence: Sequence,
-    pub viewer: super::stream::Viewer,
+    /// Where the deltas after this snapshot arrive, or `None` when there will
+    /// be none.
+    ///
+    /// A finished run's screen is a value, not an actor (ADR 0007 L2): the
+    /// snapshot is the whole of it, and a viewer that waited on a stream which
+    /// can never produce again would either hang or resync in a loop.
+    pub viewer: Option<super::stream::Viewer>,
+}
+
+/// What the screen thread publishes for readers that cannot ask it.
+///
+/// Written by that thread alone and read by anyone. Listing sessions and
+/// answering a finished one both happen on the daemon's one reactor thread,
+/// where a round trip to a screen would put every other connection behind
+/// whatever that session happens to be doing.
+#[derive(Clone)]
+struct Published {
+    /// The screen thread's own view of execution.
+    execution: Arc<AtomicU8>,
+    /// The last geometry it applied, packed into one atomic so a reader never
+    /// sees a row from one moment and a column from another.
+    geometry: Arc<AtomicU32>,
+    /// Set once, as that thread's last act (ADR 0007 L2).
+    screen: Arc<OnceLock<FinalScreen>>,
+}
+
+/// The screen a run left behind, published when its screen thread ends.
+///
+/// Everything a finished session can still be asked, answered without a thread
+/// to ask: the emulator, its scrollback, and the thread that owned them are
+/// released at the moment the runtime ends, and this is what survives them
+/// (ADR 0007 L1, L2).
+struct FinalScreen {
+    snapshot: Result<Snapshot, SnapshotError>,
+    epoch: Epoch,
+    sequence: Sequence,
+    geometry: PtyGeometry,
+    title: Option<Vec<u8>>,
 }
 
 /// The screen exists and cannot be read.
@@ -89,6 +127,20 @@ pub struct Attachment {
 /// runtime is still there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScreenUnreadable;
+
+/// Why a session did not take input.
+///
+/// Two answers, because a client must act on them differently: a run that
+/// ended still has a screen worth looking at, and a runtime that is no longer
+/// answering does not (ADR 0007 L3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputRefused {
+    /// This run has ended. Its screen is a record now; nothing reads
+    /// keystrokes.
+    RunEnded,
+    /// Corral can no longer reach this session's runtime and cannot say why.
+    RuntimeGone,
+}
 
 /// Why a terminal did not take a new size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +152,8 @@ pub enum ResizeRefused {
     TerminalRefused,
     /// The screen may no longer be read or written at all.
     ScreenPoisoned,
+    /// This run has ended, so there is no terminal left to give a size to.
+    RunEnded,
 }
 
 /// The handle a daemon holds to one running session.
@@ -109,11 +163,6 @@ pub struct SessionHandle {
     title: String,
     asks: SyncSender<Ask>,
     started_at: Instant,
-    /// The last geometry the screen thread published.
-    ///
-    /// Packed into one atomic so a reader gets a size that existed rather than
-    /// a row from one moment and a column from another.
-    published_geometry: Arc<AtomicU32>,
     /// Weak proof that the screen thread is still there.
     ///
     /// The published state below is only as current as the thread that writes
@@ -122,14 +171,7 @@ pub struct SessionHandle {
     /// losing the ability to manage a runtime is not evidence about a process
     /// (ADR 0002, grill Q5).
     alive: std::sync::Weak<()>,
-    /// The screen thread's own view of execution, written by it and read by
-    /// anyone.
-    ///
-    /// A shared cell rather than a question, because listing sessions happens
-    /// on the daemon's single reactor thread: asking each screen thread and
-    /// waiting for its answer would put one blocking round trip per session in
-    /// front of every other connection.
-    execution: Arc<AtomicU8>,
+    published: Published,
 }
 
 /// `ExecutionState` as a byte, so the screen thread can publish it without a
@@ -171,10 +213,20 @@ impl SessionHandle {
         self.started_at
     }
 
+    /// This session's screen, live or as its run left it.
+    ///
+    /// Answered from the record once the runtime has ended: the screen thread
+    /// is gone by then, and a snapshot of a finished run is exactly what it
+    /// published on its way out (ADR 0007 L2).
     pub fn snapshot(&self) -> Result<Result<Snapshot, SnapshotError>, SessionGone> {
         let (reply, answer) = sync_channel(1);
-        self.ask(Ask::Snapshot(reply))?;
-        answer.recv().map_err(|_| SessionGone)
+        match self
+            .ask(Ask::Snapshot(reply))
+            .and_then(|()| answer.recv().map_err(|_| SessionGone))
+        {
+            Ok(snapshot) => Ok(snapshot),
+            Err(SessionGone) => Ok(self.recorded()?.snapshot.clone()),
+        }
     }
 
     /// Apply a client's desired geometry, returning the epoch it opened.
@@ -187,8 +239,18 @@ impl SessionHandle {
         geometry: PtyGeometry,
     ) -> Result<Result<Epoch, ResizeRefused>, SessionGone> {
         let (reply, answer) = sync_channel(1);
-        self.ask(Ask::Resize(geometry, reply))?;
-        answer.recv().map_err(|_| SessionGone)
+        match self
+            .ask(Ask::Resize(geometry, reply))
+            .and_then(|()| answer.recv().map_err(|_| SessionGone))
+        {
+            Ok(outcome) => Ok(outcome),
+            // A run that ended has no terminal to give a size to, and saying
+            // so is a different fact from a runtime that stopped answering.
+            Err(SessionGone) => {
+                self.recorded()?;
+                Ok(Err(ResizeRefused::RunEnded))
+            }
+        }
     }
 
     /// Write bytes a client's replica encoded.
@@ -196,8 +258,12 @@ impl SessionHandle {
     /// The daemon does not interpret them: the client owns input encoding
     /// because only it knows its replica's live mode bits (`ARCHITECTURE.md`
     /// §3).
-    pub fn write_input(&self, bytes: Vec<u8>) -> Result<(), SessionGone> {
-        self.ask(Ask::Input(bytes))
+    pub fn write_input(&self, bytes: Vec<u8>) -> Result<(), InputRefused> {
+        match self.ask(Ask::Input(bytes)) {
+            Ok(()) => Ok(()),
+            Err(SessionGone) if self.recorded().is_ok() => Err(InputRefused::RunEnded),
+            Err(SessionGone) => Err(InputRefused::RuntimeGone),
+        }
     }
 
     /// The last size the screen published, without asking it.
@@ -205,8 +271,7 @@ impl SessionHandle {
     /// For callers on the daemon's reactor thread, where waiting on a screen
     /// would block every other connection.
     pub fn last_geometry(&self) -> PtyGeometry {
-        let packed = self.published_geometry.load(Ordering::Acquire);
-        PtyGeometry::expect_valid((packed >> 16) as u16, packed as u16)
+        unpack_geometry(&self.published.geometry)
     }
 
     /// The screen's size, or why there is none to state.
@@ -215,14 +280,24 @@ impl SessionHandle {
     /// longer be read, and a runtime that is not answering at all.
     pub fn geometry(&self) -> Result<Result<PtyGeometry, ScreenUnreadable>, SessionGone> {
         let (reply, answer) = sync_channel(1);
-        self.ask(Ask::Geometry(reply))?;
-        answer.recv().map_err(|_| SessionGone)
+        match self
+            .ask(Ask::Geometry(reply))
+            .and_then(|()| answer.recv().map_err(|_| SessionGone))
+        {
+            Ok(geometry) => Ok(geometry),
+            Err(SessionGone) => Ok(Ok(self.recorded()?.geometry)),
+        }
     }
 
     pub fn title_from_screen(&self) -> Result<Option<Vec<u8>>, SessionGone> {
         let (reply, answer) = sync_channel(1);
-        self.ask(Ask::Title(reply))?;
-        answer.recv().map_err(|_| SessionGone)
+        match self
+            .ask(Ask::Title(reply))
+            .and_then(|()| answer.recv().map_err(|_| SessionGone))
+        {
+            Ok(title) => Ok(title),
+            Err(SessionGone) => Ok(self.recorded()?.title.clone()),
+        }
     }
 
     /// End this session's runtime.
@@ -239,37 +314,67 @@ impl SessionHandle {
         let _ = self.asks.try_send(Ask::ShutDown);
     }
 
-    /// Join this session's terminal stream.
+    /// Join this session's terminal stream, or read what its run left.
     ///
-    /// The snapshot and the delta stream are minted in one step on the thread
-    /// that owns the screen, so no output can slip between them — a viewer
-    /// that missed the bytes written while its snapshot was being encoded
-    /// would render a screen that never existed.
+    /// While the run is live the snapshot and the delta stream are minted in
+    /// one step on the thread that owns the screen, so no output can slip
+    /// between them — a viewer that missed the bytes written while its
+    /// snapshot was being encoded would render a screen that never existed.
     pub fn attach(&self) -> Result<Attachment, SessionGone> {
         let (reply, answer) = sync_channel(1);
-        self.ask(Ask::Attach(reply))?;
-        answer.recv().map_err(|_| SessionGone)
+        match self
+            .ask(Ask::Attach(reply))
+            .and_then(|()| answer.recv().map_err(|_| SessionGone))
+        {
+            Ok(attachment) => Ok(attachment),
+            // A finished run's screen is the whole of what it has: there is
+            // no stream to join, and saying so is what stops a viewer from
+            // waiting on deltas that can never come (ADR 0007 L2).
+            Err(SessionGone) => {
+                let recorded = self.recorded()?;
+                Ok(Attachment {
+                    snapshot: recorded.snapshot.clone(),
+                    epoch: recorded.epoch,
+                    sequence: recorded.sequence,
+                    viewer: None,
+                })
+            }
+        }
     }
 
     /// What the daemon can currently claim about this Run's execution.
     ///
-    /// `Exited` only once the child has actually been reaped. A screen thread
-    /// that is gone leaves whatever it last published, and a handle whose
-    /// channel is closed reads `Unknown` — because the daemon losing the
-    /// ability to manage a runtime is not evidence that the process died
-    /// (ADR 0002, grill Q5).
+    /// `Exited` only once the child has actually been reaped, and it stays
+    /// `Exited`: the screen thread retires the moment it publishes an end, and
+    /// a fact that has been established is not unestablished by its publisher
+    /// leaving (ADR 0007 L3).
     ///
     /// Reads a published value rather than asking, so listing sessions never
     /// waits on a screen that is busy.
     pub fn execution_state(&self) -> ExecutionState {
-        if self.alive.upgrade().is_none() {
-            return ExecutionState::Unknown;
-        }
-        match self.execution.load(Ordering::Acquire) {
-            EXECUTION_RUNNING => ExecutionState::Running,
+        match self.published.execution.load(Ordering::Acquire) {
+            // Terminal facts. Nothing can un-exit, and nothing can make an
+            // unestablished end establishable later, so no later event can
+            // make either stale — including the screen thread retiring, which
+            // is what publishing one of these leads to (ADR 0007 L3).
             EXECUTION_EXITED => ExecutionState::Exited,
-            _ => ExecutionState::Unknown,
+            EXECUTION_UNKNOWN => ExecutionState::Unknown,
+            // A claim about the present, extended only by the thread that
+            // publishes it. If that thread is gone the value describes a past
+            // nobody can extend, and losing the ability to manage a runtime is
+            // not evidence about a process (ADR 0002, grill Q5).
+            _ if self.alive.upgrade().is_none() => ExecutionState::Unknown,
+            _ => ExecutionState::Running,
         }
+    }
+
+    /// The screen this run left behind, or why there is none.
+    ///
+    /// `Err` means the screen thread is gone without having published one: a
+    /// loss rather than a retirement, and the one case that is genuinely
+    /// `SessionGone` (ADR 0007 L3).
+    fn recorded(&self) -> Result<&FinalScreen, SessionGone> {
+        self.published.screen.get().ok_or(SessionGone)
     }
 
     fn ask(&self, ask: Ask) -> Result<(), SessionGone> {
@@ -286,7 +391,9 @@ impl SessionHandle {
         let (severed, _) = sync_channel(1);
         self.asks = severed;
         // The screen thread being unreachable is the whole point: drop the
-        // proof it is there, exactly as its ending would.
+        // proof it is there, exactly as its ending would. The record stays
+        // empty, which is what makes this a loss and not a retirement — a
+        // thread that ended on purpose publishes one first (ADR 0007 L3).
         self.alive = std::sync::Weak::new();
     }
 }
@@ -303,8 +410,11 @@ pub fn start(
     // without limit; generous because the screen thread drains it in a tight
     // loop and the PTY reader shares it.
     let (asks, questions) = sync_channel(256);
-    let execution = Arc::new(AtomicU8::new(EXECUTION_RUNNING));
-    let published_geometry = Arc::new(AtomicU32::new(pack_geometry(geometry)));
+    let published = Published {
+        execution: Arc::new(AtomicU8::new(EXECUTION_RUNNING)),
+        geometry: Arc::new(AtomicU32::new(pack_geometry(geometry))),
+        screen: Arc::new(OnceLock::new()),
+    };
     let title = request.display_title();
 
     // Captured before the split, while the runtime still knows the pid it
@@ -323,7 +433,7 @@ pub fn start(
         Ok(handles) => handles,
         Err(error) => {
             if let Some(group) = group {
-                screen.hang_up(group);
+                group.hang_up();
             }
             let _ = reaper.wait();
             return Err(StartError::Terminal(error));
@@ -350,7 +460,7 @@ pub fn start(
     // the thread that answers questions about the screen. A child that closes
     // its terminal and keeps running would otherwise freeze the session while
     // Corral waited for an exit that had not happened.
-    std::thread::spawn(move || read_pty(reader, reaper, from_pty));
+    std::thread::spawn(move || read_pty(reader, reaper, group, from_pty));
 
     // Dropped when the screen thread ends, however it ends — a normal return
     // or a panic — so nobody has to remember to publish that it is gone.
@@ -359,19 +469,10 @@ pub fn start(
     let weak = Arc::downgrade(&alive);
     drop(alive);
 
-    let published = Arc::clone(&execution);
-    let sizes = Arc::clone(&published_geometry);
+    let serving = published.clone();
     std::thread::spawn(move || {
         let _alive = held;
-        serve_screen(
-            Some(screen),
-            group,
-            Some(to_child),
-            geometry,
-            questions,
-            published,
-            sizes,
-        )
+        serve_screen(screen, group, to_child, geometry, questions, &serving)
     });
 
     Ok(SessionHandle {
@@ -380,9 +481,8 @@ pub fn start(
         title,
         asks,
         started_at: Instant::now(),
-        published_geometry,
         alive: weak,
-        execution,
+        published,
     })
 }
 
@@ -394,6 +494,7 @@ pub fn start(
 fn read_pty(
     mut reader: Box<dyn std::io::Read + Send>,
     mut reaper: super::spawn::ChildReaper,
+    group: Option<super::spawn::ChildGroup>,
     asks: SyncSender<Ask>,
 ) {
     let mut buffer = [0_u8; 8192];
@@ -403,15 +504,27 @@ fn read_pty(
             Ok(0) => break,
             Ok(read) => {
                 if asks.send(Ask::Output(buffer[..read].to_vec())).is_err() {
-                    // Nobody is left to show output to. The child still has to
-                    // be reaped: returning here would leave it a zombie for the
-                    // daemon's whole life.
                     screen_gone = true;
                     break;
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
+        }
+    }
+
+    if screen_gone {
+        // Nothing is left to render this session and nothing will drain its
+        // terminal again, so a child left running would fill the pty buffer
+        // and block on a write forever — alive, unreachable, unlistable. That
+        // is the case already ruled on for a session the registry refused, and
+        // it is the same fact arriving by another route (ADR 0007).
+        //
+        // Signalling here is safe precisely because this is the only reaper:
+        // the group number is still the child's until the wait below, and
+        // never after (ADR 0007 L4).
+        if let Some(group) = group {
+            group.hang_up();
         }
     }
 
@@ -424,7 +537,7 @@ fn read_pty(
     }
 }
 
-/// The thread that owns one session's screen for its whole life.
+/// The thread that owns one session's screen for the life of its runtime.
 ///
 /// Everything reaches it as an `Ask` on one channel, so it blocks until there
 /// is something to do. Reaping the child happens on the reader's thread rather
@@ -432,24 +545,22 @@ fn read_pty(
 /// freeze every question about the session — and, because callers wait on the
 /// daemon's single reactor thread, freeze the daemon with it.
 fn serve_screen(
-    mut screen: Option<super::spawn::ManagedTerminal>,
+    screen: super::spawn::ManagedTerminal,
     group: Option<super::spawn::ChildGroup>,
-    mut to_child: Option<SyncSender<Vec<u8>>>,
+    to_child: SyncSender<Vec<u8>>,
     geometry: PtyGeometry,
     questions: Receiver<Ask>,
-    execution: Arc<AtomicU8>,
-    published_geometry: Arc<AtomicU32>,
+    published: &Published,
 ) {
     let mut terminal = super::terminal::AuthoritativeTerminal::new(geometry);
     let mut stream = super::stream::TerminalStream::new();
 
-    // The screen outlives the process — a person who attaches after an agent
-    // finished still needs to read what it left — but not forever. Once the
-    // child has ended and nobody is watching, this thread returns, its handle
-    // stops answering, and the registry drops the session. Without that a
-    // daemon that ran one command never idles again, which is the
-    // zero-background-by-default rule broken by the fix that kept it alive
-    // while work was running.
+    // Runs until the runtime ends, and no longer. Everything this thread
+    // exists for — consuming output, answering device queries with nobody
+    // attached, serialising reflow against writes — needs bytes that can still
+    // arrive. When they cannot, the screen it holds is published as a value
+    // and this returns, releasing the emulator, the stream, and the pty
+    // (ADR 0007 L2). The registry keeps the record; nothing keeps the thread.
     while let Ok(ask) = questions.recv() {
         match ask {
             Ask::Output(chunk) => {
@@ -458,30 +569,18 @@ fn serve_screen(
                 // Not delivered once the screen is poisoned: the daemon can no
                 // longer say what these bytes did, so a viewer replaying them
                 // would be building a screen nothing vouches for while every
-                // attach and resync on the same session is refused. Dropping
-                // the viewers ends their streams, and they are told by the
-                // refusal they get when they come back.
+                // attach and resync on the same session is refused.
                 if terminal.poisoned().is_none() {
                     stream.deliver(sequence, &chunk);
-                } else {
-                    stream.drop_viewers();
                 }
                 if !reply.is_empty() {
                     // Queued, never written here: a child that has stopped
                     // reading must not be able to stop this loop.
-                    if let Some(to_child) = to_child.as_ref() {
-                        let _ = to_child.try_send(reply.as_bytes().to_vec());
-                    }
+                    let _ = to_child.try_send(reply.as_bytes().to_vec());
                 }
             }
             Ask::Finished(status) => {
-                // The child is gone, so the terminal it was on has no further
-                // use: dropping the screen returns the master, and dropping
-                // the writer's end lets that thread finish and return its dup
-                // of the same descriptor. Both, or the fd stays open.
-                screen = None;
-                to_child = None;
-                execution.store(
+                published.execution.store(
                     match status {
                         // An exit Corral watched happen.
                         Some(_) => EXECUTION_EXITED,
@@ -493,30 +592,49 @@ fn serve_screen(
                     },
                     Ordering::Release,
                 );
+                // Published before this thread's liveness proof drops with its
+                // stack, so a handle that finds the thread gone and a record
+                // present is looking at a retirement and not a loss
+                // (ADR 0007 L3).
+                //
+                // `set` cannot already have been taken: this arm is the only
+                // writer and it returns.
+                let _ = published.screen.set(FinalScreen {
+                    snapshot: terminal.snapshot(),
+                    epoch: stream.epoch(),
+                    sequence: stream.next_sequence(),
+                    // From the emulator while it can still be read; a poisoned
+                    // screen has no size to state and the last one published
+                    // is the one the child actually had.
+                    geometry: terminal
+                        .geometry()
+                        .unwrap_or_else(|| unpack_geometry(&published.geometry)),
+                    title: terminal.title().map(<[u8]>::to_vec),
+                });
+                // Returning is what releases everything: the emulator and the
+                // delta stream with this stack, the pty master with `screen`,
+                // and the writer thread with the last sender into it.
+                return;
             }
             Ask::Snapshot(reply) => {
-                let _ = reply.send(super::snapshot::encode(&terminal));
+                let _ = reply.send(terminal.snapshot());
             }
             Ask::Resize(wanted, reply) => {
-                let outcome = match screen.as_ref() {
-                    Some(screen) => apply_resize(screen, &mut terminal, &mut stream, wanted),
-                    // A terminal whose child has gone cannot be resized, and
-                    // saying so is better than reflowing a screen nothing will
-                    // redraw.
-                    None => Err(ResizeRefused::TerminalRefused),
-                };
+                let outcome = apply_resize(&screen, &mut terminal, &mut stream, wanted);
                 if outcome.is_ok() {
-                    published_geometry.store(pack_geometry(wanted), Ordering::Release);
+                    published
+                        .geometry
+                        .store(pack_geometry(wanted), Ordering::Release);
                 }
                 let _ = reply.send(outcome);
             }
             Ask::Input(input) => {
                 // Dropped rather than queued without bound when the child is
                 // not reading: losing keystrokes a child refuses to take is
-                // better than a session that answers nothing at all.
-                if let Some(to_child) = to_child.as_ref() {
-                    let _ = to_child.try_send(input);
-                }
+                // better than a session that answers nothing at all. A run
+                // that has ended never reaches here — the handle answers that
+                // from its record (ADR 0007 L2).
+                let _ = to_child.try_send(input);
             }
             Ask::Geometry(reply) => {
                 // Always answered. Dropping the channel would report
@@ -530,21 +648,31 @@ fn serve_screen(
                 let _ = reply.send(terminal.title().map(<[u8]>::to_vec));
             }
             Ask::ShutDown => {
-                // Only while the child is still ours to end: once it has been
-                // reaped, its old group number may name something else.
-                if let (Some(screen), Some(group)) = (screen.as_ref(), group) {
-                    screen.hang_up(group);
+                // Reachable only while the runtime is live — the arm above
+                // returns the moment it is not — so the group is still the
+                // child's and has not been reaped (ADR 0007 L4).
+                if let Some(group) = group {
+                    group.hang_up();
                 }
                 return;
             }
+
             Ask::Attach(reply) => {
                 let _ = reply.send(Attachment {
-                    snapshot: super::snapshot::encode(&terminal),
+                    snapshot: terminal.snapshot(),
                     epoch: stream.epoch(),
                     sequence: stream.next_sequence(),
-                    viewer: stream.attach(),
+                    viewer: Some(stream.attach()),
                 });
             }
+        }
+
+        // One owner for the consequence, whichever entrance poisoned the
+        // screen (ADR 0007 L5): a screen nobody can vouch for serves no
+        // viewers. Dropping them ends their streams, and they are told by the
+        // refusal they get when they come back.
+        if terminal.poisoned().is_some() {
+            stream.drop_viewers();
         }
     }
 }
@@ -552,6 +680,13 @@ fn serve_screen(
 /// Rows and columns in one word, so a reader never sees half of each.
 fn pack_geometry(geometry: PtyGeometry) -> u32 {
     (u32::from(geometry.rows()) << 16) | u32::from(geometry.cols())
+}
+
+/// The inverse. Only ever reads a word this module packed from a validated
+/// geometry, which is why it can state one rather than return an option.
+fn unpack_geometry(packed: &AtomicU32) -> PtyGeometry {
+    let packed = packed.load(Ordering::Acquire);
+    PtyGeometry::expect_valid((packed >> 16) as u16, packed as u16)
 }
 
 /// Resize the pty first, and reflow only if it took.
@@ -689,11 +824,25 @@ impl std::fmt::Display for ResizeRefused {
             Self::ScreenPoisoned => f.write_str(
                 "this terminal's parser failed on provider output and its screen can no longer be read",
             ),
+            Self::RunEnded => {
+                f.write_str("this run has ended; its screen keeps the size it finished at")
+            }
         }
     }
 }
 
 impl std::error::Error for ResizeRefused {}
+
+impl std::fmt::Display for InputRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RunEnded => f.write_str("this run has ended; nothing is reading its input"),
+            Self::RuntimeGone => f.write_str("the session's runtime is no longer answering"),
+        }
+    }
+}
+
+impl std::error::Error for InputRefused {}
 
 impl std::fmt::Display for ScreenUnreadable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

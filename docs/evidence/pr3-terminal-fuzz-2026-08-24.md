@@ -132,6 +132,25 @@ The third run, after that change, executed 51,956 inputs in 601 seconds and foun
    terminal simply refuses. Whether a person is told *why* their session's
    screen went away belongs to the phase that owns attention and surfacing.
 
+## The containment's boundary moved after this campaign
+
+The campaign reached the emulator through one door — feeding it bytes — and
+the containment was written around that call. The session-lifetime design pass
+found that reflow and snapshot serialization walk the same packed pages with
+the same consequence, and drew the boundary around the screen instead
+(ADR 0007 L5): one `contain` that every entrance goes through, poisoning on a
+panic from any of them.
+
+**Verification gap, stated rather than papered over.** The two entrances added
+to the containment have no deterministic test that they *become* poisoned,
+because the only known reproducer — the OSC title truncation above — is
+reachable through the parser alone. Fault injection would mean test-only
+behaviour in the daemon, which `AGENTS.md` §Scope discipline rules out. What
+is covered: every entrance refuses an already-poisoned screen, the corpus
+reflows and serializes every case, and the nightly campaign continues to feed
+the parser. A reproducer that panics reflow or serialization is a corpus entry
+the moment one exists.
+
 ## What this campaign did not cover
 
 Linux (the corpus suite runs there per PR; this campaign ran on macOS only),
