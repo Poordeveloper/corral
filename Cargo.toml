@@ -9,6 +9,11 @@ members = [
     "crates/corrald",
     "crates/corral",
 ]
+# Vendored third-party code is built, never governed: a path dependency inside
+# the repository would otherwise become an implicit member and inherit Corral's
+# lints and formatting. Its `unsafe` is upstream's, and Corral-owned crates keep
+# `#![forbid(unsafe_code)]` (docs/decisions/2026-08-24-pr3-spawn-gate.md).
+exclude = ["third_party/portable-pty"]
 
 [workspace.package]
 version = "0.0.0"
@@ -25,6 +30,13 @@ corral-rendezvous = { path = "crates/corral-rendezvous" }
 corral-state = { path = "crates/corral-state" }
 
 clap = { version = "4.5", features = ["derive"] }
+# Vendored with one patch so a failed exec is reported as a spawn error
+# instead of an ordinary child exit; provenance and removal condition in
+# third_party/portable-pty/CORRAL_PATCHES.md. Alternatives considered: a
+# Corral-authored unsafe PTY crate (needs an ADR and hands us
+# controlling-terminal/EIO platform work), and a pinned WezTerm fork
+# (adds a git source and a fork lifecycle for one reviewable hunk).
+portable-pty = { path = "third_party/portable-pty" }
 # The registry store. `bundled` compiles SQLite from source so every platform
 # runs the same engine and version, rather than whatever the host happens to
 # ship.
