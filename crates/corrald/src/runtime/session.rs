@@ -477,11 +477,32 @@ impl PendingSession {
     /// with no durable `RunStarted` there is no Run in the durable model to
     /// end, and reporting one would ask the store to close an episode it never
     /// opened (grill Q9).
-    pub fn abandon(mut self) {
-        self.teardown.hang_up();
+    pub fn abandon(self) {
+        let Self {
+            screen,
+            mut reaper,
+            teardown,
+            reader,
+            writer,
+            ..
+        } = self;
+
+        teardown.hang_up();
+        // Two endings, not one. The hang-up is a signal a child may choose to
+        // ignore — the group teardown says so in as many words — and a child
+        // that ignored it while Corral still held the pty master open would
+        // never see its terminal close either. Dropping the master is the
+        // second ending: a child reading its terminal reaches EOF, which is
+        // the shape an interactive agent is almost always in. A child that
+        // ignores the signal *and* never touches its terminal survives both,
+        // and is left to the same limitation ADR 0007 L6 already states —
+        // which is why nothing waits on this.
+        drop(reader);
+        drop(writer);
+        drop(screen);
         // Closed before the wait, by the only party that waits (ADR 0007 L4).
-        self.teardown.close();
-        let _ = self.reaper.wait();
+        teardown.close();
+        let _ = reaper.wait();
     }
 
     /// Own this runtime's screen and watch its end.

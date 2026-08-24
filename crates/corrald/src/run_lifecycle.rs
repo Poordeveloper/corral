@@ -11,11 +11,27 @@
 //! fact which does not is loud.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use corral_state::{Durability, StateError, Store};
+use corral_state::{Durability, Refusal, StateError, Store};
 use tracing::{error, warn};
 
 use crate::runtime::{ObservedRuns, RunOccurrence};
+
+/// How many times one fact is offered to a store that is momentarily held.
+///
+/// Contention is the canonical transient condition — the store waits out its
+/// own busy timeout before saying so, and its own rule is that concluding a
+/// store is broken from contention would let one backup tool end the daemon.
+/// So a `Busy` is waited out again rather than turned into integrity loss.
+/// Bounded, because a fact that cannot be written after this is no longer a
+/// wait: it is a hole in the accounting, and the daemon says so.
+const ATTEMPTS: u32 = 3;
+
+/// The pause between them. Short next to the store's own five-second wait,
+/// which is what actually does the waiting; this only avoids re-entering it
+/// on the same instant.
+const BETWEEN_ATTEMPTS: Duration = Duration::from_millis(50);
 
 /// Record every run occurrence this daemon observes, on a thread of its own.
 pub fn record_observed_runs(store: Arc<Mutex<Store>>, observed: ObservedRuns) {
@@ -23,15 +39,43 @@ pub fn record_observed_runs(store: Arc<Mutex<Store>>, observed: ObservedRuns) {
         // Ends when the last runtime that could report is gone, which for this
         // daemon means the process is ending.
         while let Some(observation) = observed.next() {
-            if !record(&store, observation.occurrence()) {
+            if !record_within_attempts(&store, observation.occurrence()) {
                 observed.lost();
             }
         }
     });
 }
 
+/// Record one fact, waiting out a store another writer is holding.
+fn record_within_attempts(store: &Mutex<Store>, occurrence: RunOccurrence) -> bool {
+    for attempt in 1..=ATTEMPTS {
+        match record(store, occurrence) {
+            Recorded::Yes => return true,
+            Recorded::NotNow => {
+                if attempt < ATTEMPTS {
+                    std::thread::sleep(BETWEEN_ATTEMPTS);
+                }
+            }
+            Recorded::No => return false,
+        }
+    }
+    false
+}
+
+/// What became of one fact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Recorded {
+    /// In the log, or accounted for by not needing to be.
+    Yes,
+    /// The store was held by another writer. Nothing happened, and the same
+    /// fact may be offered again.
+    NotNow,
+    /// This daemon can no longer account for its runs.
+    No,
+}
+
 /// Whether this fact reached the log, or is accounted for by not needing to.
-fn record(store: &Mutex<Store>, occurrence: RunOccurrence) -> bool {
+fn record(store: &Mutex<Store>, occurrence: RunOccurrence) -> Recorded {
     // A poisoned lock means another holder panicked. The store decides for
     // itself whether it can still vouch, and refusing to look would stop every
     // later fact from ever being written.
@@ -41,7 +85,7 @@ fn record(store: &Mutex<Store>, occurrence: RunOccurrence) -> bool {
 
     match occurrence {
         RunOccurrence::Exited { run, end, at } => match store.record_run_ended(run, end, at) {
-            Ok(Durability::Recorded) => true,
+            Ok(Durability::Recorded) => Recorded::Yes,
             // The log holds no live Run to close. For a managed run the start
             // barrier makes that impossible — `RunStarted` commits before the
             // threads that could report an end exist — so reaching this means
@@ -49,31 +93,44 @@ fn record(store: &Mutex<Store>, occurrence: RunOccurrence) -> bool {
             // `Withheld` rather than an error (grill Q9).
             Ok(Durability::Withheld) => {
                 warn!(%run, "a managed run ended with no durable start to close");
-                false
+                Recorded::No
             }
-            Err(error) => {
-                error!(%run, %error, "a managed run's ending could not be recorded");
-                false
-            }
+            Err(error) => held_or_lost(run, &error, "a managed run's ending"),
         },
         RunOccurrence::Attached { run, at } => attachment(run, store.record_run_attached(run, at)),
         RunOccurrence::Detached { run, at } => attachment(run, store.record_run_detached(run, at)),
     }
 }
 
-/// An attachment fact, where the store withholding it is ordinary.
+/// An attachment fact, where the episode being closed is ordinary.
 ///
 /// A person may attach to a finished session's screen, and may still be
-/// attached when its run ends. Both leave an attachment fact about a closed
-/// episode, and the log correctly records nothing: `RunEnded` is terminal for
-/// that Run's attachment state, and a projection reads still-open attachments
-/// as inactive after it rather than needing invented facts (grill Q11).
-fn attachment(run: corral_core::RunId, outcome: Result<Durability, StateError>) -> bool {
+/// attached when its run ends — `corral new -- true` is both. The store
+/// refuses the fact, because a Run's outcome is stated once and the log is
+/// never rewritten. That refusal is the answer, not a failure: `RunEnded` is
+/// terminal for a Run's attachment state, and a projection reads still-open
+/// attachments as inactive after it rather than needing the fact at all
+/// (grill Q11).
+///
+/// Reading it as integrity loss would shut the daemon down every time somebody
+/// was watching when an agent finished.
+fn attachment(run: corral_core::RunId, outcome: Result<Durability, StateError>) -> Recorded {
     match outcome {
-        Ok(_) => true,
-        Err(error) => {
-            error!(%run, %error, "an attachment fact could not be recorded");
-            false
-        }
+        Ok(_) | Err(StateError::Refused(Refusal::RunAlreadyEnded(_))) => Recorded::Yes,
+        Err(error) => held_or_lost(run, &error, "an attachment fact"),
     }
+}
+
+/// Whether a store that refused is one to wait for or one to give up on.
+///
+/// Contention is the only transient refusal the store produces, and it is the
+/// one the store itself says must never be read as a broken store. Everything
+/// else leaves this daemon unable to account for its runs.
+fn held_or_lost(run: corral_core::RunId, error: &StateError, what: &str) -> Recorded {
+    if matches!(error, StateError::Refused(Refusal::Busy { .. })) {
+        warn!(%run, "{what} is waiting for a registry another writer holds");
+        return Recorded::NotNow;
+    }
+    error!(%run, %error, "{what} could not be recorded");
+    Recorded::No
 }

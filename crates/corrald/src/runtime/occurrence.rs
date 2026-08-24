@@ -155,6 +155,15 @@ impl RunObservations {
     /// exactly the silent loss this channel exists to prevent. A wait that
     /// runs out is itself the answer — integrity is lost, and the exit status
     /// says so.
+    ///
+    /// It settles what was already reported; it does not close the channel.
+    /// A managed run whose child dies in the window between this returning and
+    /// the process exiting reports an ending nothing will drain, and the
+    /// backstop for that is the next daemon's reconciliation, which closes the
+    /// episode as unverifiable — which is what Corral can honestly say about a
+    /// run whose end it did not record (ADR 0007 L6, grill Q5). Refusing to
+    /// exit until such a run had reported would make a shutdown wait on the
+    /// children ADR 0007 L6 says Corral does not wait for.
     pub fn settle(&self, within: Duration) -> Integrity {
         if !self.outstanding.wait_until_empty(within) {
             self.lost();

@@ -455,3 +455,82 @@ fn a_run_whose_start_cannot_be_recorded_leaves_nothing_behind() {
         "and no receipt claims the command succeeded"
     );
 }
+
+/// Detaching after a run has ended is the ordinary shape, not an integrity
+/// failure. `RunEnded` is terminal for a Run's attachment state, so the store
+/// refuses the fact — and a daemon that read that refusal as "this daemon can
+/// no longer account for its runs" would shut down every time somebody was
+/// watching when an agent finished (grill Q11).
+#[test]
+fn detaching_after_a_run_ended_leaves_the_daemon_serving() {
+    let account = TestAccount::new("detach-after-end");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    let started = new_session(&mut client, 1, "cmd-1", &["/bin/sh", "-c", "sleep 0.2"]);
+    let session = field(&started, "session_id");
+    let granted = client
+        .request(2, "terminal.attach", Some(json!({ "session_id": session })))
+        .expect("terminal.attach answered");
+    let token = field(&granted, "attach_token");
+    let channel = {
+        let mut channel = RawClient::connect(&account.socket());
+        channel.say_hello_with_role(&token);
+        channel
+    };
+    wait_until(SETTLE, || {
+        kinds(&account.registry()).contains(&"run-attached".to_owned())
+    });
+
+    // The run ends underneath the person watching it, and only then do they go.
+    wait_until(SETTLE, || {
+        runs(&account.registry())
+            .first()
+            .is_some_and(|(_, end, _)| end.is_some())
+    });
+    drop(channel);
+
+    // Nothing about a detach may end the daemon, whatever the store said about
+    // the fact itself.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(
+        client
+            .request(3, "session.list", None)
+            .expect("the daemon is still serving")["outcome"]["result"]["sessions"]
+            .as_array()
+            .expect("a list")
+            .len(),
+        1
+    );
+}
+
+/// The same fact from the other direction, and the one `corral new -- true`
+/// meets every time: a person attaches to a session whose run has already
+/// finished, which is exactly what a finished screen is for (ADR 0007 L2).
+#[test]
+fn attaching_to_a_finished_run_leaves_the_daemon_serving() {
+    let account = TestAccount::new("attach-after-end");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    let started = new_session(&mut client, 1, "cmd-1", &["/usr/bin/true"]);
+    let session = field(&started, "session_id");
+    wait_until(SETTLE, || {
+        runs(&account.registry())
+            .first()
+            .is_some_and(|(_, end, _)| end.is_some())
+    });
+
+    let granted = client
+        .request(2, "terminal.attach", Some(json!({ "session_id": session })))
+        .expect("terminal.attach answered");
+    let mut channel = RawClient::connect(&account.socket());
+    channel.say_hello_with_role(&field(&granted, "attach_token"));
+    drop(channel);
+
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        client.request(3, "session.list", None).is_some(),
+        "attaching to a finished run is not a reason to stop serving"
+    );
+}

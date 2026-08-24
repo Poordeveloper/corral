@@ -556,11 +556,15 @@ fn read_session_new(request: &Request) -> Result<NewSession, ProtocolError> {
 /// Q12). An input this method later grows joins this — the rule is "all of
 /// what the command means", not this particular list.
 fn fingerprint(params: &SessionNewParams) -> CommandFingerprint {
-    let kind = CommandKind::new("session.new").unwrap_or_else(|_| {
+    // The wire method's own name, not a second copy of it. The kind is baked
+    // into the canonical fingerprint a receipt stores, so two spellings that
+    // drifted apart would turn every pre-drift retry into a conflict for a
+    // command that had not changed at all.
+    let kind = CommandKind::new(method::SESSION_NEW).unwrap_or_else(|_| {
         // A fixed literal with no whitespace and no control characters is one
         // `CommandKind::new` accepts; this arm exists only because the type
         // refuses to assume that on a caller's behalf.
-        unreachable!("session.new is a usable command kind")
+        unreachable!("{} is a usable command kind", method::SESSION_NEW)
     });
     let mut fingerprint = CommandFingerprint::builder(kind);
     // Indexed rather than joined: a separator would let one argument's content
@@ -654,10 +658,7 @@ async fn execute_session_new(
             // hung up and reaped here rather than left alive and unlistable,
             // and no ending is reported: with no durable start there is no Run
             // to end (grill Q9).
-            // Awaited: the reply and the daemon's exit must not race the
-            // hang-up, or a child Corral gave up on outlives the process that
-            // was supposed to end it.
-            let _ = tokio::task::spawn_blocking(move || pending.abandon()).await;
+            abandon(pending);
             return refused_by_store(&command, error);
         }
     };
@@ -667,7 +668,7 @@ async fn execute_session_new(
     // claim above makes impossible on one daemon, and which must still never
     // leave a second process running.
     if !started.executed() {
-        let _ = tokio::task::spawn_blocking(move || pending.abandon()).await;
+        abandon(pending);
         return Ok(Concluded::Started {
             session: started.session(),
             run: started.run(),
@@ -696,13 +697,28 @@ async fn execute_session_new(
             // that ends rather than one that stays open forever.
             orphaned.shut_down();
         }
-        return Ok(Concluded::Refused {
-            code: ErrorCode::Busy,
-            message: "the runtime could not be consulted".to_owned(),
-        });
+        // Not `busy`, which invites a retry: the command has already executed
+        // and its receipt is durable, so a retry would replay this same answer
+        // rather than do anything different. What the caller is told is what
+        // happened — a Run that started and is ending — and the session it
+        // names is the one the log holds.
+        error!(%session, %run, "a managed run could not be registered and was ended");
     }
 
     Ok(Concluded::Started { session, run })
+}
+
+/// End a runtime whose Run never became a durable fact.
+///
+/// A plain thread rather than the blocking pool, and deliberately not waited
+/// on. Reaping is the one thing a child can make Corral wait for indefinitely
+/// — a process may ignore a hang-up and never read its terminal — and neither
+/// a client's request nor the daemon's own exit may be held by that. The
+/// blocking pool would hold the exit: dropping the tokio runtime waits for
+/// every blocking task that has started. This is the same shape a served
+/// session's reaper already has.
+fn abandon(pending: PendingSession) {
+    std::thread::spawn(move || pending.abandon());
 }
 
 /// Turn a store answer into what the client is told, or fail closed.
