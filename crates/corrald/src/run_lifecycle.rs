@@ -116,7 +116,19 @@ fn record(store: &Mutex<Store>, occurrence: RunOccurrence) -> Recorded {
 /// was watching when an agent finished.
 fn attachment(run: corral_core::RunId, outcome: Result<Durability, StateError>) -> Recorded {
     match outcome {
-        Ok(_) | Err(StateError::Refused(Refusal::RunAlreadyEnded(_))) => Recorded::Yes,
+        Ok(Durability::Recorded) | Err(StateError::Refused(Refusal::RunAlreadyEnded(_))) => {
+            Recorded::Yes
+        }
+        // Not the same answer as an ended episode, and the difference matters:
+        // this one says the log has never heard of the Run. A handle to attach
+        // to exists only after `RunStarted` committed, so reaching this means
+        // the barrier did not hold — the same failure the ending arm reports,
+        // and accepting it here would hide it behind the one fact this daemon
+        // can afford to lose.
+        Ok(Durability::Withheld) => {
+            warn!(%run, "an attachment names a run with no durable start");
+            Recorded::No
+        }
         Err(error) => held_or_lost(run, &error, "an attachment fact"),
     }
 }

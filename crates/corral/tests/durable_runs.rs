@@ -467,7 +467,11 @@ fn detaching_after_a_run_ended_leaves_the_daemon_serving() {
     let _daemon = account.start_daemon();
     let mut client = RawClient::connect(&account.socket());
     client.establish();
-    let started = new_session(&mut client, 1, "cmd-1", &["/bin/sh", "-c", "sleep 0.2"]);
+    // Long enough that the attach below completes while the run is still
+    // live, and an integer because fractional sleep is not POSIX. The
+    // ordering assertion at the end is what actually proves the test reached
+    // the case it is about rather than degenerating into the next one.
+    let started = new_session(&mut client, 1, "cmd-1", &["/bin/sh", "-c", "sleep 1"]);
     let session = field(&started, "session_id");
     let granted = client
         .request(2, "terminal.attach", Some(json!({ "session_id": session })))
@@ -501,6 +505,13 @@ fn detaching_after_a_run_ended_leaves_the_daemon_serving() {
             .expect("a list")
             .len(),
         1
+    );
+    let recorded = kinds(&account.registry());
+    let attached = recorded.iter().position(|kind| kind == "run-attached");
+    let ended = recorded.iter().position(|kind| kind == "run-ended");
+    assert!(
+        attached < ended,
+        "the person was meant to be attached before the run ended: {recorded:?}"
     );
 }
 
