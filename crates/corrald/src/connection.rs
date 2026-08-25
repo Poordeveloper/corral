@@ -474,18 +474,22 @@ async fn session_new(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
         // Another request is performing this very command. Its answer is this
         // one's answer — a second execution is the failure this whole path
         // exists to prevent.
-        Claim::Waiting(concluded) => Dispatch::Reply(match in_flight::joined(concluded).await {
-            Some(concluded) => answer(id, concluded),
-            // Its owner ended without publishing, so nothing was completed and
-            // this command may be sent again.
-            None => Frame::error(
-                id,
-                ProtocolError::new(
-                    ErrorCode::Busy,
-                    "this command's first execution did not complete; send it again",
+        Claim::Waiting(concluded) => Dispatch::Reply(
+            match in_flight::joined(concluded, in_flight::JOIN_DEADLINE).await {
+                Some(concluded) => answer(id, concluded),
+                // Its owner ended without publishing, or is still going after
+                // longer than one may take. Either way nothing this request
+                // can report was completed, and the command may be sent again
+                // — which is safe because sending it again is idempotent.
+                None => Frame::error(
+                    id,
+                    ProtocolError::new(
+                        ErrorCode::Busy,
+                        "this command's first execution did not complete; send it again",
+                    ),
                 ),
-            ),
-        }),
+            },
+        ),
         Claim::Owner(owner) => match execute_session_new(new, state).await {
             Ok(concluded) => {
                 // Published before the claim is released with `owner`, so a

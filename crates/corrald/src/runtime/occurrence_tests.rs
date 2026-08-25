@@ -158,3 +158,29 @@ fn settling_reports_whether_everything_reported_was_recorded() {
     );
     drop(observed);
 }
+
+/// After a shutdown has stopped waiting, nothing will drain the channel. A
+/// fact reported then is refused and said out loud, rather than queued where
+/// its loss would look exactly like its delivery.
+#[test]
+fn a_fact_reported_after_settling_is_refused_rather_than_queued() {
+    let (observations, observed) = observe_runs();
+    assert_eq!(
+        observations.settle(std::time::Duration::from_millis(50)),
+        Integrity::Intact
+    );
+
+    observations.report(exited(RunId::mint()));
+
+    assert_eq!(
+        observations.integrity(),
+        Integrity::Intact,
+        "the next daemon's reconciliation closes that episode; the exit status \
+         must not claim otherwise"
+    );
+    // Dropped so the drain ends rather than waiting on a sender that will
+    // never send again; what it finds is that nothing was queued behind a
+    // recorder that has stopped.
+    drop(observations);
+    assert!(observed.next().is_none());
+}
