@@ -1,0 +1,295 @@
+use super::*;
+
+use serde_json::{Value, json};
+
+fn session(id: &str, execution_state: &str, terminal_access: Option<&str>) -> Value {
+    let mut value = json!({
+        "session_id": id,
+        "title": "sh",
+        "execution_state": execution_state,
+    });
+    if let Some(access) = terminal_access {
+        value["terminal_access"] = json!(access);
+    }
+    value
+}
+
+fn answered(sessions: Vec<Value>) -> Result<Listed, String> {
+    Ok(decode(SessionListResult { sessions }))
+}
+
+fn running(count: usize) -> Vec<Value> {
+    (0..count)
+        .map(|index| session(&format!("s{index}-rest"), "running", Some("available")))
+        .collect()
+}
+
+/// The disconnected presentation. A list that keeps drawing its last answer
+/// while the daemon is gone is showing a memory as current truth, which is the
+/// one thing grill Q4 forbids it to do.
+#[test]
+fn a_daemon_that_cannot_be_read_empties_the_list_rather_than_freezing_it() {
+    let mut list = SessionList::default();
+    list.take(answered(running(2)));
+
+    list.take(Err("the daemon went away".to_owned()));
+
+    assert!(list.rows.is_empty(), "a stale list was left on screen");
+    assert_eq!(list.unreachable.as_deref(), Some("the daemon went away"));
+}
+
+/// And it comes back on its own. The poll is the retry: a person who restarted
+/// `corrald` does not restart this too.
+#[test]
+fn an_answer_after_a_loss_puts_the_list_back() {
+    let mut list = SessionList::default();
+    list.take(Err("the daemon went away".to_owned()));
+
+    list.take(answered(running(1)));
+
+    assert_eq!(list.rows.len(), 1);
+    assert_eq!(list.unreachable, None);
+}
+
+/// The daemon orders by start time, so a session starting elsewhere moves
+/// every row down. The cursor follows the session it was on, or a person is
+/// one keystroke from opening something they did not choose.
+#[test]
+fn the_cursor_follows_the_session_it_was_on() {
+    let mut list = SessionList::default();
+    list.take(answered(vec![
+        session("older-1", "running", Some("available")),
+        session("oldest-2", "running", Some("available")),
+    ]));
+    list.selected = 1;
+
+    list.take(answered(vec![
+        session("newest-0", "running", Some("available")),
+        session("older-1", "running", Some("available")),
+        session("oldest-2", "running", Some("available")),
+    ]));
+
+    assert_eq!(list.rows[list.selected].session_id, "oldest-2");
+}
+
+/// Refused before the keystroke, not after it: the row stays, its execution
+/// state is untouched, and the reason was already on screen (grill Q7).
+#[test]
+fn open_is_refused_when_the_screen_cannot_be_served() {
+    let mut list = SessionList::default();
+    list.take(answered(vec![session(
+        "s0-rest",
+        "running",
+        Some("unavailable"),
+    )]));
+
+    let chosen = list.act(Key::Enter);
+
+    assert!(chosen.is_none(), "a session with no screen was opened");
+    assert_eq!(
+        list.notice.as_deref(),
+        Some("Screen unavailable: this session cannot be opened.")
+    );
+    assert_eq!(
+        list.rows.len(),
+        1,
+        "the row was removed instead of being refused"
+    );
+}
+
+/// Unknown is not a refusal. A daemon that did not send the field, or sent a
+/// word this build does not know, leaves Open on offer — whatever comes back
+/// is the answer (`AGENTS.md` §Protocol).
+#[test]
+fn open_is_offered_when_terminal_access_is_unknown() {
+    for access in [None, Some("degraded")] {
+        let mut list = SessionList::default();
+        list.take(answered(vec![session("s0-rest", "running", access)]));
+
+        let chosen = list.act(Key::Enter);
+
+        assert!(
+            matches!(chosen, Some(Chosen::Open(ref id)) if id == "s0-rest"),
+            "{access:?} disabled an action on a value nothing understood"
+        );
+    }
+}
+
+#[test]
+fn a_command_typed_at_the_prompt_becomes_the_program_and_its_arguments() {
+    let mut list = SessionList::default();
+    list.act(Key::Typed('n'));
+
+    for key in keys::decode(b"/bin/sh -c  sleep") {
+        list.act(key);
+    }
+    let chosen = list.act(Key::Enter);
+
+    match chosen {
+        Some(Chosen::New(argv)) => assert_eq!(argv, ["/bin/sh", "-c", "sleep"]),
+        other => panic!("{}", other.map_or("nothing", |_| "something else")),
+    }
+}
+
+#[test]
+fn escape_abandons_the_prompt_without_starting_anything() {
+    let mut list = SessionList::default();
+    list.act(Key::Typed('n'));
+    list.act(Key::Typed('x'));
+
+    let chosen = list.act(Key::Escape);
+
+    assert!(chosen.is_none());
+    assert_eq!(list.typing, None);
+}
+
+#[test]
+fn an_empty_command_starts_nothing() {
+    let mut list = SessionList::default();
+    list.act(Key::Typed('n'));
+
+    let chosen = list.act(Key::Enter);
+
+    assert!(chosen.is_none());
+}
+
+/// While a command is being typed, the letters that are keys everywhere else
+/// are letters.
+#[test]
+fn the_prompt_takes_the_keys_the_list_would_have_acted_on() {
+    let mut list = SessionList::default();
+    list.act(Key::Typed('n'));
+
+    list.act(Key::Typed('q'));
+    list.act(Key::Typed('n'));
+
+    assert_eq!(list.typing.as_deref(), Some("qn"));
+}
+
+#[test]
+fn backspace_removes_a_whole_character() {
+    let mut list = SessionList::default();
+    list.act(Key::Typed('n'));
+    for key in keys::decode("aé".as_bytes()) {
+        list.act(key);
+    }
+
+    list.act(Key::Backspace);
+
+    assert_eq!(list.typing.as_deref(), Some("a"));
+}
+
+#[test]
+fn the_window_scrolls_only_as_far_as_the_selection_needs() {
+    let mut list = SessionList::default();
+    list.take(answered(running(5)));
+
+    // Six lines holds three two-line rows.
+    assert_eq!(list.window(6), 0..3);
+
+    list.selected = 3;
+    assert_eq!(list.window(6), 1..4);
+
+    list.selected = 0;
+    assert_eq!(list.window(6), 0..3);
+}
+
+/// A row with a capability line is taller, and the window has to know it or
+/// the last row it admits runs off the bottom of the screen.
+#[test]
+fn a_row_that_says_more_takes_more_room() {
+    let mut list = SessionList::default();
+    list.take(answered(vec![
+        session("s0-rest", "running", Some("unavailable")),
+        session("s1-rest", "running", Some("available")),
+    ]));
+
+    assert_eq!(list.rows[0].height(), 3);
+    assert_eq!(list.rows[1].height(), 2);
+    assert_eq!(list.window(4), 0..1, "a three-line row was fitted into two");
+}
+
+/// A daemon newer than this build may describe a session in a shape this build
+/// cannot read. Counting them is better than dropping them silently.
+#[test]
+fn a_session_this_build_cannot_render_is_counted_rather_than_dropped() {
+    let mut list = SessionList::default();
+
+    list.take(answered(vec![
+        session("s0-rest", "running", Some("available")),
+        json!({"session_id": "s1-rest"}),
+    ]));
+
+    assert_eq!(list.rows.len(), 1);
+    assert!(
+        list.notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains('1')),
+        "{:?}",
+        list.notice
+    );
+}
+
+/// Navigation stops at the ends rather than wrapping: a list that jumps from
+/// the last session to the first is one a person opens the wrong thing from.
+#[test]
+fn the_cursor_stops_at_the_ends() {
+    let mut list = SessionList::default();
+    list.take(answered(running(2)));
+
+    list.act(Key::Up);
+    assert_eq!(list.selected, 0);
+
+    list.act(Key::Down);
+    list.act(Key::Down);
+    assert_eq!(list.selected, 1);
+}
+
+#[test]
+fn a_row_says_what_the_projection_says() {
+    let item: SessionListItem =
+        serde_json::from_value(session("s0-rest", "running", Some("unavailable"))).expect("decode");
+
+    let lines = row_text(&item);
+
+    assert_eq!(
+        lines,
+        vec![
+            "s0  sh".to_owned(),
+            "Running · Status unknown".to_owned(),
+            "Screen unavailable".to_owned(),
+        ]
+    );
+}
+
+/// The heading counts what the daemon reported and nothing else. A list that
+/// says "0 sessions" over a body saying the daemon is gone is contradicting
+/// itself in the same frame.
+#[test]
+fn the_heading_counts_nothing_it_has_not_been_told() {
+    let mut list = SessionList::default();
+    assert_eq!(heading(&list), "Corral");
+
+    list.take(answered(running(2)));
+    assert_eq!(heading(&list), "Corral — 2 sessions");
+
+    list.take(Err("the daemon went away".to_owned()));
+    assert_eq!(heading(&list), "Corral");
+}
+
+/// A refusal is about the row the person was on, so moving off it takes the
+/// message with them.
+#[test]
+fn moving_the_cursor_clears_what_the_last_action_said() {
+    let mut list = SessionList::default();
+    list.take(answered(vec![
+        session("s0-rest", "running", Some("unavailable")),
+        session("s1-rest", "running", Some("available")),
+    ]));
+    list.act(Key::Enter);
+    assert!(list.notice.is_some());
+
+    list.act(Key::Down);
+
+    assert_eq!(list.notice, None);
+}

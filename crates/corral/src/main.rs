@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use corral_client::{ActivationError, ClientActivationPolicy, Connection, RequestError, activate};
 use corral_protocol::method::{SessionListItem, SessionNewParams};
+use corral_tui::LocalKeys;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -22,8 +23,6 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 }
-
-mod terminal;
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -42,6 +41,8 @@ enum Command {
         /// The session's id, or enough of its start to be unambiguous.
         session: String,
     },
+    /// Open the session list.
+    Tui,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -59,13 +60,29 @@ async fn main() -> ExitCode {
         Command::List => list(&mut connection).await,
         Command::New { argv } => new_session(&mut connection, argv).await,
         Command::Attach { session } => attach(&mut connection, &session).await,
+        Command::Tui => session_list(&policy, connection).await,
+    }
+}
+
+/// Hand this terminal to the session list.
+///
+/// The list needs the activation policy as well as the connection: a daemon
+/// that goes away while a person is watching the list is something it asks for
+/// again, on exactly the terms every other surface activates under (ADR 0001).
+async fn session_list(policy: &ClientActivationPolicy, connection: Connection) -> ExitCode {
+    match corral_tui::run(policy, connection).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("corral: {error}");
+            ExitCode::FAILURE
+        }
     }
 }
 
 /// Start a session and attach to it.
 async fn new_session(connection: &mut Connection, argv: Vec<String>) -> ExitCode {
     let stdin = std::io::stdin();
-    let geometry = terminal::Geometry::of(&stdin);
+    let geometry = corral_tui::Geometry::of(&stdin);
     let cwd = std::env::current_dir()
         .ok()
         .map(|path| path.to_string_lossy().into_owned());
@@ -103,34 +120,18 @@ async fn attach(connection: &mut Connection, session: &str) -> ExitCode {
         Err(code) => return code,
     };
 
-    let grant = match connection.terminal_attach(&resolved).await {
-        Ok(grant) => grant,
-        Err(error) => return report_request_failure(&error),
+    let Some(mut keys) = LocalKeys::start() else {
+        eprintln!("corral: something is already reading this terminal");
+        return ExitCode::FAILURE;
     };
 
-    let endpoint = connection.endpoint().to_path_buf();
-    let channel = match Connection::open_terminal_channel(&endpoint, &grant.attach_token).await {
-        Ok(channel) => channel,
-        Err(error) => return report_request_failure(&error),
-    };
-
-    // The session's size is what the daemon reports; this terminal's is what
-    // the person has. Told to `run` so it can reconcile them at once —
-    // otherwise a 50x200 terminal renders a 24x80 session in the corner for
-    // the whole attach, and an 80-column terminal wraps a 200-column session
-    // into garbage.
-    let session_geometry = terminal::Geometry {
-        rows: grant.rows,
-        cols: grant.cols,
-    };
-
-    match terminal::run(channel, session_geometry).await {
+    match corral_tui::open(connection, &resolved, &mut keys).await {
         Ok(()) => {
             eprintln!("detached from {resolved}");
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("corral: the terminal channel ended: {error}");
+            eprintln!("corral: {error}");
             ExitCode::FAILURE
         }
     }
@@ -211,12 +212,11 @@ async fn list(connection: &mut Connection) -> ExitCode {
     let mut unrenderable = 0;
     for session in &sessions.sessions {
         match serde_json::from_value::<SessionListItem>(session.clone()) {
-            Ok(item) => println!(
-                "{}  {:<8}  {}",
-                short_id(&item.session_id),
-                item.execution_state,
-                item.title
-            ),
+            Ok(item) => {
+                for row in session_rows(&item) {
+                    println!("{row}");
+                }
+            }
             // A daemon newer than this build may describe a session in a shape
             // this build cannot read. Counting those is better than dropping
             // them silently or guessing at their fields.
@@ -229,14 +229,37 @@ async fn list(connection: &mut Connection) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Enough of an id to type, with the whole thing still available to copy.
+/// How wide the id column is: the first group of a session id, and the space
+/// that separates it from what follows.
+const ID_COLUMN: usize = 10;
+
+/// How wide the state column is before the title starts.
 ///
-/// The full id stays the identity; this is only what a person reads. `attach`
-/// accepts any unambiguous prefix, so the two agree.
-fn short_id(session_id: &str) -> &str {
-    session_id
-        .split_once('-')
-        .map_or(session_id, |(head, _)| head)
+/// Wider than the longest state text this surface produces, so the titles line
+/// up instead of stepping in and out with the state beside them.
+const STATE_COLUMN: usize = 36;
+
+/// What `corral list` prints for one session.
+///
+/// One line, because a list read at a glance should stay one line per session,
+/// plus the capability line when there is one. Every word of it comes from the
+/// shared projection: this surface and the session list say the same thing
+/// about the same session or one of them is lying (grill Q2).
+fn session_rows(item: &SessionListItem) -> Vec<String> {
+    let presented = corral_tui::present(item);
+    let mut rows = vec![format!(
+        "{:<ID_COLUMN$}{:<STATE_COLUMN$}{}",
+        corral_tui::short_id(&item.session_id),
+        presented.state_line(),
+        item.title
+    )];
+    // Indented under the state it qualifies rather than beside the id.
+    rows.extend(
+        presented
+            .screen
+            .map(|screen| format!("{:ID_COLUMN$}{screen}", "")),
+    );
+    rows
 }
 
 fn render_capabilities(peer: &corral_protocol::ServerHello) -> String {
@@ -250,6 +273,10 @@ fn render_capabilities(peer: &corral_protocol::ServerHello) -> String {
             .join(", ")
     }
 }
+
+#[cfg(test)]
+#[path = "list_tests.rs"]
+mod tests;
 
 /// Exit statuses are not a stable contract yet: this surface reports the
 /// failure in words, and a taxonomy arrives with the M1 release.

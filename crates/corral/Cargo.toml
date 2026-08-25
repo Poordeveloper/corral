@@ -15,8 +15,9 @@ path = "src/main.rs"
 clap = { workspace = true }
 corral-client = { workspace = true }
 corral-protocol = { workspace = true }
-# Raw mode and the terminal's own size: no standard-library API exposes either.
-rustix = { workspace = true }
+# The terminal surfaces this binary drives: the session list, and the
+# attachment `attach` and `new` hand the terminal over to.
+corral-tui = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 # A command id for every mutation the CLI sends. Already in the tree under
@@ -30,6 +31,11 @@ corral-protocol = { workspace = true }
 # through SQLite is what makes the daemon see the change: a byte-level rewrite
 # would depend on its page cache noticing.
 rusqlite = { workspace = true }
+# The session list only exists on a terminal, so the tests that drive it
+# allocate one. The same vendored pty the daemon already uses, so it adds no
+# supply chain; the alternatives were an unsafe `openpty` in the harness, which
+# this crate forbids, and not covering the surface end to end at all.
+portable-pty = { workspace = true }
 # Integration tests drive real daemons, so they need to send real signals.
 rustix = { workspace = true }
 serde_json = { workspace = true }

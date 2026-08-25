@@ -16,6 +16,7 @@ compile_error!(
      or cargo test --features corral/test-support,corrald/test-support"
 );
 
+pub mod pty;
 pub mod wire;
 
 use std::io::Read;
@@ -176,21 +177,48 @@ impl TestAccount {
         command
     }
 
-    fn apply_environment(&self, command: &mut Command) {
+    /// A `corral` invocation for a pty, which builds its command differently
+    /// from `std::process::Command` and so needs the environment as values.
+    pub fn corral_on_pty(&self, arguments: &[&str]) -> portable_pty::CommandBuilder {
+        let mut command = portable_pty::CommandBuilder::new(CORRAL_BINARY);
+        for argument in arguments {
+            command.arg(argument);
+        }
+        for (name, value) in self.environment() {
+            command.env(name, value);
+        }
+        command.env_remove("CORRAL_ENDPOINT");
         command
-            .env("CORRAL_TEST_ROOT", &self.corral_root)
-            .env("CORRAL_TEST_IDLE_GRACE_MS", millis(self.idle_grace))
-            .env(
+    }
+
+    fn apply_environment(&self, command: &mut Command) {
+        for (name, value) in self.environment() {
+            command.env(name, value);
+        }
+        // A stray override in the developer's shell must not decide what a
+        // test measures.
+        command.env_remove("CORRAL_ENDPOINT");
+    }
+
+    /// This account's rendezvous, as the environment that binds a process to
+    /// it. One list, so a surface started on a pty and one started as an
+    /// ordinary child cannot end up in different accounts.
+    fn environment(&self) -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "CORRAL_TEST_ROOT",
+                self.corral_root.to_string_lossy().into_owned(),
+            ),
+            ("CORRAL_TEST_IDLE_GRACE_MS", millis(self.idle_grace)),
+            (
                 "CORRAL_TEST_PRE_HELLO_DEADLINE_MS",
                 millis(self.pre_hello_deadline),
-            )
-            .env(
+            ),
+            (
                 "CORRAL_TEST_ACTIVATION_DEADLINE_MS",
                 millis(self.activation_deadline),
-            )
-            // A stray override in the developer's shell must not decide what a
-            // test measures.
-            .env_remove("CORRAL_ENDPOINT");
+            ),
+        ]
     }
 
     /// Start a daemon directly and wait until it is serving.

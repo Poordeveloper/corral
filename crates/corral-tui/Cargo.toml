@@ -1,0 +1,26 @@
+[package]
+name = "corral-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+corral-client = { workspace = true }
+corral-protocol = { workspace = true }
+# Raw mode and the terminal's own size: no standard-library API exposes either.
+# Already this surface's dependency before the crate existed — the attach loop
+# moved here with it.
+rustix = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+# A command id for every mutation this surface sends, on the same terms as the
+# CLI's: already in the tree, and hand-rolling a random token from `getrandom`
+# is nobody's job here.
+uuid = { workspace = true }
+
+
+[lints]
+workspace = true

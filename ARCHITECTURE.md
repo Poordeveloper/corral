@@ -497,8 +497,10 @@ crates/
 ├── corral-rendezvous  canonical rendezvous paths, OS-account home
 │                      resolution, singleton lock/socket artifact rules
 ├── corral-client      shared client/core logic
+├── corral-tui         terminal surfaces: the session list, and the
+│                      attachment it hands the terminal over to
 ├── corrald            daemon: registry, runtime, attention, protocol server
-└── corral             CLI / TUI
+└── corral             CLI, and the binary those surfaces launch from
 ```
 
 Later crates (identity, crypto, history, runtime) graduate out of `corrald`

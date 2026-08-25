@@ -10,10 +10,15 @@
 //! never forwarded — so a literal 0x1C cannot reach the child through Corral's
 //! M1 attach. That is a limitation we chose, recorded rather than discovered
 //! (grill Q4).
+//!
+//! The list opens sessions through here rather than composing terminals of its
+//! own: Open is a full-screen takeover of the same attachment this module
+//! already implements (`docs/decisions/2026-08-25-pr4-tui-grill.md` Q1).
 
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, BorrowedFd};
 
+use corral_client::{Connection, RequestError, TerminalChannel};
 use corral_protocol::terminal::{Epoch, FrameKind, Sequence, TerminalFrame};
 
 /// The byte that detaches. `Ctrl-\`, ASCII FS.
@@ -71,15 +76,72 @@ pub fn local_geometry(fd: BorrowedFd<'_>) -> Option<Geometry> {
     })
 }
 
-/// What reading local input produced.
+/// What one burst of typing means to an attached session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LocalInput {
     /// Bytes to send to the daemon.
     Send(Vec<u8>),
     /// The detach byte arrived: send what came before it, then stop.
     Detach(Vec<u8>),
-    /// The local terminal closed.
-    Closed,
+}
+
+/// Everything the person types, read once for the whole surface.
+///
+/// One reader per process, deliberately. A thread parked in `read` cannot be
+/// cancelled, so a second one started for an attach would sit in the same
+/// queue and take keystrokes the first was waiting for — and the character
+/// that vanished would be one a person meant for their agent. So the list and
+/// the attachment it hands over to share this rather than each starting one.
+pub struct LocalKeys {
+    typed: tokio::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+/// Whether this process has already claimed the local terminal's input.
+static READING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+impl LocalKeys {
+    /// Start reading the local terminal, or refuse because something already
+    /// is.
+    ///
+    /// `None` is a caller bug rather than a runtime condition — there is one
+    /// terminal and one person at it — and it is reported rather than
+    /// asserted, because the consequence of getting it wrong is a keystroke
+    /// disappearing rather than a crash.
+    pub fn start() -> Option<Self> {
+        if READING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return None;
+        }
+
+        // Bounded: a person cannot type faster than this drains, and an
+        // unbounded queue in front of a socket only moves where memory grows.
+        let (typed, received) = tokio::sync::mpsc::channel(64);
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buffer = [0_u8; 4096];
+            while let Some(bytes) = read_local(&mut stdin, &mut buffer) {
+                if typed.blocking_send(bytes).is_err() {
+                    return;
+                }
+            }
+        });
+
+        Some(Self { typed: received })
+    }
+
+    /// The next bytes the person typed, or `None` once their terminal closed.
+    pub async fn next(&mut self) -> Option<Vec<u8>> {
+        self.typed.recv().await
+    }
+}
+
+/// Why an Open did not happen, or how it ended.
+#[derive(Debug)]
+pub enum OpenFailed {
+    /// The daemon would not grant this session's terminal, or could not be
+    /// asked for it.
+    Refused(RequestError),
+    /// The channel itself failed while the person was attached.
+    Channel(std::io::Error),
 }
 
 /// Split a read from the local terminal at the detach byte.
@@ -187,16 +249,20 @@ fn drain_frames(
     }
 }
 
-/// Read what the local terminal has, without blocking the caller forever.
-pub fn read_local(input: &mut impl Read, buffer: &mut [u8]) -> LocalInput {
+/// Read whatever the local terminal has, or `None` once it has closed.
+///
+/// Undecoded on purpose: what a burst of bytes means depends on who is
+/// listening — the attached session splits it at the detach byte, the list
+/// reads it as keys — and the one reader must not decide that for both.
+fn read_local(input: &mut impl Read, buffer: &mut [u8]) -> Option<Vec<u8>> {
     loop {
         return match input.read(buffer) {
-            Ok(0) => LocalInput::Closed,
-            Ok(read) => split_at_detach(&buffer[..read]),
+            Ok(0) => None,
+            Ok(read) => Some(buffer[..read].to_vec()),
             // A signal is not a person closing their terminal. Ending the
             // attach here would detach someone mid-session and report success.
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => LocalInput::Closed,
+            Err(_) => None,
         };
     }
 }
@@ -207,52 +273,56 @@ impl Geometry {
     }
 }
 
-#[cfg(test)]
-#[path = "terminal_tests.rs"]
-mod tests;
+/// Attach to a session and run its terminal until the person detaches.
+///
+/// The one path every surface takes: `corral attach`, `corral new` and the
+/// list's Open all reach a session through here, so none of them can grow its
+/// own idea of what attaching means.
+pub async fn open(
+    connection: &mut Connection,
+    session_id: &str,
+    keys: &mut LocalKeys,
+) -> Result<(), OpenFailed> {
+    let grant = connection
+        .terminal_attach(session_id)
+        .await
+        .map_err(OpenFailed::Refused)?;
+
+    let endpoint = connection.endpoint().to_path_buf();
+    let channel = Connection::open_terminal_channel(&endpoint, &grant.attach_token)
+        .await
+        .map_err(OpenFailed::Refused)?;
+
+    // The session's size is what the daemon reports; this terminal's is what
+    // the person has. Told to `run` so it can reconcile them at once —
+    // otherwise a 50x200 terminal renders a 24x80 session in the corner for
+    // the whole attach, and an 80-column terminal wraps a 200-column session
+    // into garbage.
+    let session_geometry = Geometry {
+        rows: grant.rows,
+        cols: grant.cols,
+    };
+
+    run(channel, session_geometry, keys)
+        .await
+        .map_err(OpenFailed::Channel)
+}
 
 /// Run an attached terminal session until the person detaches or it ends.
 ///
-/// Local input and daemon output are independent, so they run separately: a
-/// person typing must not wait for the screen, and the screen must not wait
-/// for a keystroke. Reading the local terminal blocks, so it runs on its own
-/// thread and hands bytes over.
+/// Local input and daemon output are independent, so they are awaited
+/// separately: a person typing must not wait for the screen, and the screen
+/// must not wait for a keystroke. The keys arrive from the process's one
+/// reader rather than a thread started here — see `LocalKeys`.
 pub async fn run(
-    channel: corral_client::TerminalChannel,
+    channel: TerminalChannel,
     session_geometry: Geometry,
+    keys: &mut LocalKeys,
 ) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let raw = RawMode::enter()?;
     let (mut from_daemon, mut to_daemon) = channel.stream.into_split();
-
-    // Bounded: a person cannot type faster than this drains, and an unbounded
-    // queue in front of a socket only moves where the memory grows.
-    let (typed, mut keystrokes) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
-    let detached = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let reader_detached = std::sync::Arc::clone(&detached);
-
-    std::thread::spawn(move || {
-        let mut stdin = std::io::stdin();
-        let mut buffer = [0_u8; 4096];
-        loop {
-            match read_local(&mut stdin, &mut buffer) {
-                LocalInput::Send(bytes) => {
-                    if typed.blocking_send(bytes).is_err() {
-                        return;
-                    }
-                }
-                LocalInput::Detach(bytes) => {
-                    if !bytes.is_empty() {
-                        let _ = typed.blocking_send(bytes);
-                    }
-                    reader_detached.store(true, std::sync::atomic::Ordering::Release);
-                    return;
-                }
-                LocalInput::Closed => return,
-            }
-        }
-    });
 
     let mut stdout = std::io::stdout();
     // Bytes that arrived with the handshake are already terminal frames.
@@ -303,27 +373,33 @@ pub async fn run(
                     local = now;
                 }
             }
-            bytes = keystrokes.recv() => match bytes {
+            typed = keys.next() => match typed {
                 None => break,
                 Some(bytes) => {
-                    match input_frame(epoch, bytes).encode() {
-                        Ok(frame) => {
-                            if to_daemon.write_all(&frame).await.is_err() {
-                                break;
+                    // The detach is decided here rather than by the reader,
+                    // and in the order the bytes arrived: what came before it
+                    // is still the person's input and is delivered first.
+                    let (payload, detaching) = match split_at_detach(&bytes) {
+                        LocalInput::Send(bytes) => (bytes, false),
+                        LocalInput::Detach(bytes) => (bytes, true),
+                    };
+
+                    if !payload.is_empty() {
+                        match input_frame(epoch, payload).encode() {
+                            Ok(frame) => {
+                                if to_daemon.write_all(&frame).await.is_err() {
+                                    break;
+                                }
                             }
+                            Err(_) => break,
                         }
-                        Err(_) => break,
                     }
 
-                    if detached.load(std::sync::atomic::Ordering::Acquire) {
+                    if detaching {
                         break;
                     }
                 }
             },
-        }
-
-        if detached.load(std::sync::atomic::Ordering::Acquire) && keystrokes.is_empty() {
-            break;
         }
     }
 
@@ -336,3 +412,18 @@ pub async fn run(
     println!();
     Ok(())
 }
+
+impl std::fmt::Display for OpenFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(error) => write!(f, "{error}"),
+            Self::Channel(error) => write!(f, "the terminal channel ended: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for OpenFailed {}
+
+#[cfg(test)]
+#[path = "attach_tests.rs"]
+mod tests;
