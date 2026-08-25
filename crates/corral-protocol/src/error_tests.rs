@@ -8,6 +8,7 @@ fn known_codes_round_trip_through_their_wire_spelling() {
         ErrorCode::MalformedHello,
         ErrorCode::ProtocolViolation,
         ErrorCode::Busy,
+        ErrorCode::CommandIdConflict,
     ] {
         let encoded = serde_json::to_string(&code).expect("encode");
         let decoded: ErrorCode = serde_json::from_str(&encoded).expect("decode");

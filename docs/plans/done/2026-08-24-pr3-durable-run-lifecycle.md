@@ -1,5 +1,5 @@
 ---
-status: blocked
+status: done
 class: B
 writes: [corrald, corral-state, corral-core, corral-protocol, corral-client, corral]
 reads: [docs/adr/0002-resume-lineage.md, docs/adr/0007-managed-session-lifetime.md, docs/adr/0008-managed-runtime-binding-identity.md, docs/decisions/2026-08-24-pr3-durable-lifecycle-grill.md, docs/plans/done/2026-08-24-pr3-terminal-runtime.md]
@@ -7,8 +7,9 @@ reads: [docs/adr/0002-resume-lineage.md, docs/adr/0007-managed-session-lifetime.
 
 # PR3.1 — the durable run lifecycle corrald never wrote
 
-Blocked on founder acceptance of ADR 0008 (`status: proposed`) and on the
-founder saying to start. No implementation has begun.
+ADR 0008 is accepted and this is implemented. Where the implementation
+departed from the plan, the departure is recorded in §What changed on contact
+with the code.
 
 ## Goal
 
@@ -219,6 +220,59 @@ managed episode; it never claims the OS or provider process exited.*
 - PR3's plan carries a correction note: Design 7 did not land, and this is
   where it did.
 - Human-merged: wire change, `corral-state` surface, first durable writes.
+
+## What changed on contact with the code
+
+**The command's four facts became one transaction.** The plan implied
+`create_session`, then a binding, then `record_run_started`. Written that way,
+a crash between the receipt and the Run leaves a receipt naming a Session whose
+episode nothing can describe — and a retry could then only answer with an
+outcome the accepted vocabulary has no variant for, which is the
+`CommandOutcome::Accepted` the founder rejected. So `Store::create_session`
+became `Store::start_managed_session`, writing `SessionCreated`,
+`BindingAdded`, `RunStarted` and `CommandAccepted` together. The plan's own
+failure list already required this — *"Spawn fails → id unused, no Run, no
+receipt"* is only true if the receipt is written after the spawn. Extended
+rather than added beside: two ways to create a Session under a command id would
+have been the parallel abstraction AGENTS forbids.
+
+**`record_run_ended`, `record_run_attached` and `record_run_detached` take a
+`RunId`.** The plan named only `record_run_started`. The other three took a
+`&Run` the runtime owner does not have and would have had to fabricate to be
+allowed to speak; the store reads the Run back from its own log either way.
+Same ownership correction, same semantic scope.
+
+**No resolve-or-mint for the managed binding.** D2's *"resolution is
+lookup-first"* has no caller in this phase: `session.new` always creates a
+Session, and a new Session has no binding to find. Writing the lookup now would
+have been a branch nothing can reach. The rule that makes reuse mandatory later
+is already enforced — a second control-capable runtime binding on one Session
+is refused — and that refusal is what the plan's "reuses rather than mints a
+second" test asserts.
+
+**A departing daemon waits for what it observed.** Not in the plan, and the
+plan's own rule required it: facts still queued when the process ends are facts
+nobody would ever write, which is the silent loss Q10 forbids. The wait is
+bounded and a wait that runs out is itself reported, in the exit status.
+
+**Advisory facts do not share the sink's fate with authoritative ones.** Q10
+froze "never silently dropped" for the sink as a whole, and review found that
+attach churn could therefore exhaust the queue and end the daemon. The founder
+split the two rather than loosening the rule:
+`docs/decisions/2026-08-25-advisory-attachment-activity.md`. The same record
+carries the audit that settled what `session.new`'s answer asserts — accepted,
+not executing — which needed no durable change.
+
+**Terminal geometry is not a semantic input.** Q2 declined to freeze the
+fingerprint's contents, so this phase had to settle `session.new`'s concrete
+set. Geometry went in on the literal reading and came back out on the founder's
+ruling, because it is the one input a client cannot repeat across a retry:
+`docs/decisions/2026-08-25-session-new-fingerprint-excludes-geometry.md`.
+
+**F1 from the PR3 review, folded in as the follow-up it was slated for.**
+`execution_state`'s catch-all had flipped from `Unknown` to `Running` during
+ADR 0007's change. `Running` is the one answer a fallthrough must never give:
+it is the only value that asserts a process exists.
 
 ## Plan size justification
 

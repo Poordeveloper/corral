@@ -28,7 +28,9 @@ pub use attention::{
     AllowedActions, AttentionAction, AttentionItem, AttentionReason, NeedsInputAction,
     NeedsInputContext, NeedsInputRequest,
 };
-pub use binding::{Binding, BindingKey, BindingKind, ControlEligibility, Provenance};
+pub use binding::{
+    Binding, BindingKey, BindingKind, ControlEligibility, Provenance, ReservedNamespaceMisuse,
+};
 pub use command::{
     Command, CommandFingerprint, CommandFingerprintBuilder, CommandId, CommandKind, CommandOutcome,
     CommandReceipt, MalformedCommandId,

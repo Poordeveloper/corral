@@ -240,6 +240,16 @@ model. Fixed by ADR 3, with these rules:
   thread ends with the runtime it exists for; the session answers from the
   final screen that thread published, and no viewer is offered a stream
   that can never produce (ADR 0007).
+- **Attachment activity is advisory. Managed runtime ownership is
+  authoritative.** Attaching is something an observer does, not a claim on a
+  runtime, so it may inform diagnostics, buffer cleanup, and what a surface
+  shows — and it may never change lifecycle truth. Attaching and detaching in
+  a loop creates no liveness, extends no daemon, and ends none.
+- **A subscriber that fails the data-channel contract loses its
+  subscription, not the daemon lifecycle.** A slow one, a broken one, and one
+  that churns are all the same answer: the subscription ends and the client
+  resyncs, while the session, every other viewer, and the daemon itself carry
+  on untouched.
 
 Deferred until remote/mobile requires them: ACK/credit flow control, remote
 backpressure, viewport claiming, paired parking, and any large binary opcode
@@ -552,6 +562,8 @@ terms: `PRODUCT.md` §8.
 | **Attach token** | the single-use, short-lived capability that opens one terminal data channel. Bound to a Session *and* its concrete Run, because a Session outlives the process a token was minted for |
 | **Final screen** | the snapshot a Run's screen thread publishes as its last act. A finished Run's screen is a value, not an actor: the emulator, its scrollback, and the thread that owned them are released when the runtime ends, and this is what a session answers from afterwards |
 | **Snapshot budget / ceiling** | the encoded size a normal snapshot aims at versus the absolute bound no successful snapshot may pass. Trimming sacrifices oldest scrollback first; a viewport alone past the ceiling is a typed failure, never a partial screen |
+| **Attachment seam** | the advisory record that a Corral attachment to a Run became active and later ended. It carries no holder, no client identity, and no ownership: it says a surface was watching, never who, and never that anyone had a claim. Detaching is not an end — `RunEnded` is terminal for a Run's attachment state, and a projection reads still-open attachments as inactive after it rather than inventing detaches |
+| **Managed runtime binding** | the `RuntimeBinding` Corral holds for a runtime it launched itself: provider `corral`, provenance `CorralCreated`, assurance `Deterministic`, and a Corral-minted opaque external id. It names the binding, never a process — not a pid, not a `RunId`, not a runtime occurrence, and not a provider session (ADR 0008) |
 | **Live synchronized control** | joining the same live provider session as a second synchronized surface; the preferred control path |
 | **First-response lease** | the bounded window (≤15s) during which Corral may hold an already-blocked interaction before failing open |
 | **Surface** | a client rendering the shared model: Desktop, Terminal/TUI, Tray, CLI, Mobile, Web. Holds presentation state only |

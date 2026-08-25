@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::time::Duration;
 
+use super::super::occurrence::{ObservedRuns, observe_runs};
 use super::*;
 
 const GEOMETRY: PtyGeometry = PtyGeometry::expect_valid(24, 80);
@@ -18,11 +19,19 @@ fn request(program: &str, args: &[&str]) -> LaunchRequest {
 ///
 /// Setup with a matching end: without it every case here leaves a live child
 /// and two threads behind for the length of its own sleep.
-struct Running(Option<SessionHandle>);
+///
+/// It keeps the draining end of the occurrence channel, because a runtime with
+/// nowhere to report to is not the runtime the daemon runs — and because what
+/// it reports is itself under test.
+struct Running {
+    handle: Option<SessionHandle>,
+    run: RunId,
+    observed: ObservedRuns,
+}
 
 impl Drop for Running {
     fn drop(&mut self) {
-        if let Some(handle) = self.0.as_ref() {
+        if let Some(handle) = self.handle.as_ref() {
             handle.shut_down();
         }
     }
@@ -31,7 +40,12 @@ impl Drop for Running {
 impl Running {
     /// Hand the handle to something that owns it from here on.
     fn into_handle(mut self) -> SessionHandle {
-        self.0.take().expect("a running session")
+        self.handle.take().expect("a running session")
+    }
+
+    /// The next thing this session's runtime reported about its Run.
+    fn reported(&self) -> Option<RunOccurrence> {
+        self.observed.next().map(|observed| observed.occurrence())
     }
 }
 
@@ -39,20 +53,25 @@ impl std::ops::Deref for Running {
     type Target = SessionHandle;
 
     fn deref(&self) -> &SessionHandle {
-        self.0.as_ref().expect("a running session")
+        self.handle.as_ref().expect("a running session")
     }
 }
 
 fn started(script: &str) -> Running {
-    Running(Some(
-        start(
-            &request("/bin/sh", &["-c", script]),
-            GEOMETRY,
-            CorralSessionId::mint(),
-            RunId::mint(),
-        )
-        .expect("the session starts"),
-    ))
+    serving(&request("/bin/sh", &["-c", script]))
+}
+
+fn serving(request: &LaunchRequest) -> Running {
+    let (observations, observed) = observe_runs();
+    let run = RunId::mint();
+    let handle = spawn_session(request, GEOMETRY)
+        .expect("the session starts")
+        .serve(CorralSessionId::mint(), run, observations);
+    Running {
+        handle: Some(handle),
+        run,
+        observed,
+    }
 }
 
 /// Wait for the screen to reflect something, rather than sleeping a fixed
@@ -94,13 +113,7 @@ fn a_started_session_reports_the_geometry_it_was_given() {
 /// tokens and identifiers a list has no business spreading (grill Q3).
 #[test]
 fn the_session_title_is_the_program_not_its_arguments() {
-    let handle = start(
-        &request("/bin/sh", &["-c", "--token=sk-secret sleep 30"]),
-        GEOMETRY,
-        CorralSessionId::mint(),
-        RunId::mint(),
-    )
-    .expect("the session starts");
+    let handle = serving(&request("/bin/sh", &["-c", "--token=sk-secret sleep 30"]));
 
     assert_eq!(handle.title(), "sh");
 }
@@ -365,8 +378,9 @@ fn a_lost_screen_ends_the_run_rather_than_leaving_it_blocked() {
 
     let (done, waited) = std::sync::mpsc::channel();
     let reaping = std::sync::Arc::clone(&teardown);
+    let (observations, observed) = observe_runs();
     std::thread::spawn(move || {
-        read_pty(reader, reaper, &reaping, asks);
+        read_pty(reader, reaper, &reaping, asks, RunId::mint(), &observations);
         let _ = done.send(());
     });
 
@@ -380,6 +394,13 @@ fn a_lost_screen_ends_the_run_rather_than_leaving_it_blocked() {
     assert!(
         ended,
         "the child outlived the screen that was the only thing draining it"
+    );
+    assert!(
+        matches!(
+            observed.next().map(|seen| seen.occurrence()),
+            Some(RunOccurrence::Exited { .. })
+        ),
+        "a run whose screen was lost still reports how it ended"
     );
 }
 
@@ -398,5 +419,80 @@ fn a_child_that_reshapes_the_screen_moves_the_published_geometry() {
         widened.is_some(),
         "the daemon still reports {:?} for a screen the child widened",
         handle.last_geometry()
+    );
+}
+
+/// A runtime whose Run never became a durable fact is hung up and reaped, not
+/// left alive and unlistable. `abandon` blocks on the reaper, so it returning
+/// at all is the assertion: a child that was not signalled would keep this
+/// waiting for the whole sleep (grill Q9).
+#[test]
+fn an_abandoned_runtime_is_hung_up_and_reaped() {
+    let pending = spawn_session(&request("/bin/sh", &["-c", "sleep 300"]), GEOMETRY)
+        .expect("the session starts");
+
+    let (done, waited) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        pending.abandon();
+        let _ = done.send(());
+    });
+
+    assert!(
+        waited.recv_timeout(Duration::from_secs(10)).is_ok(),
+        "a runtime nobody could record outlived the daemon giving up on it"
+    );
+}
+
+/// The whole point of splitting the start: nothing between a spawned runtime
+/// and a served one can fail, so a Run whose start committed is always served.
+#[test]
+fn a_pending_session_knows_its_title_before_it_is_served() {
+    let pending = spawn_session(&request("/bin/sh", &["-c", "sleep 30"]), GEOMETRY)
+        .expect("the session starts");
+
+    assert_eq!(pending.title(), "sh");
+    pending.abandon();
+}
+
+/// The end of a run is reported by the party that establishes it, so a
+/// durable `RunEnded` can name what actually happened rather than that the
+/// daemon stopped hearing anything.
+#[test]
+fn a_run_that_exits_reports_how_it_ended() {
+    let session = started("exit 0");
+
+    let reported = session.reported();
+
+    assert!(
+        matches!(
+            reported,
+            Some(RunOccurrence::Exited {
+                run,
+                end: RunEnd::Exited(ExitCause::Completed),
+                at: OccurrenceTime::Authoritative(_),
+            }) if run == session.run
+        ),
+        "{reported:?}"
+    );
+}
+
+/// A run Corral tore down ended by a signal, and says so. That a signal ended
+/// it is a fact about the ending, not a claim about who sent it.
+#[test]
+fn a_run_corral_shut_down_reports_a_terminated_ending() {
+    let session = started("sleep 300");
+    session.shut_down();
+
+    let reported = session.reported();
+
+    assert!(
+        matches!(
+            reported,
+            Some(RunOccurrence::Exited {
+                end: RunEnd::Exited(ExitCause::Terminated),
+                ..
+            })
+        ),
+        "{reported:?}"
     );
 }

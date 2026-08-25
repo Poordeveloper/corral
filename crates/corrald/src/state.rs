@@ -1,10 +1,27 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, SystemTime};
 
-use corral_state::{FatalState, Refusal, StateError, Store};
+use corral_core::{Command, OccurrenceTime, RunId};
+use corral_state::{FatalState, Refusal, StartedManagedSession, StateError, Store};
 
-use crate::runtime::{AttachTokens, ManagedSessions};
+use crate::in_flight::InFlightCommands;
+use crate::runtime::{AttachTokens, Integrity, ManagedSessions, RunObservations, observe_runs};
+
+/// How long a departing daemon waits for its last observed facts to land.
+///
+/// Derived from the recorder's own budget rather than chosen beside it. The
+/// recorder legitimately waits out a store another writer is holding, and a
+/// shutdown that gave up first would declare a hole in the accounting — and
+/// exit non-zero — while the write was still going to succeed.
+const SETTLE_GRACE: Duration = Duration::from_millis(
+    crate::run_lifecycle::LONGEST_RECORD.as_millis() as u64 + STORE_WAIT_OVERSHOOT_MILLIS,
+);
+
+/// The recorder's budget bounds when it stops *starting* attempts; the attempt
+/// under way when it runs out still has the store's own wait to spend.
+const STORE_WAIT_OVERSHOOT_MILLIS: u64 = 5_000;
 
 /// What the registry said when asked whether it can still vouch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,12 +42,23 @@ pub enum Vouched {
 /// blocking pool. On the reactor thread a contended registry would stall every
 /// other connection, the idle watchdog, and the signal handler along with it.
 pub struct DaemonState {
-    store: Mutex<Store>,
+    /// Behind an `Arc` because the store has a second owner: the thread that
+    /// records what the runtime observed. It is the same store — one log, one
+    /// writer — reached without going through this type, so a session's
+    /// teardown never waits on anything a connection is doing.
+    store: Arc<Mutex<Store>>,
 
-    /// Set when a store call could not complete at all. The store latches its
-    /// own conclusions, but it never saw this one, and the exit status is read
-    /// from here.
-    unreachable: AtomicBool,
+    /// Set when this daemon concluded it can no longer vouch for durable truth
+    /// by a route the store itself never saw: a call that did not complete.
+    /// The store latches its own conclusions; the exit status reads both.
+    cannot_vouch: AtomicBool,
+
+    /// Where the runtime reports what it saw, and the accounting that says
+    /// whether all of it was recorded.
+    observations: RunObservations,
+
+    /// The mutating commands this daemon is executing right now.
+    commands: InFlightCommands,
     /// The sessions this daemon is running, and the tokens it has issued for
     /// their terminals.
     ///
@@ -54,11 +82,64 @@ impl DaemonState {
     /// used is a startup failure rather than something discovered a
     /// millisecond after a client's hello succeeded (ADR 0002, Q14).
     pub fn open(registry: &Path) -> Result<Self, StateError> {
+        let store = Arc::new(Mutex::new(Store::open(registry)?));
+        // Started with the store, not with the server: a runtime that could
+        // report an ending before anything was draining the channel would fill
+        // it and lose the accounting the daemon exists to keep.
+        let (observations, observed) = observe_runs();
+        crate::run_lifecycle::record_observed_runs(Arc::clone(&store), observed);
         Ok(Self {
-            store: Mutex::new(Store::open(registry)?),
-            unreachable: AtomicBool::new(false),
+            store,
+            cannot_vouch: AtomicBool::new(false),
+            observations,
+            commands: InFlightCommands::new(),
             runtime: Mutex::new(Runtime::default()),
         })
+    }
+
+    /// Where a managed runtime reports what it observed about its Run.
+    pub fn observations(&self) -> &RunObservations {
+        &self.observations
+    }
+
+    pub fn commands(&self) -> &InFlightCommands {
+        &self.commands
+    }
+
+    /// Close every managed-runtime episode a departed daemon left open.
+    ///
+    /// Synchronous and before the endpoint is bound: reconciliation is part of
+    /// deciding what this daemon's durable state says, and a client that
+    /// connected first could be told about a Run that was about to be closed
+    /// behind it (grill Q5).
+    pub fn reconcile_managed_runs(&self) -> Result<Vec<RunId>, StateError> {
+        self.lock().end_unowned_managed_runs()
+    }
+
+    /// Wait for every observed fact to be recorded, on the way out.
+    pub fn settle_observations(&self) -> Integrity {
+        self.observations.settle(SETTLE_GRACE)
+    }
+
+    /// What this command already did, if it has run before.
+    pub async fn completed_managed_session(
+        self: &Arc<Self>,
+        command: Command,
+    ) -> Result<Option<StartedManagedSession>, StateError> {
+        self.off_the_reactor(move |store| store.completed_managed_session(&command))
+            .await
+    }
+
+    /// Record a Session, its managed runtime binding, and its first Run.
+    pub async fn start_managed_session(
+        self: &Arc<Self>,
+        command: Command,
+        run: RunId,
+        started: OccurrenceTime,
+        at: SystemTime,
+    ) -> Result<StartedManagedSession, StateError> {
+        self.off_the_reactor(move |store| store.start_managed_session(&command, run, started, at))
+            .await
     }
 
     /// Confirm the registry can still vouch for durable truth.
@@ -140,7 +221,13 @@ impl DaemonState {
     /// dropped mid-shutdown, or a daemon that stopped over an untrusted store
     /// could still exit as though nothing happened.
     pub fn stopped_vouching(&self) -> bool {
-        self.unreachable.load(Ordering::SeqCst) || self.lock().stopped_vouching()
+        self.cannot_vouch.load(Ordering::SeqCst)
+            // A store that is perfectly healthy and a run lifecycle with a
+            // hole in it are the same answer to the only question an exit
+            // status can carry: this daemon could not keep its durable state
+            // honest (grill Q10).
+            || self.observations.integrity() == Integrity::Lost
+            || self.lock().stopped_vouching()
     }
 
     /// Run one store call on the blocking pool.
@@ -156,7 +243,7 @@ impl DaemonState {
             // The store never saw this, so it is recorded here instead; an exit
             // status read from the store alone would report a clean stop.
             Err(source) => {
-                self.unreachable.store(true, Ordering::SeqCst);
+                self.cannot_vouch.store(true, Ordering::SeqCst);
                 Err(StateError::Fatal(FatalState::Storage {
                     detail: format!("a registry call did not complete: {source}"),
                 }))

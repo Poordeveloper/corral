@@ -32,6 +32,13 @@ pub enum ErrorCode {
     /// be sent again. Says nothing beyond "not now": it is not a claim about
     /// the daemon's health, and it is never an answer's content.
     Busy,
+    /// A command id already names a different semantic command. Nothing was
+    /// executed and nothing was changed.
+    ///
+    /// Its own code rather than `invalid_params`, because what a client must
+    /// do about it is the opposite: retrying is what `busy` invites and what
+    /// this forbids — the same id will never mean this command.
+    CommandIdConflict,
     Unknown(String),
 }
 
@@ -52,6 +59,7 @@ impl ErrorCode {
             Self::MalformedHello => "malformed_hello",
             Self::ProtocolViolation => "protocol_violation",
             Self::Busy => "busy",
+            Self::CommandIdConflict => "command_id_conflict",
             Self::Unknown(raw) => raw,
         }
     }
@@ -65,6 +73,7 @@ impl From<String> for ErrorCode {
             "malformed_hello" => Self::MalformedHello,
             "protocol_violation" => Self::ProtocolViolation,
             "busy" => Self::Busy,
+            "command_id_conflict" => Self::CommandIdConflict,
             _ => Self::Unknown(raw),
         }
     }

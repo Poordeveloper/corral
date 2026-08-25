@@ -17,7 +17,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::debug;
 
-use crate::runtime::{Attachment, Delivery, InputRefused, PtyGeometry, SessionHandle, Viewer};
+use crate::runtime::{
+    Attachment, Delivery, InputRefused, PtyGeometry, RunOccurrence, SessionHandle, Viewer,
+};
 use crate::state::DaemonState;
 
 /// How many encoded frames may wait for a client that is not reading.
@@ -93,6 +95,11 @@ async fn serve_frames(
     let Some(attachment) = attach(session, run, state).await else {
         return;
     };
+    // Recorded once the attachment exists, and once per channel rather than
+    // once per snapshot: a resync or a reflow gives this connection a fresh
+    // attachment, and none of those is a person arriving. Advisory throughout
+    // — no holder, no client identity, nothing enforced (grill Q7).
+    let _attached = ActiveAttachment::began(run, state);
     if !send_snapshot(writer, &attachment).await {
         return;
     }
@@ -177,6 +184,38 @@ async fn next_delivery(viewer: Option<&mut Viewer>) -> Option<Delivery> {
     match viewer {
         Some(viewer) => viewer.recv().await,
         None => std::future::pending().await,
+    }
+}
+
+/// One established attachment, for as long as the daemon can observe it.
+///
+/// The end is reported from a destructor because a channel has many ways to
+/// end — a closed socket, a refused frame, a session that went away, a
+/// shutdown — and an attachment that only reported its end on the tidy paths
+/// would leave the log claiming someone is still watching.
+///
+/// Never the end of the Run: closing a surface does not terminate managed work.
+struct ActiveAttachment<'a> {
+    run: RunId,
+    state: &'a Arc<DaemonState>,
+}
+
+impl<'a> ActiveAttachment<'a> {
+    fn began(run: RunId, state: &'a Arc<DaemonState>) -> Self {
+        state.observations().report(RunOccurrence::Attached {
+            run,
+            at: std::time::SystemTime::now(),
+        });
+        Self { run, state }
+    }
+}
+
+impl Drop for ActiveAttachment<'_> {
+    fn drop(&mut self) {
+        self.state.observations().report(RunOccurrence::Detached {
+            run: self.run,
+            at: std::time::SystemTime::now(),
+        });
     }
 }
 

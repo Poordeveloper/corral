@@ -2,6 +2,7 @@
 
 use std::io;
 
+use corral_core::ExitCause;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use super::launch::LaunchRequest;
@@ -322,9 +323,24 @@ impl TeardownWindow {
 }
 
 impl ChildReaper {
-    /// Block until the child exits, yielding its exit code.
-    pub fn wait(&mut self) -> io::Result<u32> {
-        self.child.wait().map(|status| status.exit_code())
+    /// Block until the child exits, yielding how it ended.
+    ///
+    /// The platform's exit code and signal number are mapped here and go no
+    /// further: the domain describes an ending in `ExitCause`, and a number
+    /// crossing that line would make every consumer decide for itself what
+    /// `137` means (`runtime/mod.rs`).
+    pub fn wait(&mut self) -> io::Result<ExitCause> {
+        self.child.wait().map(|status| {
+            if status.signal().is_some() {
+                // Includes Corral's own hang-up. That a signal ended the child
+                // is a fact about the ending, not a claim about who sent it.
+                ExitCause::Terminated
+            } else if status.exit_code() == 0 {
+                ExitCause::Completed
+            } else {
+                ExitCause::Failed
+            }
+        })
     }
 }
 

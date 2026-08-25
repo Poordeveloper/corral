@@ -23,11 +23,22 @@ use support::{SETTLE, TestAccount, run, stderr, stdout};
 const HEADER_BYTES: usize = 1 + 8 + 8 + 4;
 
 fn start_session(client: &mut RawClient, id: u64, argv: &[&str]) -> Value {
+    started_under(client, id, &format!("cmd-{id}"), argv)
+}
+
+/// `session.new` under a command id the caller names, so a test can send the
+/// same command twice and mean it.
+fn started_under(client: &mut RawClient, id: u64, command: &str, argv: &[&str]) -> Value {
     client
         .request(
             id,
             "session.new",
-            Some(json!({ "argv": argv, "rows": 24, "cols": 80 })),
+            Some(json!({
+                "command_id": command,
+                "argv": argv,
+                "rows": 24,
+                "cols": 80,
+            })),
         )
         .expect("session.new answered")
 }
@@ -368,7 +379,12 @@ fn a_session_refuses_a_geometry_it_will_not_build() {
             .request(
                 1,
                 "session.new",
-                Some(json!({ "argv": ["/bin/sh"], "rows": rows, "cols": cols })),
+                Some(json!({
+                    "command_id": format!("cmd-{rows}-{cols}"),
+                    "argv": ["/bin/sh"],
+                    "rows": rows,
+                    "cols": cols,
+                })),
             )
             .expect("session.new answered");
 

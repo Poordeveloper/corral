@@ -12,8 +12,8 @@
 
 use corral_core::{
     Binding, BindingId, BindingKey, BindingKind, CommandFingerprint, CommandId, CommandOutcome,
-    CommandReceipt, CorralSessionId, Evidence, ExternalId, ProviderId, Run, RunId, RunOrdinal,
-    Session, SessionLineage,
+    CommandReceipt, CorralSessionId, Evidence, ExternalId, NodeId, Provenance, ProviderId, Run,
+    RunId, RunOrdinal, Session, SessionLineage,
 };
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 
@@ -342,6 +342,70 @@ fn run_from(row: RunRow) -> Result<Run, StateError> {
         None => run,
         Some(token) => run.ended(run_end_from_token(&token)?, occurrence(ended)),
     })
+}
+
+/// The Run a Session's creating command produced.
+///
+/// Ordered by acceptance, deliberately not by occurrence the way `runs_of`
+/// presents Runs to a person. What this answers is "which Run did that command
+/// write", and a Session's creation and its first `RunStarted` are one
+/// transaction — so the earliest accepted Run is that one, unconditionally. A
+/// later Run carrying an earlier occurrence time is an ordinary thing (a clock
+/// that stepped back, a Run appended after its association was confirmed), and
+/// ordering by occurrence would hand a retry the wrong episode.
+pub(crate) fn first_run_of(
+    connection: &Connection,
+    session: CorralSessionId,
+) -> Result<Option<RunId>, StateError> {
+    let found: Option<String> = connection
+        .prepare_cached("SELECT id FROM runs WHERE session_id = ?1 ORDER BY accepted_seq LIMIT 1")?
+        .query_row(params![session.to_string()], |row| row.get(0))
+        .optional()?;
+    found
+        .map(|id| id.parse().map_err(|error| FatalState::from(error).into()))
+        .transpose()
+}
+
+/// Every unfinished Run that Corral owns as a managed-runtime episode on this
+/// node.
+///
+/// The predicate is ownership, never `ended_at IS NULL` alone: a discovered or
+/// provider-owned Run may legitimately outlive a `corrald` restart, and
+/// closing one would be Corral asserting an end to something it never managed
+/// (grill Q5). What identifies a managed episode is its binding — created by
+/// Corral, in the reserved provider namespace, on this node (ADR 0008 D1).
+pub(crate) fn open_managed_runs(
+    connection: &Connection,
+    node: NodeId,
+) -> Result<Vec<(CorralSessionId, RunId)>, StateError> {
+    let mut statement = connection.prepare(
+        "SELECT runs.session_id, runs.id FROM runs
+           JOIN bindings ON bindings.id = runs.runtime_binding_id
+          WHERE runs.end_state IS NULL
+            AND bindings.node_id = ?1
+            AND bindings.kind = ?2
+            AND bindings.provider = ?3
+            AND bindings.provenance = ?4
+          ORDER BY runs.accepted_seq",
+    )?;
+    let rows = statement.query_map(
+        params![
+            node.to_string(),
+            binding_kind_token(BindingKind::Runtime),
+            ProviderId::RESERVED_FOR_CORRAL,
+            provenance_token(Provenance::CorralCreated),
+        ],
+        |row| Ok((text(row, 0)?, text(row, 1)?)),
+    )?;
+    let mut open = Vec::new();
+    for row in rows {
+        let (session, run) = row?;
+        open.push((
+            session.parse().map_err(FatalState::from)?,
+            run.parse().map_err(FatalState::from)?,
+        ));
+    }
+    Ok(open)
 }
 
 /// The episode this runtime binding is currently running, if any.

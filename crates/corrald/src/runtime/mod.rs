@@ -16,6 +16,7 @@
 
 mod attach;
 mod launch;
+mod occurrence;
 mod session;
 mod snapshot;
 mod spawn;
@@ -26,9 +27,13 @@ pub use attach::{
     ATTACH_TOKEN_TTL, AttachGrant, AttachRefused, AttachToken, AttachTokens, NoRandomness,
 };
 pub use launch::{LaunchRejection, LaunchRequest};
+pub use occurrence::{
+    ADVISORY_SHARE, Integrity, OBSERVATION_QUEUE, ObservedRuns, RunObservations, RunOccurrence,
+    Weight, observe_runs,
+};
 pub use session::{
-    Attachment, ExecutionState, InputRefused, ManagedSession, ManagedSessions, ResizeRefused,
-    ScreenUnreadable, SessionGone, SessionHandle, StartError, start,
+    Attachment, ExecutionState, InputRefused, ManagedSession, ManagedSessions, PendingSession,
+    ResizeRefused, ScreenUnreadable, SessionGone, SessionHandle, StartError, spawn_session,
 };
 pub use snapshot::{
     SNAPSHOT_CEILING_BYTES, SNAPSHOT_SCROLLBACK_ROWS, SNAPSHOT_TARGET_BYTES, Snapshot,
