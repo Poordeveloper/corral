@@ -6,16 +6,27 @@
 //! to finish tearing a session down (grill Q6).
 //!
 //! Three rules make that safe rather than merely fast. Reporting never blocks.
-//! A fact is never silently dropped — a queue that cannot take one means the
-//! daemon can no longer account for its own run lifecycle, which is an
+//! A fact the daemon must account for is never silently dropped — a queue that
+//! cannot take one means the run lifecycle has a hole in it, which is an
 //! integrity failure and not backpressure. And what has been reported but not
 //! yet recorded is countable, so a shutdown can wait for it instead of
 //! discovering afterwards that it did not (grill Q10).
+//!
+//! What the daemon must account for is not everything it observes:
+//!
+//! > Attachment activity is advisory.
+//! > Managed runtime ownership is authoritative.
+//!
+//! An observer attaching and detaching says nothing about who owns a runtime,
+//! so it may inform diagnostics and never lifecycle truth. `Weight` is where
+//! that line is drawn, and it is why churn cannot reach the daemon's own
+//! lifetime (founder ruling, 2026-08-25).
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime};
 
 use corral_core::{OccurrenceTime, RunEnd, RunId};
+use tracing::debug;
 
 /// One thing the runtime saw happen to a Run.
 ///
@@ -39,6 +50,45 @@ pub enum RunOccurrence {
     Detached { run: RunId, at: SystemTime },
 }
 
+impl RunOccurrence {
+    /// What losing this one costs.
+    #[must_use]
+    pub fn weight(self) -> Weight {
+        match self {
+            Self::Exited { .. } => Weight::Authoritative,
+            Self::Attached { .. } | Self::Detached { .. } => Weight::Advisory,
+        }
+    }
+
+    /// The Run this is about, for whoever reports on it.
+    #[must_use]
+    pub fn run(self) -> RunId {
+        match self {
+            Self::Exited { run, .. } | Self::Attached { run, .. } | Self::Detached { run, .. } => {
+                run
+            }
+        }
+    }
+}
+
+/// What a lost observation costs.
+///
+/// **Attachment activity is advisory. Managed runtime ownership is
+/// authoritative.** Attaching is something an observer does; it is not a claim
+/// on the runtime, so it may inform diagnostics, buffer cleanup and a UI hint,
+/// and it may never change lifecycle truth (founder ruling, 2026-08-25).
+///
+/// The practical consequence is that these two must not share a fate. An
+/// ending nobody recorded leaves a durable Run that looks legitimate and stays
+/// open forever; an attachment nobody recorded costs a line of history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Weight {
+    /// The daemon cannot account for its runs without it.
+    Authoritative,
+    /// Diagnostics and nothing else.
+    Advisory,
+}
+
 /// How many observations may wait to be recorded.
 ///
 /// An initial implementation value, not canon: run endings are rare and one
@@ -47,6 +97,18 @@ pub enum RunOccurrence {
 /// ordinary use never approaches it; small enough that exhaustion means
 /// something is wrong rather than merely busy.
 pub const OBSERVATION_QUEUE: usize = 1024;
+
+/// How much of that queue advisory activity may occupy.
+///
+/// Bounded well below the whole, so churn exhausts its own budget and never
+/// the room an ending needs. Without this the split above would be words: a
+/// client connecting and disconnecting in a loop could fill the queue with
+/// attachment facts and leave a run's ending with nowhere to go, which is the
+/// daemon's whole control plane lost to an observer's behaviour.
+///
+/// It is the shape a slow viewer already has, one layer down: overflow costs
+/// the subscription, never the session (`stream.rs`).
+pub const ADVISORY_SHARE: usize = OBSERVATION_QUEUE / 4;
 
 /// Whether every observed occurrence reached whoever records it.
 ///
@@ -63,25 +125,34 @@ pub enum Integrity {
 #[derive(Clone)]
 pub struct RunObservations {
     observed: std::sync::mpsc::SyncSender<RunOccurrence>,
-    outstanding: Arc<Outstanding>,
+    in_flight: Arc<InFlight>,
     integrity: Arc<tokio::sync::watch::Sender<Integrity>>,
 }
 
 /// The draining end, held by whoever turns observations into durable facts.
 pub struct ObservedRuns {
     observed: std::sync::mpsc::Receiver<RunOccurrence>,
-    outstanding: Arc<Outstanding>,
+    in_flight: Arc<InFlight>,
     integrity: Arc<tokio::sync::watch::Sender<Integrity>>,
 }
 
 /// How many observations have been reported and not yet recorded.
 ///
+/// Counted by weight, because the two are spent against different budgets and
+/// only one of them is worth waiting for on the way out.
+///
 /// A count with a way to wait on it, rather than a bare atomic: a shutdown
 /// that wanted to know when the last fact had landed would otherwise have to
 /// poll, and a poll is a guess with a sleep in it.
-struct Outstanding {
-    count: Mutex<usize>,
-    emptied: Condvar,
+struct InFlight {
+    counts: Mutex<Counts>,
+    settled: Condvar,
+}
+
+#[derive(Default)]
+struct Counts {
+    authoritative: usize,
+    advisory: usize,
 }
 
 /// One observation on its way into durable state.
@@ -91,28 +162,28 @@ struct Outstanding {
 /// fact has been acted on, not merely dequeued.
 pub struct Observed<'a> {
     occurrence: RunOccurrence,
-    outstanding: &'a Outstanding,
+    in_flight: &'a InFlight,
 }
 
 /// Open the channel between the runtime and whoever records what it sees.
 #[must_use]
 pub fn observe_runs() -> (RunObservations, ObservedRuns) {
     let (sender, receiver) = std::sync::mpsc::sync_channel(OBSERVATION_QUEUE);
-    let outstanding = Arc::new(Outstanding {
-        count: Mutex::new(0),
-        emptied: Condvar::new(),
+    let in_flight = Arc::new(InFlight {
+        counts: Mutex::new(Counts::default()),
+        settled: Condvar::new(),
     });
     let (integrity, _) = tokio::sync::watch::channel(Integrity::Intact);
     let integrity = Arc::new(integrity);
     (
         RunObservations {
             observed: sender,
-            outstanding: Arc::clone(&outstanding),
+            in_flight: Arc::clone(&in_flight),
             integrity: Arc::clone(&integrity),
         },
         ObservedRuns {
             observed: receiver,
-            outstanding,
+            in_flight,
             integrity,
         },
     )
@@ -121,16 +192,35 @@ pub fn observe_runs() -> (RunObservations, ObservedRuns) {
 impl RunObservations {
     /// Report what this runtime saw. Never waits.
     ///
-    /// A full queue or a recorder that is gone ends the daemon's ability to
-    /// account for its runs, and says so. It does not drop the fact quietly
-    /// and carry on: an unrecorded ending leaves a durable Run that looks
-    /// legitimate and stays open forever, which is the most dangerous shape
-    /// this design can produce (grill Q9, Q10).
+    /// What a report that cannot be taken costs depends on what it is. An
+    /// ending the daemon could not hand on ends its ability to account for its
+    /// runs, and says so — dropping one quietly would leave a durable Run that
+    /// looks legitimate and stays open forever, the most dangerous shape this
+    /// design can produce (grill Q9, Q10).
+    ///
+    /// An attachment is an observer's activity, not a claim on the runtime. It
+    /// is spent against a budget of its own, and exhausting that budget costs
+    /// the fact and nothing else: a client connecting and disconnecting in a
+    /// loop must not be able to reach the daemon's lifecycle (founder ruling,
+    /// 2026-08-25).
     pub fn report(&self, occurrence: RunOccurrence) {
-        self.outstanding.enter();
+        let weight = occurrence.weight();
+        if !self.in_flight.admit(weight) {
+            debug!(
+                run = %occurrence.run(),
+                "attachment activity is outrunning the recorder; this one is not kept"
+            );
+            return;
+        }
         if self.observed.try_send(occurrence).is_err() {
-            self.outstanding.leave();
-            self.lost();
+            self.in_flight.recorded(weight);
+            match weight {
+                Weight::Authoritative => self.lost(),
+                Weight::Advisory => debug!(
+                    run = %occurrence.run(),
+                    "an attachment fact found no room and is not kept"
+                ),
+            }
         }
     }
 
@@ -165,7 +255,9 @@ impl RunObservations {
     /// exit until such a run had reported would make a shutdown wait on the
     /// children ADR 0007 L6 says Corral does not wait for.
     pub fn settle(&self, within: Duration) -> Integrity {
-        if !self.outstanding.wait_until_empty(within) {
+        // Only the authoritative facts. An attachment still queued at exit is
+        // a line of history nobody will write, which is what "advisory" means.
+        if !self.in_flight.wait_until_accounted(within) {
             self.lost();
         }
         self.integrity()
@@ -177,7 +269,7 @@ impl ObservedRuns {
     pub fn next(&self) -> Option<Observed<'_>> {
         self.observed.recv().ok().map(|occurrence| Observed {
             occurrence,
-            outstanding: &self.outstanding,
+            in_flight: &self.in_flight,
         })
     }
 
@@ -196,40 +288,59 @@ impl Observed<'_> {
 
 impl Drop for Observed<'_> {
     fn drop(&mut self) {
-        self.outstanding.leave();
+        self.in_flight.recorded(self.occurrence.weight());
     }
 }
 
-impl Outstanding {
-    fn enter(&self) {
-        *self.lock() += 1;
+impl InFlight {
+    /// Take a place in the queue, or refuse one that is not this weight's to
+    /// take.
+    ///
+    /// Only advisory activity can be refused here. An authoritative fact is
+    /// always admitted, because the queue's whole remaining depth is reserved
+    /// for it — and if even that is full, the caller loses the accounting
+    /// rather than the fact being dropped quietly.
+    fn admit(&self, weight: Weight) -> bool {
+        let mut counts = self.lock();
+        match weight {
+            Weight::Authoritative => counts.authoritative += 1,
+            Weight::Advisory if counts.advisory >= ADVISORY_SHARE => return false,
+            Weight::Advisory => counts.advisory += 1,
+        }
+        true
     }
 
-    fn leave(&self) {
-        let mut count = self.lock();
-        *count = count.saturating_sub(1);
-        if *count == 0 {
-            self.emptied.notify_all();
+    fn recorded(&self, weight: Weight) {
+        let mut counts = self.lock();
+        match weight {
+            Weight::Authoritative => {
+                counts.authoritative = counts.authoritative.saturating_sub(1);
+                if counts.authoritative == 0 {
+                    self.settled.notify_all();
+                }
+            }
+            Weight::Advisory => counts.advisory = counts.advisory.saturating_sub(1),
         }
     }
 
-    /// Whether everything reported was recorded before the deadline.
-    fn wait_until_empty(&self, within: Duration) -> bool {
-        let count = self.lock();
-        let (count, timed_out) = self
-            .emptied
-            .wait_timeout_while(count, within, |count| *count > 0)
-            // A poisoned lock means a recorder panicked mid-count. The number
-            // it guards is a `usize`; refusing to look would turn one panic
+    /// Whether every fact the daemon must account for was recorded before the
+    /// deadline.
+    fn wait_until_accounted(&self, within: Duration) -> bool {
+        let counts = self.lock();
+        let (counts, timed_out) = self
+            .settled
+            .wait_timeout_while(counts, within, |counts| counts.authoritative > 0)
+            // A poisoned lock means a recorder panicked mid-count. The numbers
+            // it guards are `usize`; refusing to look would turn one panic
             // into a shutdown that waits for a wakeup nobody will send.
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        !timed_out.timed_out() && *count == 0
+        !timed_out.timed_out() && counts.authoritative == 0
     }
 
     /// A poisoned lock leaves a count that may be one too high; that costs a
     /// shutdown its grace, where refusing to look would cost it its exit.
-    fn lock(&self) -> std::sync::MutexGuard<'_, usize> {
-        self.count
+    fn lock(&self) -> std::sync::MutexGuard<'_, Counts> {
+        self.counts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }

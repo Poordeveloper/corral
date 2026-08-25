@@ -240,6 +240,16 @@ model. Fixed by ADR 3, with these rules:
   thread ends with the runtime it exists for; the session answers from the
   final screen that thread published, and no viewer is offered a stream
   that can never produce (ADR 0007).
+- **Attachment activity is advisory. Managed runtime ownership is
+  authoritative.** Attaching is something an observer does, not a claim on a
+  runtime, so it may inform diagnostics, buffer cleanup, and what a surface
+  shows — and it may never change lifecycle truth. Attaching and detaching in
+  a loop creates no liveness, extends no daemon, and ends none.
+- **A subscriber that fails the data-channel contract loses its
+  subscription, not the daemon lifecycle.** A slow one, a broken one, and one
+  that churns are all the same answer: the subscription ends and the client
+  resyncs, while the session, every other viewer, and the daemon itself carry
+  on untouched.
 
 Deferred until remote/mobile requires them: ACK/credit flow control, remote
 backpressure, viewport claiming, paired parking, and any large binary opcode

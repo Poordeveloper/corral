@@ -28,7 +28,8 @@ pub use attach::{
 };
 pub use launch::{LaunchRejection, LaunchRequest};
 pub use occurrence::{
-    Integrity, OBSERVATION_QUEUE, ObservedRuns, RunObservations, RunOccurrence, observe_runs,
+    ADVISORY_SHARE, Integrity, OBSERVATION_QUEUE, ObservedRuns, RunObservations, RunOccurrence,
+    Weight, observe_runs,
 };
 pub use session::{
     Attachment, ExecutionState, InputRefused, ManagedSession, ManagedSessions, PendingSession,

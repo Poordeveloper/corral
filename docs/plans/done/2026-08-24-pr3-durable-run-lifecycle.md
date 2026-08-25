@@ -255,6 +255,14 @@ plan's own rule required it: facts still queued when the process ends are facts
 nobody would ever write, which is the silent loss Q10 forbids. The wait is
 bounded and a wait that runs out is itself reported, in the exit status.
 
+**Advisory facts do not share the sink's fate with authoritative ones.** Q10
+froze "never silently dropped" for the sink as a whole, and review found that
+attach churn could therefore exhaust the queue and end the daemon. The founder
+split the two rather than loosening the rule:
+`docs/decisions/2026-08-25-advisory-attachment-activity.md`. The same record
+carries the audit that settled what `session.new`'s answer asserts — accepted,
+not executing — which needed no durable change.
+
 **Terminal geometry is not a semantic input.** Q2 declined to freeze the
 fingerprint's contents, so this phase had to settle `session.new`'s concrete
 set. Geometry went in on the literal reading and came back out on the founder's

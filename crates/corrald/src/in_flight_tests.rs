@@ -53,11 +53,11 @@ async fn a_waiter_is_answered_with_what_the_owner_published() {
 
     let session = corral_core::CorralSessionId::mint();
     let run = corral_core::RunId::mint();
-    owner.publish(Concluded::Started { session, run });
+    owner.publish(Concluded::Accepted { session, run });
 
     assert!(matches!(
         joined(waiting).await,
-        Some(Concluded::Started { session: answered, run: ran })
+        Some(Concluded::Accepted { session: answered, run: ran })
             if answered == session && ran == run
     ));
 }
@@ -76,7 +76,7 @@ async fn an_answer_published_before_the_claim_is_released_still_reaches_a_waiter
     };
 
     let session = corral_core::CorralSessionId::mint();
-    owner.publish(Concluded::Started {
+    owner.publish(Concluded::Accepted {
         session,
         run: corral_core::RunId::mint(),
     });
@@ -84,7 +84,7 @@ async fn an_answer_published_before_the_claim_is_released_still_reaches_a_waiter
 
     assert!(matches!(
         joined(waiting).await,
-        Some(Concluded::Started { session: answered, .. }) if answered == session
+        Some(Concluded::Accepted { session: answered, .. }) if answered == session
     ));
 }
 

@@ -608,7 +608,7 @@ async fn execute_session_new(
     // second one nobody asked for (grill Q2).
     match state.completed_managed_session(command.clone()).await {
         Ok(Some(already)) => {
-            return Ok(Concluded::Started {
+            return Ok(Concluded::Accepted {
                 session: already.session(),
                 run: already.run(),
             });
@@ -674,7 +674,7 @@ async fn execute_session_new(
     // leave a second process running.
     if !started.executed() {
         abandon(pending);
-        return Ok(Concluded::Started {
+        return Ok(Concluded::Accepted {
             session: started.session(),
             run: started.run(),
         });
@@ -710,7 +710,7 @@ async fn execute_session_new(
         error!(%session, %run, "a managed run could not be registered and was ended");
     }
 
-    Ok(Concluded::Started { session, run })
+    Ok(Concluded::Accepted { session, run })
 }
 
 /// End a runtime whose Run never became a durable fact.
@@ -783,7 +783,7 @@ fn conflict(command: &Command) -> ProtocolError {
 /// alike.
 fn answer(id: RequestId, concluded: Concluded) -> Frame {
     match concluded {
-        Concluded::Started { session, run } => match serde_json::to_value(SessionNewResult {
+        Concluded::Accepted { session, run } => match serde_json::to_value(SessionNewResult {
             session_id: session.to_string(),
             run_id: run.to_string(),
         }) {

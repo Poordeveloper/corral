@@ -48,9 +48,15 @@ struct Slot {
 }
 
 /// What one execution of a command concluded, as its waiters need it.
+///
+/// `Accepted` rather than `Started`, because that is what the answer means: the
+/// command was accepted and a managed Run was created. Whether that Run is
+/// still running belongs to the Run's own lifecycle, and naming this variant
+/// after execution would have invited every reader of this code to collapse
+/// the two layers (ADR 0002 D6).
 #[derive(Clone, Debug)]
 pub enum Concluded {
-    Started {
+    Accepted {
         session: CorralSessionId,
         run: RunId,
     },

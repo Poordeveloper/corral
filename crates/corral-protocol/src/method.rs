@@ -107,6 +107,21 @@ pub struct SessionNewParams {
 }
 
 /// `session.new`'s result.
+///
+/// It means: **the command was accepted, and a managed Run was created.** It
+/// asserts nothing beyond that — not that the process is still running, not
+/// that it reached the program's own code, not that it produced output. Those
+/// are the Run's facts, not the command's, and they are read through
+/// `session.list`'s `execution_state`.
+///
+/// The distinction is load-bearing because the two live on different layers.
+/// A command is accepted once; a Run then runs, exits, or becomes something
+/// Corral cannot establish. A caller that read this as "the process is alive"
+/// would be wrong the moment it asked about `/usr/bin/true` — and would be
+/// wrong in a way no additional outcome variant could fix, because the
+/// question it is asking belongs to the other layer (ADR 0002 D6).
+///
+/// Two identities and no state field, for exactly that reason.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionNewResult {
     pub session_id: String,

@@ -16,7 +16,7 @@ use std::time::Duration;
 use corral_state::{Durability, Refusal, StateError, Store};
 use tracing::{error, warn};
 
-use crate::runtime::{ObservedRuns, RunOccurrence};
+use crate::runtime::{ObservedRuns, RunOccurrence, Weight};
 
 /// How many times one fact is offered to a store that is momentarily held.
 ///
@@ -56,7 +56,15 @@ pub fn record_observed_runs(store: Arc<Mutex<Store>>, observed: ObservedRuns) {
         // Ends when the last runtime that could report is gone, which for this
         // daemon means the process is ending.
         while let Some(observation) = observed.next() {
-            if !record_within_attempts(&store, observation.occurrence()) {
+            let occurrence = observation.occurrence();
+            // Only a fact the daemon must be able to account for ends the
+            // accounting. An attachment the store would not take costs a line
+            // of history and nothing else: attachment activity is advisory,
+            // managed runtime ownership is authoritative (founder ruling,
+            // 2026-08-25).
+            if !record_within_attempts(&store, occurrence)
+                && occurrence.weight() == Weight::Authoritative
+            {
                 observed.lost();
             }
         }
@@ -147,6 +155,11 @@ fn attachment(run: corral_core::RunId, outcome: Result<Durability, StateError>) 
         // the barrier did not hold — the same failure the ending arm reports,
         // and accepting it here would hide it behind the one fact this daemon
         // can afford to lose.
+        // The log has never heard of the Run. A handle to attach to exists
+        // only after `RunStarted` committed, so this means the barrier did not
+        // hold — and it is said out loud here even though it costs no
+        // integrity, because the ending path will reach the same conclusion on
+        // a fact that does.
         Ok(Durability::Withheld) => {
             warn!(%run, "an attachment names a run with no durable start");
             Recorded::No
