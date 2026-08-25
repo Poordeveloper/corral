@@ -47,6 +47,19 @@ portable-pty = { path = "third_party/portable-pty" }
 # only one that round-trips every dimension ROADMAP names, and the only pure
 # Rust port of a serializing emulator (ADR 0003 D1). Its `unsafe` surface is
 # named there and fuzzed before PR3 ships.
+#
+# Carries a known defect Corral contains rather than fixes: `window_title` and
+# `report_pwd` slice on a raw byte offset and panic on a multi-byte character
+# straddling it, which poisons that session's screen
+# (docs/evidence/pr3-terminal-fuzz-2026-08-24.md). 0.4.0 was the current
+# release on 2026-08-25 and still carries it, so there is nothing to upgrade
+# to. Whether to vendor and patch instead — as `portable-pty` was — is a
+# founder call and not an agent's: that precedent was scoped to one small crate
+# and one reviewable hunk, and this is 2.6 MB across 96 files.
+#
+# **Look again whenever this line changes.** A version bump is the moment to
+# check whether upstream fixed the two slices, and the moment the containment
+# and its corpus entry can be retired.
 qwertty-term-vt = "0.4.0"
 # The OS CSPRNG for attach tokens. Already in the tree under `uuid`, so this
 # adds no supply chain; taken directly because a token needs a stated 128 bits,

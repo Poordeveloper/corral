@@ -162,9 +162,17 @@ rather than being something a user discovers.
 
 **Whether a poisoned screen is visible before you try to use it.** Poisoning is
 a property of the screen, and a session's record has no field for it, so
-`session.list` shows a poisoned session as an ordinary running one. Open
-question, with the root cause, in
-`docs/evidence/pr3-terminal-fuzz-2026-08-24.md`.
+`session.list` shows a poisoned session as an ordinary running one. The root
+cause is in `docs/evidence/pr3-terminal-fuzz-2026-08-24.md`; this is where the
+question lives.
+
+It was theoretical while nothing listed sessions to a person. It stops being
+theoretical at PR4, which is the first phase where somebody reads a row and
+then tries to open it — and is told no, with no explanation the row gave them.
+The shape an answer would take is fixed by `PRODUCT.md` §4 whatever the answer
+is: a screen Corral cannot read is a fact about Corral's own capability, not a
+claim about the agent, so it belongs beside runtime truth and never in the main
+status column.
 
 **Whether a finished session's record is durable, acknowledgeable, or
 removable.** M1 has no acknowledgement concept and persists no runtime facts.
