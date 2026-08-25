@@ -145,9 +145,9 @@ impl DaemonState {
     /// Confirm the registry can still vouch for durable truth.
     ///
     /// What an answer derived from the registry needs before it may be given.
-    /// Protocol 1 assigns no session encoding, so nothing this build serves
-    /// carries a fact out of the store — but an empty list is still a claim
-    /// about it, and this is the question behind that claim.
+    /// A session list is answered from the runtime rather than the store, but
+    /// it is still a claim made in the store's name — and a mutation must
+    /// never be admitted under the condition a read is refused.
     /// Contention is the only refusal this call can produce, and the only one
     /// reported as retryable: `busy` tells a client to send the request again,
     /// and saying that about a refusal nothing diagnosed would be a claim the

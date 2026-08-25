@@ -27,7 +27,10 @@ fn an_incompatible_daemon_is_terminal_and_is_left_running() {
     let message = stderr(&output);
     assert!(!output.status.success());
     assert!(message.contains("protocol 9"), "{message}");
-    assert!(message.contains("protocol 1"), "{message}");
+    assert!(
+        message.contains(&format!("protocol {}", corral_protocol::PROTOCOL_VERSION)),
+        "{message}"
+    );
     assert_eq!(
         fake.connections(),
         1,
@@ -73,14 +76,19 @@ fn a_malformed_server_hello_fails_the_handshake() {
     assert!(message.contains("malformed"), "{message}");
 }
 
-/// A daemon lost mid-request is an honest failure. Nothing is replayed:
-/// protocol 1 defines no idempotency for the commands that would need it.
+/// A daemon lost mid-request is an honest failure. Nothing is replayed by the
+/// client: replay needs an idempotency key only the caller can supply, which
+/// is why `session.new` carries one and why nothing here invents one.
 #[test]
 fn a_daemon_that_vanishes_mid_request_is_reported_not_replayed() {
     let account = TestAccount::new("vanishing").with_activation_deadline(Duration::from_secs(3));
     let fake = spawn_fake_daemon(
         &account.socket(),
-        FakeBehaviour::AnswerThenClose(hello_reply(1, 1, "compatible")),
+        FakeBehaviour::AnswerThenClose(hello_reply(
+            corral_protocol::PROTOCOL_VERSION,
+            corral_protocol::MIN_COMPATIBLE_PEER_VERSION,
+            "compatible",
+        )),
     );
 
     let output = run(account.corral().arg("ping"));

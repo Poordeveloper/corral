@@ -302,8 +302,8 @@ async fn serve_established(
                 debug!(method = %notification.method, "ignored a notification");
                 continue;
             }
-            // Protocol 1 daemons originate nothing, so no response can be an
-            // answer to anything this daemon sent.
+            // A daemon originates nothing, so no response can be an answer to
+            // anything this daemon sent.
             Ok(Some(Frame::Response(response))) => {
                 warn!(id = response.id.0, "a response arrived for no request");
                 return;
@@ -345,11 +345,11 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             Err(error) => Dispatch::Reply(Frame::error(id, error)),
         },
         method::SESSION_LIST => match no_params(request) {
-            // Protocol 1 assigns no session encoding, so this build serves the
-            // sessions it can describe, which is none. The registry is still
-            // asked: an empty list is a claim about it, and a store that can
-            // no longer vouch for durable truth must not have that claim made
-            // in its name.
+            // Answered from this daemon's own runtime: what is live here is
+            // what a list means, and the store deliberately is not unioned
+            // into it (grill Q4). The registry is still asked, because a list
+            // is a claim made in its name, and a store that can no longer
+            // vouch for durable truth must not have one made for it.
             //
             // Contention is answered and the connection carries on: the caller
             // learns it may send the same request again, which a closed
@@ -395,7 +395,10 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             id,
             ProtocolError::new(
                 ErrorCode::MethodNotFound,
-                format!("this daemon speaks protocol 1 and does not serve {other}"),
+                format!(
+                    "this daemon speaks protocol {} and does not serve {other}",
+                    corral_protocol::PROTOCOL_VERSION
+                ),
             ),
         )),
     }
@@ -882,7 +885,11 @@ fn no_params(request: &Request) -> Result<(), ProtocolError> {
     } else {
         Err(ProtocolError::new(
             ErrorCode::InvalidParams,
-            format!("{} takes no parameters in protocol 1", request.method),
+            format!(
+                "{} takes no parameters in protocol {}",
+                request.method,
+                corral_protocol::PROTOCOL_VERSION
+            ),
         ))
     }
 }
