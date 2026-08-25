@@ -239,6 +239,17 @@ records how the same failure is mechanically kept from returning.
 
 ## Not decided here
 
+**Whether a screen the child reshaped propagates to the pty.** DECCOLM
+(`ESC[?3h`) makes the emulator 132 columns wide without anyone asking the
+kernel. Corral follows it in what it publishes and opens an epoch, so no
+client is told a size the screen does not have — but the pty's own `winsize`
+is deliberately left alone, so a child that re-queries `TIOCGWINSZ` reads the
+size Corral gave it rather than the one it just set. A real terminal has one
+object and no such gap; Corral has two, and which of them the child's query
+should answer is a question this ADR does not settle. The divergence self-heals
+on the next explicit resize. Raised by the PR3 fuzz campaign,
+`docs/evidence/pr3-terminal-fuzz-2026-08-24.md`.
+
 Which channel carries the bytes and how it is framed (`ARCHITECTURE.md` §3
 fixes only that it is not the semantic RPC channel). ACK/credit flow control,
 remote backpressure, viewport claiming — deferred until remote requires them.

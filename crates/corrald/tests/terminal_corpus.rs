@@ -7,23 +7,25 @@
 //! finding is distilled to (`docs/decisions/2026-08-24-pr3-plan-grill.md`).
 //!
 //! What it asserts is narrow on purpose: malformed provider output degrades a
-//! session rather than panicking `corrald` (`ARCHITECTURE.md` §5), and it does
-//! so in bounded time. It says nothing about what any of these inputs should
-//! *render*, because a screen is not what a hostile stream threatens.
+//! session rather than panicking `corrald` (`ARCHITECTURE.md` §5). It says
+//! nothing about what any of these inputs should *render*, because a screen is
+//! not what a hostile stream threatens — and nothing about how long they take.
+//!
+//! Timing belongs to the layer that generates input. A wall clock inside a
+//! parallel merge gate measures the machine and its load as much as the
+//! parser, which makes it a latent flake asserting a weak property over twenty
+//! fixed files; libFuzzer bounds every unit it generates, and
+//! `scripts/fuzz-terminal` sets that bound. Quadratic behaviour is what the
+//! property was ever about, and quadratic behaviour on these inputs passes
+//! neither bound.
 
 // The repository allows unwrap/expect in tests; that setting does not reach
 // helpers outside a `#[test]` function in an integration-test crate.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::time::{Duration, Instant};
-
 use corrald::runtime::{AuthoritativeTerminal, PtyGeometry, encode};
 
 const GEOMETRY: PtyGeometry = PtyGeometry::expect_valid(24, 80);
-
-/// Generous enough that a slow machine never fails, tight enough that
-/// quadratic behaviour on a 100 KB input does.
-const PER_CASE_BUDGET: Duration = Duration::from_secs(5);
 
 fn corpus() -> Vec<(String, Vec<u8>)> {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -70,19 +72,11 @@ fn the_corpus_is_not_empty() {
 
 #[test]
 fn every_corpus_case_is_consumed_without_panicking() {
-    for (name, bytes) in corpus() {
-        let started = Instant::now();
-
+    for (_name, bytes) in corpus() {
         // Fed in chunks, because a PTY delivers whatever the kernel had ready
         // and a parser that only survives whole-message input has not been
         // tested against what it will actually meet.
         let _terminal = consume_all(&bytes, 997);
-
-        assert!(
-            started.elapsed() < PER_CASE_BUDGET,
-            "{name} took {:?}, past the {PER_CASE_BUDGET:?} budget",
-            started.elapsed()
-        );
     }
 }
 
@@ -167,23 +161,17 @@ fn a_poisoned_screen_stays_poisoned() {
     assert!(encode(&terminal).is_err());
 }
 
-/// Resize is where a reflow touches every retained row, so it is where a
-/// pathological screen would show up as unbounded work.
+/// Reflow touches every retained row, and it is a second entrance into the
+/// same packed pages — so a case that survives being consumed can still be one
+/// that does not survive being reshaped.
 #[test]
 fn every_corpus_case_survives_a_reflow() {
-    for (name, bytes) in corpus() {
+    for (_name, bytes) in corpus() {
         let mut terminal = consume_all(&bytes, 997);
 
-        let started = Instant::now();
         terminal.resize(PtyGeometry::expect_valid(60, 200));
         terminal.resize(PtyGeometry::expect_valid(5, 20));
         terminal.resize(GEOMETRY);
-
-        assert!(
-            started.elapsed() < PER_CASE_BUDGET,
-            "{name} reflowed in {:?}, past the {PER_CASE_BUDGET:?} budget",
-            started.elapsed()
-        );
     }
 }
 

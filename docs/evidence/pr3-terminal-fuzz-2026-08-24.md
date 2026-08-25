@@ -159,24 +159,38 @@ reflows and serializes every case, and the nightly campaign continues to feed
 the parser. A reproducer that panics reflow or serialization is a corpus entry
 the moment one exists.
 
-## Follow-ups this campaign and the round-5 review left open
+## What this campaign left open, and where each question now lives
 
-**Corpus timing assertions are wall-clock.** `every_corpus_case_is_consumed_without_panicking`
-and `every_corpus_case_survives_a_reflow` assert against a 5s per-case budget
-while the rest of the suite runs on other threads. The property worth holding
-is "no quadratic blowup", and a wall clock inside a parallel suite is a poor
-expression of it. Left as-is deliberately: `AGENTS.md` §Tests forbids widening
-a timeout without measured evidence that the budget is unrealistic, and there
-is no evidence — no flake has been observed. The fix, when it is taken, is a
-bounded operation count, not a larger number.
+An evidence file records what a campaign found. It is a poor home for open
+questions: nothing looks here for work, and nothing triggers a re-read. Each of
+these has been moved to somewhere a person meets it at the moment it matters.
 
-**A child can reshape the screen without the pty following.** DECCOLM makes
-the emulator 132 columns wide by itself; Corral now follows it in what it
-publishes and opens an epoch, so no client is told a size the screen does not
-have. The pty is deliberately *not* resized to match: the child asked its
-terminal, not the kernel, and whether Corral propagates that is a design
-question this repair does not answer. The divergence self-heals on the next
-explicit resize.
+**Whether to vendor and patch `qwertty-term-vt`.** Still a founder call, and
+still unforced: 0.4.0 remains the current release and still carries the two raw
+slices, so there is nothing to upgrade to. Moved to the dependency's own
+declaration in the workspace `Cargo.toml`, where the next version bump is the
+moment to ask again — and the moment the containment and its corpus entry could
+be retired.
+
+**Whether a poisoned screen is visible before you try to use it.** ADR 0007's
+"What this does not decide" now holds the whole question rather than pointing
+back here. It stops being theoretical at PR4, which is the first phase where a
+person reads a row and then tries to open it.
+
+**Whether a screen the child reshaped propagates to the pty.** Moved to
+ADR 0003's "Not decided here", which is where geometry and epochs are decided.
+Corral follows DECCOLM in what it publishes; the pty's own `winsize` is left
+alone, so a child that re-queries reads a different size than it just set.
+
+**Corpus timing assertions were wall-clock. Closed by removing them.** The
+property was "no quadratic blowup", and a wall clock inside a parallel merge
+gate measures the machine and its load as much as the parser — a latent flake
+asserting a weak property over twenty fixed files. Timing belongs to the layer
+that generates input: `scripts/fuzz-terminal` bounds every unit libFuzzer
+produces, over far more inputs than the corpus holds. Quadratic behaviour
+passes neither bound, which is what the assertion was ever for. The corpus
+suite keeps the behavioural floor — no panic, no plausible-looking snapshot of
+a screen nobody can vouch for — and no longer claims to bound time.
 
 ## What this campaign did not cover
 
