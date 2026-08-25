@@ -81,3 +81,76 @@ fn session_new_carries_absence_rather_than_a_substituted_size() {
     assert_eq!(decoded.rows, None);
     assert_eq!(decoded.cols, None);
 }
+
+/// The wire spelling is the type's own, in both directions. A daemon that
+/// encoded one word and a client that read another would agree in the
+/// handshake and disagree about whether a session can be opened.
+#[test]
+fn terminal_access_round_trips_through_its_wire_spelling() {
+    for access in [TerminalAccess::Available, TerminalAccess::Unavailable] {
+        assert_eq!(TerminalAccess::from_wire(access.as_str()), Some(access));
+        assert_eq!(
+            serde_json::to_value(access).expect("encode"),
+            json!(access.as_str())
+        );
+    }
+}
+
+/// The absence rule, at the one place it is decided: a peer that does not send
+/// the field has said nothing, and nothing is not "unavailable"
+/// (AGENTS.md §Protocol).
+#[test]
+fn a_session_without_terminal_access_decodes_as_unknown() {
+    let older = json!({
+        "session_id": "s1",
+        "title": "sh",
+        "execution_state": "running",
+    });
+
+    let decoded: SessionListItem = serde_json::from_value(older).expect("decode");
+
+    assert_eq!(decoded.terminal_access, None);
+}
+
+/// A value from a version that knows more than this one. It decodes, and it
+/// decodes as unknown — refusing the item would lose the session from the
+/// list, and reading it as a refusal would disable Open on a word this build
+/// never understood.
+#[test]
+fn an_unrecognised_terminal_access_decodes_as_unknown() {
+    for carried in [
+        json!("degraded"),
+        json!(null),
+        json!(7),
+        json!({"state": "unavailable"}),
+    ] {
+        let item = json!({
+            "session_id": "s1",
+            "title": "sh",
+            "execution_state": "running",
+            "terminal_access": carried,
+        });
+
+        let decoded: SessionListItem =
+            serde_json::from_value(item).unwrap_or_else(|error| panic!("{carried}: {error}"));
+
+        assert_eq!(decoded.terminal_access, None, "{carried}");
+    }
+}
+
+/// Unknown is not encoded. A daemon that cannot say leaves the field out,
+/// because a peer reading a spelled-out "unknown" would have to know that
+/// word too.
+#[test]
+fn an_unknown_terminal_access_is_left_off_the_wire() {
+    let item = SessionListItem {
+        session_id: "s1".to_owned(),
+        title: "sh".to_owned(),
+        execution_state: "running".to_owned(),
+        terminal_access: None,
+    };
+
+    let encoded = serde_json::to_value(&item).expect("encode");
+
+    assert!(encoded.get("terminal_access").is_none(), "{encoded}");
+}

@@ -428,6 +428,10 @@ fn encode_session(session: &ManagedSession) -> serde_json::Value {
         session_id: session.session.to_string(),
         title: session.title.clone(),
         execution_state: session.execution_state.as_str().to_owned(),
+        // Always stated: this daemon knows the answer for every session it
+        // runs, and absence on the wire means unknown rather than a value it
+        // declined to send.
+        terminal_access: Some(session.terminal_access),
     })
     .unwrap_or_else(|_| serde_json::json!({}))
 }

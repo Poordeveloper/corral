@@ -13,11 +13,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::{Instant, SystemTime};
 
 use corral_core::{CorralSessionId, ExitCause, OccurrenceTime, RunEnd, RunId};
+use corral_protocol::method::TerminalAccess;
 use corral_protocol::terminal::{Epoch, Sequence};
 
 use super::launch::LaunchRequest;
@@ -44,6 +45,9 @@ pub struct ManagedSession {
     pub run: RunId,
     pub title: String,
     pub execution_state: ExecutionState,
+    /// Whether Corral can serve this session's terminal, which is a fact
+    /// about Corral and not about the process (grill Q7).
+    pub terminal_access: TerminalAccess,
 }
 
 /// Anything the thread that owns a session's screen must act on.
@@ -103,6 +107,13 @@ struct Published {
     /// The last geometry it applied, packed into one atomic so a reader never
     /// sees a row from one moment and a column from another.
     geometry: Arc<AtomicU32>,
+    /// Set when the screen becomes one nobody may read, and never cleared.
+    ///
+    /// Published rather than asked for the reason the whole type exists: the
+    /// caller that needs it is answering `session.list` on the daemon's one
+    /// reactor thread. A poisoned screen is also a screen that will never
+    /// answer a question again, so asking it would be the wrong way round.
+    poisoned: Arc<AtomicBool>,
     /// Set once, as that thread's last act (ADR 0007 L2).
     screen: Arc<OnceLock<FinalScreen>>,
 }
@@ -374,6 +385,37 @@ impl SessionHandle {
         }
     }
 
+    /// Whether Corral can serve this session's terminal right now.
+    ///
+    /// A capability fact about Corral, not a claim about the process: a
+    /// session whose screen cannot be served may still be reliably Running,
+    /// and reading this as a death — or as `Unknown` execution — is the
+    /// mistake grill Q7 forbids.
+    ///
+    /// Read from published state rather than asked, like execution and
+    /// geometry: the one caller answers `session.list` on the reactor thread.
+    /// Asking would also be the wrong way round, because the screens this has
+    /// to describe are exactly the ones that no longer answer.
+    pub fn terminal_access(&self) -> TerminalAccess {
+        // A screen nobody may read serves nobody, running or not (ADR 0007 L5).
+        if self.published.poisoned.load(Ordering::Acquire) {
+            return TerminalAccess::Unavailable;
+        }
+        match self.published.screen.get() {
+            // A finished run's screen is a value, and it is serveable exactly
+            // when what it left behind is (ADR 0007 L2).
+            Some(recorded) => match recorded.snapshot {
+                Ok(_) => TerminalAccess::Available,
+                Err(_) => TerminalAccess::Unavailable,
+            },
+            // No record. Serveable only while the thread that would answer is
+            // still there: gone without publishing one is a loss, and there is
+            // no snapshot to serve from it (ADR 0007 L3).
+            None if self.alive.upgrade().is_some() => TerminalAccess::Available,
+            None => TerminalAccess::Unavailable,
+        }
+    }
+
     /// The screen this run left behind, or why there is none.
     ///
     /// `Err` means the screen thread is gone without having published one: a
@@ -385,6 +427,16 @@ impl SessionHandle {
 
     fn ask(&self, ask: Ask) -> Result<(), SessionGone> {
         self.asks.send(ask).map_err(|_| SessionGone)
+    }
+
+    /// Start this session's clock somewhere a test chose.
+    ///
+    /// Two sessions cannot really be served in the same instant, and the tie
+    /// break still has to be deterministic: a list that reorders itself
+    /// between two polls is one a person cannot navigate.
+    #[cfg(test)]
+    pub(crate) fn started_at_for_test(&mut self, at: Instant) {
+        self.started_at = at;
     }
 
     /// Drop the only path to this session's screen.
@@ -539,6 +591,7 @@ impl PendingSession {
         let published = Published {
             execution: Arc::new(AtomicU8::new(EXECUTION_RUNNING)),
             geometry: Arc::new(AtomicU32::new(pack_geometry(geometry))),
+            poisoned: Arc::new(AtomicBool::new(false)),
             screen: Arc::new(OnceLock::new()),
         };
 
@@ -778,6 +831,14 @@ fn serve_screen(
                     },
                     Ordering::Release,
                 );
+                // Serializing is itself an entrance into the packed pages, so
+                // a screen can break on its way out. Flagged before the record
+                // below, so no reader ever sees a final screen without the
+                // answer that says it cannot be served.
+                let snapshot = terminal.snapshot();
+                if terminal.poisoned().is_some() {
+                    published.poisoned.store(true, Ordering::Release);
+                }
                 // Published before this thread's liveness proof drops with its
                 // stack, so a handle that finds the thread gone and a record
                 // present is looking at a retirement and not a loss
@@ -786,7 +847,7 @@ fn serve_screen(
                 // `set` cannot already have been taken: this arm is the only
                 // writer and it returns.
                 let _ = published.screen.set(FinalScreen {
-                    snapshot: terminal.snapshot(),
+                    snapshot,
                     epoch: stream.epoch(),
                     sequence: stream.next_sequence(),
                     // From the emulator while it can still be read; a poisoned
@@ -856,8 +917,10 @@ fn serve_screen(
         // One owner for the consequence, whichever entrance poisoned the
         // screen (ADR 0007 L5): a screen nobody can vouch for serves no
         // viewers. Dropping them ends their streams, and they are told by the
-        // refusal they get when they come back.
+        // refusal they get when they come back — and the list says so before
+        // they try, which is the whole of what `terminal_access` answers.
         if terminal.poisoned().is_some() {
+            published.poisoned.store(true, Ordering::Release);
             stream.drop_viewers();
         }
     }
@@ -952,24 +1015,34 @@ impl ManagedSessions {
     /// A session whose screen thread no longer answers is `Unknown`, never
     /// `Exited`: the thread being gone says the daemon lost the ability to
     /// manage the runtime, not that the process died (ADR 0002, grill Q5).
+    ///
+    /// Newest first, ties broken deterministically. The producer decides the
+    /// order once so that CLI, TUI and Desktop do not each invent a default,
+    /// and the scope is exactly this: the current daemon-visible list. It is
+    /// not history ordering, resumable ranking, or attention ranking, and the
+    /// default is adjustable rather than a wire compatibility invariant
+    /// (grill Q3).
     pub fn describe(&self) -> Vec<ManagedSession> {
-        let mut described: Vec<ManagedSession> = self
-            .handles
-            .values()
+        let mut handles: Vec<&Arc<SessionHandle>> = self.handles.values().collect();
+        // Cached because `sort_by_key` calls its key on every comparison, not
+        // once per element — an id formatted O(n log n) times for a list that
+        // is answered on every `session.list`.
+        handles.sort_by_cached_key(|handle| {
+            (
+                std::cmp::Reverse(handle.started_at()),
+                handle.session.to_string(),
+            )
+        });
+        handles
+            .into_iter()
             .map(|handle| ManagedSession {
                 session: handle.session,
                 run: handle.run,
                 title: handle.title.clone(),
                 execution_state: handle.execution_state(),
+                terminal_access: handle.terminal_access(),
             })
-            .collect();
-        // A stable order so a list is not a different list each time it is
-        // asked; the daemon has no opinion about ranking yet. Cached because
-        // `sort_by_key` calls its key on every comparison, not once per
-        // element — an id formatted O(n log n) times for a list that is
-        // answered on every `session.list`.
-        described.sort_by_cached_key(|session| session.session.to_string());
-        described
+            .collect()
     }
 }
 
