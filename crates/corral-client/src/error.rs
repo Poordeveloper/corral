@@ -126,11 +126,11 @@ pub enum ActivationError {
 #[derive(Debug)]
 pub enum RequestError {
     /// The daemon went away. Never replayed automatically: replay needs
-    /// idempotency semantics protocol 1 does not define.
+    /// idempotency semantics only the caller can supply.
     DaemonConnectionLost { endpoint: PathBuf },
     /// The daemon answered with a typed refusal.
     Refused(ProtocolError),
-    /// The daemon answered with something protocol 1 does not permit.
+    /// The daemon answered with something this protocol does not permit.
     Protocol { detail: String },
 }
 

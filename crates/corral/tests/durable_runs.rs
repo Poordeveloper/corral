@@ -2,7 +2,7 @@
 //! what it refuses to write twice.
 //!
 //! These read the registry directly rather than through the wire, because
-//! nothing in protocol 1 reports durable facts and the point is what landed in
+//! nothing on the wire reports durable facts and the point is what landed in
 //! the log — not what a daemon was willing to say about it.
 
 // The repository allows unwrap/expect in tests; that setting does not reach

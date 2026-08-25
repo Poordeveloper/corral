@@ -1,4 +1,4 @@
-//! The protocol 1 baseline: every method this version serves, and nothing else.
+//! The protocol 2 baseline: every method this version serves, and nothing else.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

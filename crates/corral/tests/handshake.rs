@@ -1,4 +1,4 @@
-//! The bootstrap handshake and the protocol 1 served surface, exercised
+//! The bootstrap handshake and the served method surface, exercised
 //! against a real daemon with hand-built frames.
 
 // The repository allows unwrap/expect in tests; that setting does not reach
@@ -35,7 +35,11 @@ fn a_hello_missing_its_identity_is_malformed_rather_than_old() {
     let mut client = RawClient::connect(&account.socket());
 
     let response = client
-        .request(1, "hello", Some(json!({"protocol_version": 1})))
+        .request(
+            1,
+            "hello",
+            Some(json!({"protocol_version": corral_protocol::PROTOCOL_VERSION})),
+        )
         .expect("a typed refusal");
 
     assert_eq!(error_code(&response), Some("malformed_hello"));
@@ -52,8 +56,11 @@ fn an_incompatible_peer_is_told_both_sides_and_closed() {
 
     let hello = &response["outcome"]["result"];
     assert_eq!(hello["compatibility_result"], "incompatible");
-    assert_eq!(hello["protocol_version"], 1);
-    assert_eq!(hello["min_compatible_peer_version"], 1);
+    assert_eq!(hello["protocol_version"], corral_protocol::PROTOCOL_VERSION);
+    assert_eq!(
+        hello["min_compatible_peer_version"],
+        corral_protocol::MIN_COMPATIBLE_PEER_VERSION
+    );
     assert!(
         client.receive().is_none(),
         "an incompatible peer never establishes"
@@ -67,7 +74,10 @@ fn a_repeated_hello_is_a_protocol_violation() {
     let mut client = RawClient::connect(&account.socket());
     client.establish();
 
-    let response = client.say_hello(1, 1);
+    let response = client.say_hello(
+        corral_protocol::PROTOCOL_VERSION,
+        corral_protocol::MIN_COMPATIBLE_PEER_VERSION,
+    );
 
     assert_eq!(error_code(&response), Some("protocol_violation"));
     assert!(client.receive().is_none());
@@ -142,8 +152,8 @@ fn unknown_additive_fields_are_tolerated() {
         "method": "hello",
         "trace": "from-a-newer-client",
         "params": {
-            "protocol_version": 1,
-            "min_compatible_peer_version": 1,
+            "protocol_version": corral_protocol::PROTOCOL_VERSION,
+            "min_compatible_peer_version": corral_protocol::MIN_COMPATIBLE_PEER_VERSION,
             "nickname": "future",
         },
     }));
@@ -156,7 +166,7 @@ fn unknown_additive_fields_are_tolerated() {
     );
 }
 
-/// Protocol 1 daemons answer; they never originate. A response frame therefore
+/// A daemon answers; it never originates. A response frame therefore
 /// cannot be an answer to anything, and the connection is not trustworthy.
 #[test]
 fn an_unsolicited_response_closes_the_connection() {
@@ -227,4 +237,40 @@ fn an_oversize_frame_closes_the_connection() {
     if client.send_raw_tolerating_close(&oversize) {
         assert!(client.receive().is_none());
     }
+}
+
+/// The reason protocol 2 exists.
+///
+/// A peer built before `session.new` required a `command_id` still declares
+/// the older version. It must be refused where Corral says what it can talk
+/// to — in the hello, with both version pairs stated — and never reach a
+/// request, where the same disagreement would surface as a decoder error after
+/// the handshake had already told it everything was fine
+/// (`docs/decisions/2026-08-25-protocol-2-acceptance.md`).
+#[test]
+fn a_protocol_1_peer_is_refused_in_the_handshake_rather_than_at_its_first_request() {
+    let account = TestAccount::new("hello-protocol-1");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+
+    let response = client.say_hello(1, 1);
+
+    let hello = &response["outcome"]["result"];
+    assert_eq!(
+        hello["compatibility_result"], "incompatible",
+        "a peer that cannot be served is told so by the hello: {response}"
+    );
+    assert_eq!(hello["protocol_version"], corral_protocol::PROTOCOL_VERSION);
+    assert_eq!(
+        hello["min_compatible_peer_version"],
+        corral_protocol::MIN_COMPATIBLE_PEER_VERSION,
+        "the client is told what it would have to speak"
+    );
+    // A verdict, not a refusal of the frame: a decoder error here would mean
+    // the handshake had let it through and something further down caught it.
+    assert_eq!(error_code(&response), None, "{response}");
+    assert!(
+        client.receive().is_none(),
+        "an incompatible peer never establishes, so no request follows"
+    );
 }

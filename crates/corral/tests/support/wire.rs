@@ -67,8 +67,15 @@ impl RawClient {
     }
 
     /// Complete the handshake at this build's own protocol version.
+    ///
+    /// Read from the constants rather than written down, so a version change
+    /// moves the whole suite with it instead of leaving every test asserting
+    /// against a number the build no longer declares.
     pub fn establish(&mut self) -> Value {
-        let response = self.say_hello(1, 1);
+        let response = self.say_hello(
+            corral_protocol::PROTOCOL_VERSION,
+            corral_protocol::MIN_COMPATIBLE_PEER_VERSION,
+        );
         assert_eq!(
             response["outcome"]["result"]["compatibility_result"], "compatible",
             "expected an established connection, got {response}"

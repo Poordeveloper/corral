@@ -8,7 +8,7 @@ use crate::envelope::Frame;
 /// An implementation safety limit, not a wire number.
 ///
 /// It exists so a peer cannot make the other allocate without bound; it sits
-/// far above any legitimate protocol 1 message. A future feature that could
+/// far above any legitimate protocol 2 message. A future feature that could
 /// approach it has to solve limit compatibility explicitly rather than quietly
 /// raising it.
 pub const MAX_FRAME_BYTES: usize = 1 << 20;
