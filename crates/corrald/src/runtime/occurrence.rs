@@ -22,11 +22,12 @@
 //! that line is drawn, and it is why churn cannot reach the daemon's own
 //! lifetime (founder ruling, 2026-08-25).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime};
 
 use corral_core::{OccurrenceTime, RunEnd, RunId};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// One thing the runtime saw happen to a Run.
 ///
@@ -127,6 +128,13 @@ pub struct RunObservations {
     observed: std::sync::mpsc::SyncSender<RunOccurrence>,
     in_flight: Arc<InFlight>,
     integrity: Arc<tokio::sync::watch::Sender<Integrity>>,
+    /// Set once the daemon has stopped waiting for what it observes.
+    ///
+    /// After that, nothing will drain the queue, so putting a fact into it
+    /// would be the silent loss this channel exists to prevent — quieter than
+    /// dropping it, because a queue that is never read looks like a queue that
+    /// was.
+    settled: Arc<AtomicBool>,
 }
 
 /// The draining end, held by whoever turns observations into durable facts.
@@ -180,6 +188,7 @@ pub fn observe_runs() -> (RunObservations, ObservedRuns) {
             observed: sender,
             in_flight: Arc::clone(&in_flight),
             integrity: Arc::clone(&integrity),
+            settled: Arc::new(AtomicBool::new(false)),
         },
         ObservedRuns {
             observed: receiver,
@@ -205,6 +214,29 @@ impl RunObservations {
     /// 2026-08-25).
     pub fn report(&self, occurrence: RunOccurrence) {
         let weight = occurrence.weight();
+        if self.settled.load(Ordering::Acquire) {
+            // The daemon is on its way out and nothing will drain this again.
+            // Said out loud rather than queued into a channel with no reader:
+            // an ending observed here is one the next daemon will close as
+            // unverifiable, which is what Corral can honestly say about a run
+            // whose end it did not record (ADR 0007 L6, grill Q5).
+            match weight {
+                // A warning, never an error: nothing is corrupt. The episode
+                // is closed as unverifiable on the next start, which is the
+                // honest answer — what this line records is that Corral did
+                // not get to record the ending itself.
+                Weight::Authoritative => warn!(
+                    run = %occurrence.run(),
+                    "late lifecycle observation rejected after episode settlement; \
+                     the next start closes this episode as unverifiable"
+                ),
+                Weight::Advisory => debug!(
+                    run = %occurrence.run(),
+                    "late attachment activity rejected after episode settlement"
+                ),
+            }
+            return;
+        }
         if !self.in_flight.admit(weight) {
             debug!(
                 run = %occurrence.run(),
@@ -246,20 +278,24 @@ impl RunObservations {
     /// runs out is itself the answer — integrity is lost, and the exit status
     /// says so.
     ///
-    /// It settles what was already reported; it does not close the channel.
-    /// A managed run whose child dies in the window between this returning and
-    /// the process exiting reports an ending nothing will drain, and the
-    /// backstop for that is the next daemon's reconciliation, which closes the
-    /// episode as unverifiable — which is what Corral can honestly say about a
-    /// run whose end it did not record (ADR 0007 L6, grill Q5). Refusing to
-    /// exit until such a run had reported would make a shutdown wait on the
-    /// children ADR 0007 L6 says Corral does not wait for.
+    /// It settles what was already reported, and closes reporting behind
+    /// itself. A managed run whose child dies after this is refused rather
+    /// than queued into a channel nobody will read again, and says so: the
+    /// backstop is the next daemon's reconciliation, which closes the episode
+    /// as unverifiable — what Corral can honestly say about a run whose end it
+    /// did not record (ADR 0007 L6, grill Q5). Refusing to exit until such a
+    /// run had reported would make a shutdown wait on the children ADR 0007 L6
+    /// says Corral does not wait for; refusing quietly would make the loss
+    /// invisible, which is the one thing this channel may not do.
     pub fn settle(&self, within: Duration) -> Integrity {
         // Only the authoritative facts. An attachment still queued at exit is
         // a line of history nobody will write, which is what "advisory" means.
         if !self.in_flight.wait_until_accounted(within) {
             self.lost();
         }
+        // Closed after the wait, not before: what was already reported is
+        // still owed a recorder, and only what comes afterwards has none.
+        self.settled.store(true, Ordering::Release);
         self.integrity()
     }
 }

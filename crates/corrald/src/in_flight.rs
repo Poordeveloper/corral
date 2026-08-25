@@ -22,9 +22,23 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use corral_core::{Command, CommandFingerprint, CommandId, CorralSessionId, RunId};
 use corral_protocol::ErrorCode;
+
+/// How long a request may wait for the execution that already owns its
+/// command id.
+///
+/// Comfortably above what an owner can legitimately spend — two store calls,
+/// each bounded by the store's own five-second wait for another writer, plus a
+/// spawn — so reaching it means something is wrong rather than merely slow.
+///
+/// Waiting is bounded rather than unbounded because a waiter that never gives
+/// up hands its client no answer at all. Giving up early is safe in a way it
+/// would not be for most work: the command is idempotent, so a caller told to
+/// send it again either joins the same execution or reads the receipt it left.
+pub const JOIN_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The commands this daemon is executing right now.
 ///
@@ -159,16 +173,19 @@ impl Drop for OwnedCommand<'_> {
 
 /// Wait for the execution that already owns this command id.
 ///
-/// `None` means its owner ended without publishing: nothing was completed, and
-/// the honest answer is that the command may be sent again.
+/// `None` means no answer is coming: its owner ended without publishing, or it
+/// is still going after longer than one may legitimately take. Both say the
+/// same thing to the caller — nothing was completed that this request can
+/// report, and the command may be sent again.
 pub async fn joined(
     mut concluded: tokio::sync::watch::Receiver<Option<Concluded>>,
+    within: Duration,
 ) -> Option<Concluded> {
     // Checks the value it already holds before waiting, so an owner that
     // published and released before this ran is not waited on forever.
-    match concluded.wait_for(Option::is_some).await {
-        Ok(answer) => (*answer).clone(),
-        Err(_) => None,
+    match tokio::time::timeout(within, concluded.wait_for(Option::is_some)).await {
+        Ok(Ok(answer)) => (*answer).clone(),
+        Ok(Err(_)) | Err(_) => None,
     }
 }
 
