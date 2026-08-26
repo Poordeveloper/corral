@@ -132,6 +132,19 @@ struct FinalScreen {
     title: Option<Vec<u8>>,
 }
 
+impl FinalScreen {
+    /// Whether Corral can serve what this run left behind.
+    ///
+    /// A finished run's screen is a value, and it is serveable exactly when
+    /// what it left behind is (ADR 0007 L2).
+    fn access(&self) -> TerminalAccess {
+        match self.snapshot {
+            Ok(_) => TerminalAccess::Available,
+            Err(_) => TerminalAccess::Unavailable,
+        }
+    }
+}
+
 /// The screen exists and cannot be read.
 ///
 /// Its parser failed on provider output, so the structure behind it is not
@@ -401,17 +414,22 @@ impl SessionHandle {
         if self.published.poisoned.load(Ordering::Acquire) {
             return TerminalAccess::Unavailable;
         }
+        if let Some(recorded) = self.published.screen.get() {
+            return recorded.access();
+        }
+        // No record yet. Serveable while the thread that would answer is still
+        // there: gone without publishing one is a loss, and there is no
+        // snapshot to serve from it (ADR 0007 L3).
+        if self.alive.upgrade().is_some() {
+            return TerminalAccess::Available;
+        }
+        // Read again, because the two loads above are not one instant: a
+        // thread that retired between them published its record before it let
+        // go, and answering from the first read alone would call a serveable
+        // final screen lost. The siblings that ask the thread reach the same
+        // record through `recorded()` after a `SessionGone`.
         match self.published.screen.get() {
-            // A finished run's screen is a value, and it is serveable exactly
-            // when what it left behind is (ADR 0007 L2).
-            Some(recorded) => match recorded.snapshot {
-                Ok(_) => TerminalAccess::Available,
-                Err(_) => TerminalAccess::Unavailable,
-            },
-            // No record. Serveable only while the thread that would answer is
-            // still there: gone without publishing one is a loss, and there is
-            // no snapshot to serve from it (ADR 0007 L3).
-            None if self.alive.upgrade().is_some() => TerminalAccess::Available,
+            Some(recorded) => recorded.access(),
             None => TerminalAccess::Unavailable,
         }
     }
