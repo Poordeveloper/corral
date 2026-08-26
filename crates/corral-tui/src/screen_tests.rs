@@ -47,7 +47,36 @@ fn every_line_returns_to_the_first_column() {
     frame.line(Emphasis::Plain, "two");
 
     let text = drawn(frame);
-    assert_eq!(text.matches("\r\n").count(), 2, "{text:?}");
+    assert_eq!(
+        text.matches('\n').count(),
+        text.matches("\r\n").count(),
+        "{text:?}"
+    );
+}
+
+/// A frame that fills the screen ends on the last row and not one line past
+/// it.
+///
+/// The newline after a last line lands on the bottom margin, which scrolls the
+/// frame up by one: the heading leaves the screen a moment after it is drawn,
+/// and it is redrawn and lost again every second. Every full frame this list
+/// draws has that shape — `draw` pads to exactly the last row — so the rule
+/// belongs here, where no caller can get it wrong.
+#[test]
+fn a_full_frame_does_not_end_in_a_newline() {
+    let mut frame = Frame::new(SMALL);
+
+    for _ in 0..SMALL.rows {
+        frame.line(Emphasis::Plain, "a row");
+    }
+
+    let text = drawn(frame);
+    assert!(!text.ends_with("\r\n"), "{text:?}");
+    assert_eq!(
+        text.matches("\r\n").count(),
+        usize::from(SMALL.rows) - 1,
+        "{text:?}"
+    );
 }
 
 /// The prompt is the last thing drawn and leaves the cursor in it, so a person

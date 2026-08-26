@@ -408,8 +408,12 @@ pub async fn run(
     let _ = to_daemon.shutdown().await;
     drop(raw);
     // Leave the person's terminal on a fresh line rather than wherever the
-    // session's cursor happened to be.
-    println!();
+    // session's cursor happened to be. Written rather than printed, because
+    // what this restored to may itself be raw — the list holds raw mode across
+    // the takeover — and a bare newline there moves down without returning to
+    // the first column.
+    stdout.write_all(b"\r\n")?;
+    stdout.flush()?;
     Ok(())
 }
 

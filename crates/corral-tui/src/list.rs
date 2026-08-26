@@ -40,33 +40,42 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
             "the session list needs a terminal on standard input",
         ));
     }
+    // Before anything reads the terminal, and held for the whole surface
+    // rather than taken and given back around each takeover. A reader parked
+    // on a terminal still in line discipline echoes what the person types and
+    // holds it until Enter; and the detach byte is `Ctrl-\`, which a terminal
+    // that is not raw turns into SIGQUIT for whoever is in the foreground. The
+    // attachment enters raw mode of its own and restores what it found, which
+    // is this.
+    let _raw = RawMode::enter()?;
     let Some(mut keys) = LocalKeys::start() else {
         return Err(std::io::Error::other(
             "something is already reading this terminal",
         ));
     };
-    // Held for the whole surface rather than taken and given back around each
-    // takeover. Between the two the terminal would be in line discipline for
-    // as long as an RPC takes, and the detach byte is `Ctrl-\` — which a
-    // terminal that is not raw turns into SIGQUIT for whoever is in the
-    // foreground. The attachment enters raw mode of its own and restores what
-    // it found, which is this.
-    let _raw = RawMode::enter()?;
 
     let mut daemon = Daemon {
         policy,
         connection: Some(connection),
     };
     let mut list = SessionList::default();
+    // Taken once and held across every takeover, because the takeover happens
+    // on this screen: an Open that gave the terminal back first would put the
+    // session's snapshot clear, and everything it drew after it, on top of the
+    // person's own screen.
+    let mut screen = FullScreen::take()?;
 
     loop {
-        // Each pass owns the screen for as long as the list is on it and hands
-        // it back before anything else uses the terminal, which is what the
-        // attachment below expects to find.
-        match show(&mut daemon, &mut list, &mut keys).await? {
+        match show(&mut screen, &mut daemon, &mut list, &mut keys).await? {
             Chosen::Quit => return Ok(()),
-            Chosen::Open(session) => list.notice = open(&mut daemon, &session, &mut keys).await,
-            Chosen::New(argv) => list.notice = start(&mut daemon, argv, &mut keys).await,
+            Chosen::Open(session) => {
+                screen.hand_over()?;
+                list.notice = open(&mut daemon, &session, &mut keys).await;
+            }
+            Chosen::New(argv) => {
+                screen.hand_over()?;
+                list.notice = start(&mut daemon, argv, &mut keys).await;
+            }
         }
         // Returning here re-enters `show`, whose first poll fires immediately:
         // the list a person comes back to is current, not a second stale
@@ -112,12 +121,11 @@ struct SessionList {
 
 /// One pass of the list, ending in whatever the person chose.
 async fn show(
+    screen: &mut FullScreen,
     daemon: &mut Daemon<'_>,
     list: &mut SessionList,
     keys: &mut LocalKeys,
 ) -> std::io::Result<Chosen> {
-    let mut screen = FullScreen::take()?;
-
     let mut poll = tokio::time::interval(POLL);
     // The first tick fires immediately, and a slow answer delays the next
     // question rather than queueing one behind it — polls do not overlap,
@@ -128,7 +136,7 @@ async fn show(
         tokio::select! {
             _ = poll.tick() => {
                 list.take(daemon.sessions().await);
-                draw(&mut screen, list)?;
+                draw(screen, list)?;
             }
             typed = keys.next() => {
                 // The person's terminal closed. Nothing is left to read and
@@ -139,7 +147,7 @@ async fn show(
                         return Ok(chosen);
                     }
                 }
-                draw(&mut screen, list)?;
+                draw(screen, list)?;
             }
         }
     }

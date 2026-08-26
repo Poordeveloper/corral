@@ -24,6 +24,6 @@ mod list;
 mod presentation;
 mod screen;
 
-pub use attach::{Geometry, LocalKeys, OpenFailed, open};
+pub use attach::{Geometry, LocalKeys, OpenFailed, RawMode, open};
 pub use list::{row_text, run, short_id};
 pub use presentation::{MainState, SessionPresentation, present};

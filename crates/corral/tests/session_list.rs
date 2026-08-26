@@ -24,6 +24,12 @@ use support::{SETTLE, TestAccount, wait_until};
 /// moment it has to time.
 const FRAME: &str = "\x1b[?25l\x1b[H\x1b[2J";
 
+/// Giving the terminal back. The list writes it exactly once, on the way out —
+/// a takeover happens on the screen the list already took, because a session
+/// that cleared and drew on the person's own screen would consume the
+/// scrollback the alternate screen exists to protect.
+const RELEASE: &str = "\x1b[?1049l";
+
 const ROWS: u16 = 24;
 const COLS: u16 = 80;
 
@@ -88,10 +94,16 @@ fn the_list_opens_a_session_and_comes_back_to_a_current_one() {
     let mut terminal = Terminal::spawn(account.corral_on_pty(&["tui"]), ROWS, COLS);
     terminal.wait_for("Running · Status unknown");
 
-    terminal.typed(b"\r");
+    let opened = terminal.typed(b"\r");
     // The session's own screen, replayed into this terminal: the takeover
     // happened, and it is the attachment that already existed.
-    terminal.wait_for("in-the-session");
+    let painted = terminal.wait_for_after(opened, "in-the-session");
+
+    assert!(
+        !terminal.between(opened, painted).contains(RELEASE),
+        "the takeover left the alternate screen, so the session cleared and \
+         drew over the person's own"
+    );
 
     // Started while the person was inside that session. The list they come
     // back to can only hold it if it asked again on the way back.

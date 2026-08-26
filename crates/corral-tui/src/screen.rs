@@ -77,6 +77,19 @@ impl FullScreen {
         self.out.write_all(&frame.bytes)?;
         self.out.flush()
     }
+
+    /// Hand the terminal to whatever draws next, without giving the screen up.
+    ///
+    /// The alternate screen stays taken. Open is a takeover of *this* terminal
+    /// (grill Q1), so the session paints here and the list is still underneath
+    /// when the person comes back — releasing first would put the session's
+    /// snapshot clear, and everything it drew after it, on the person's own
+    /// screen. Only the cursor is handed over, because from here until they
+    /// return it belongs to the session.
+    pub fn hand_over(&mut self) -> std::io::Result<()> {
+        self.out.write_all(SHOW_CURSOR.as_bytes())?;
+        self.out.flush()
+    }
 }
 
 impl Drop for FullScreen {
@@ -126,10 +139,27 @@ impl Frame {
         if self.remaining() == 0 {
             return;
         }
+        self.start_line();
         self.bytes
             .extend_from_slice(self.truncated(text).as_bytes());
         self.bytes.extend_from_slice(SHOW_CURSOR.as_bytes());
         self.drawn += 1;
+    }
+
+    /// Move to the start of the next row, for every line after the first.
+    ///
+    /// Before the line rather than after it, so a frame that fills the screen
+    /// ends *on* the last row instead of one line past it: a newline written
+    /// at the bottom margin scrolls the whole frame up by one, and on a screen
+    /// repainted every second that means the top row is never seen.
+    ///
+    /// Carriage return as well as newline, because the terminal is in raw
+    /// mode: a newline alone moves down a row and leaves the column where it
+    /// was.
+    fn start_line(&mut self) {
+        if self.drawn > 0 {
+            self.bytes.extend_from_slice(b"\r\n");
+        }
     }
 
     fn write_line(&mut self, emphasis: Emphasis, text: &str) {
@@ -138,13 +168,11 @@ impl Frame {
             Emphasis::Selected => INVERSE,
             Emphasis::Secondary => DIM,
         };
+        self.start_line();
         self.bytes.extend_from_slice(opening.as_bytes());
         self.bytes
             .extend_from_slice(self.truncated(text).as_bytes());
         self.bytes.extend_from_slice(PLAIN.as_bytes());
-        // Carriage return as well as newline: the terminal is in raw mode, so
-        // a newline alone moves down a row and leaves the column where it was.
-        self.bytes.extend_from_slice(b"\r\n");
         self.drawn += 1;
     }
 

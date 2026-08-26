@@ -120,12 +120,30 @@ async fn attach(connection: &mut Connection, session: &str) -> ExitCode {
         Err(code) => return code,
     };
 
+    // Raw before anything reads the terminal. `terminal_attach` and the
+    // channel handshake are a wide enough window to type into, and a reader
+    // parked on a terminal still in line discipline gets what the person typed
+    // echoed over the session about to be painted — and not until they press
+    // Enter.
+    let raw = match corral_tui::RawMode::enter() {
+        Ok(raw) => raw,
+        Err(error) => {
+            eprintln!("corral: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let Some(mut keys) = LocalKeys::start() else {
         eprintln!("corral: something is already reading this terminal");
         return ExitCode::FAILURE;
     };
 
-    match corral_tui::open(connection, &resolved, &mut keys).await {
+    let detached = corral_tui::open(connection, &resolved, &mut keys).await;
+    // Theirs again before anything else is written on it: a line ending in raw
+    // mode moves down without returning to the first column, and what comes
+    // after this is their shell prompt.
+    drop(raw);
+
+    match detached {
         Ok(()) => {
             eprintln!("detached from {resolved}");
             ExitCode::SUCCESS
