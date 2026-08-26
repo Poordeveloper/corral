@@ -108,8 +108,35 @@ impl Terminal {
         String::from_utf8_lossy(&drawn[from.min(drawn.len())..to.min(drawn.len())]).into_owned()
     }
 
+    /// Wait for the surface to exit, and fail rather than hang if it does not.
+    ///
+    /// A surface that stops answering the keyboard is one of the failures
+    /// these tests exist to catch, and blocking forever on `wait` would report
+    /// it as a suite that never finished.
     pub fn wait_for_exit(&mut self) -> ExitStatus {
-        self.child.wait().expect("the surface exits")
+        self.exited_within(SETTLE).unwrap_or_else(|| {
+            panic!(
+                "the surface never exited; the terminal was sent:\n{}",
+                String::from_utf8_lossy(&self.drawn())
+            )
+        })
+    }
+
+    /// Whether the surface exited within `patience`.
+    ///
+    /// Separate from `wait_for_exit` for the tests where *how long* is the
+    /// point: a surface that answers a keystroke only once some unrelated
+    /// timeout expires has not answered it.
+    pub fn exited_within(&mut self, patience: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + patience;
+        while Instant::now() < deadline {
+            if let Some(status) = self.child.try_wait().expect("the surface's state") {
+                return Some(status);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        None
     }
 }
 

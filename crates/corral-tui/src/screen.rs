@@ -20,6 +20,8 @@ use crate::attach::Geometry;
 const TAKE: &[u8] = b"\x1b[?1049h";
 /// Give it back, cursor and all.
 const RELEASE: &[u8] = b"\x1b[?25h\x1b[?1049l";
+/// Scrolling covers the whole screen again, whatever a session left set.
+const WHOLE_SCREEN: &[u8] = b"\x1b[r";
 
 const HIDE_CURSOR: &str = "\x1b[?25l";
 const SHOW_CURSOR: &str = "\x1b[?25h";
@@ -44,6 +46,12 @@ pub enum Emphasis {
 /// terminal as it was found.
 pub struct FullScreen {
     out: std::io::Stdout,
+    /// The last size this terminal reported.
+    ///
+    /// Kept because the question can go unanswered transiently — an ioctl
+    /// interrupted by a signal answers nothing — and one unanswered question
+    /// about the size is not a terminal that stopped being one.
+    last: Option<Geometry>,
 }
 
 /// A whole screen, composed before any of it is written.
@@ -61,7 +69,10 @@ impl FullScreen {
         let mut out = std::io::stdout();
         out.write_all(TAKE)?;
         out.flush()?;
-        Ok(Self { out })
+        Ok(Self {
+            out,
+            last: Geometry::of(&std::io::stdin()),
+        })
     }
 
     /// This terminal's size right now.
@@ -69,8 +80,11 @@ impl FullScreen {
     /// Read per frame rather than remembered: a person who resizes their
     /// window while the list is up gets a list that fits it, without this
     /// surface needing to hear about the resize.
-    pub fn geometry(&self) -> Option<Geometry> {
-        Geometry::of(&std::io::stdin())
+    pub fn geometry(&mut self) -> Option<Geometry> {
+        if let Some(now) = Geometry::of(&std::io::stdin()) {
+            self.last = Some(now);
+        }
+        self.last
     }
 
     pub fn show(&mut self, frame: Frame) -> std::io::Result<()> {
@@ -88,6 +102,21 @@ impl FullScreen {
     /// return it belongs to the session.
     pub fn hand_over(&mut self) -> std::io::Result<()> {
         self.out.write_all(SHOW_CURSOR.as_bytes())?;
+        self.out.flush()
+    }
+
+    /// Take the terminal back once whatever it was handed to is done.
+    ///
+    /// A takeover replays a child's own bytes, so the terminal comes back in
+    /// whatever state that child left: `vim` on exit writes `\x1b[?1049l` and
+    /// drops out of the alternate screen, and a full-screen program may leave
+    /// a scroll region set. Neither is something this surface can detect, and
+    /// a list that went on drawing would then be clearing the person's own
+    /// screen once a second — so both are re-asserted rather than assumed to
+    /// have held.
+    pub fn take_back(&mut self) -> std::io::Result<()> {
+        self.out.write_all(TAKE)?;
+        self.out.write_all(WHOLE_SCREEN)?;
         self.out.flush()
     }
 }

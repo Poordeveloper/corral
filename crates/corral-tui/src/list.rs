@@ -29,6 +29,15 @@ use crate::screen::{Emphasis, Frame, FullScreen};
 /// live list does not justify defining the semantic event stream (grill Q4).
 const POLL: Duration = Duration::from_secs(1);
 
+/// How long one answer may take before the daemon counts as unreadable.
+///
+/// A client's own patience, not a wire contract. `session.list` is answered
+/// from published state on the daemon's reactor thread, so an answer this late
+/// means something is wrong rather than busy. The connection it would have
+/// arrived on is dropped rather than reused: its next read would be the answer
+/// to a question nobody is holding any more.
+const ANSWER: Duration = Duration::from_secs(5);
+
 /// The whole key map, which is also the footer: a person can see everything
 /// this surface does without being told about it anywhere else.
 const FOOTER: &str = "↑/↓ move · enter open · n new · q quit";
@@ -64,6 +73,10 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
     // session's snapshot clear, and everything it drew after it, on top of the
     // person's own screen.
     let mut screen = FullScreen::take()?;
+    // Something on screen before the first answer. Every later frame is drawn
+    // by an answer or a keystroke, and a person who starts this against a slow
+    // daemon would otherwise be looking at nothing at all.
+    draw(&mut screen, &mut list)?;
 
     loop {
         match show(&mut screen, &mut daemon, &mut list, &mut keys).await? {
@@ -71,10 +84,12 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
             Chosen::Open(session) => {
                 screen.hand_over()?;
                 list.notice = open(&mut daemon, &session, &mut keys).await;
+                screen.take_back()?;
             }
             Chosen::New(argv) => {
                 screen.hand_over()?;
                 list.notice = start(&mut daemon, argv, &mut keys).await;
+                screen.take_back()?;
             }
         }
         // Returning here re-enters `show`, whose first poll fires immediately:
@@ -106,10 +121,18 @@ struct SessionList {
     /// The first row on screen, kept so the list scrolls rather than jumping
     /// the selection to an edge every time it moves.
     first: usize,
-    /// Why the last refresh could not be answered. While this is set the rows
+    /// Why the last poll produced no list at all. While this is set the rows
     /// are empty on purpose: an old snapshot shown as current is the one thing
     /// a disconnected list must not do (grill Q4).
-    unreachable: Option<String>,
+    unanswered: Option<Unanswered>,
+    /// Sessions the last answer described in a shape this build cannot read.
+    ///
+    /// Held apart from `notice` rather than written into it: this is a fact
+    /// about the list, replaced by every answer, and that is a reply to a
+    /// keystroke, which is the person's until they act again. One overwriting
+    /// the other every second is how an answer to a person disappears before
+    /// they have read it.
+    unrenderable: usize,
     /// What the last action produced, shown until the next one.
     notice: Option<String>,
     /// The command being typed, when the person is starting a session.
@@ -134,8 +157,8 @@ async fn show(
 
     loop {
         tokio::select! {
-            _ = poll.tick() => {
-                list.take(daemon.sessions().await);
+            answered = next_answer(&mut poll, daemon) => {
+                list.take(answered);
                 draw(screen, list)?;
             }
             typed = keys.next() => {
@@ -151,6 +174,22 @@ async fn show(
             }
         }
     }
+}
+
+/// The next answer, once the next poll is due.
+///
+/// One future over both the wait and the question, so exactly one question is
+/// ever in flight and a slow answer delays the next rather than queueing one
+/// behind it (grill Q4). It is also droppable whole, which is what lets the
+/// surface keep answering the keyboard while a daemon answers nothing — and
+/// with raw mode holding `Ctrl-C`, a surface that stops reading keys is one a
+/// person cannot leave.
+async fn next_answer(
+    poll: &mut tokio::time::Interval,
+    daemon: &mut Daemon<'_>,
+) -> Result<Listed, Unanswered> {
+    poll.tick().await;
+    daemon.sessions().await
 }
 
 /// Take over the terminal for one session, and report anything that stopped
@@ -224,6 +263,26 @@ struct Daemon<'a> {
     connection: Option<Connection>,
 }
 
+/// Why there is no list to show.
+///
+/// Two different claims about the daemon, and the surface must not make the
+/// wrong one: a daemon that refused answered, and is on the other end of a
+/// connection that is fine; one that could not be read may not be there at all
+/// (`AGENTS.md` §Runtime truth).
+enum Unanswered {
+    Refused(String),
+    Unreadable(String),
+}
+
+impl Unanswered {
+    fn line(&self) -> String {
+        match self {
+            Self::Refused(detail) => format!("corrald would not list its sessions: {detail}"),
+            Self::Unreadable(detail) => format!("corrald could not be read: {detail}"),
+        }
+    }
+}
+
 /// What one answer to `session.list` produced.
 struct Listed {
     rows: Vec<Row>,
@@ -245,19 +304,50 @@ impl Daemon<'_> {
         }
     }
 
-    /// What the daemon holds, or why it could not be asked.
-    async fn sessions(&mut self) -> Result<Listed, String> {
-        let listed = {
-            let connection = self.connection().await?;
-            connection.session_list().await
+    /// The connection, taken out of this daemon for exactly one question.
+    ///
+    /// Taken rather than borrowed, because waiting for the answer is
+    /// interruptible: a question this surface stopped waiting for — a
+    /// keystroke arrived, or `ANSWER` ran out — leaves a socket whose next
+    /// read is an answer nobody is holding any more. Putting it back only once
+    /// one arrived means an abandoned question costs a reconnect and never a
+    /// mismatched answer.
+    async fn borrow_for_one_question(&mut self) -> Result<Connection, Unanswered> {
+        match self.connection.take() {
+            Some(connection) => Ok(connection),
+            None => activate(self.policy)
+                .await
+                .map_err(|error| Unanswered::Unreadable(error.to_string())),
+        }
+    }
+
+    /// What the daemon holds, or why it did not say.
+    async fn sessions(&mut self) -> Result<Listed, Unanswered> {
+        let mut connection = self.borrow_for_one_question().await?;
+
+        let Ok(answered) = tokio::time::timeout(ANSWER, connection.session_list()).await else {
+            return Err(Unanswered::Unreadable(format!(
+                "no answer in {} seconds",
+                ANSWER.as_secs()
+            )));
         };
 
-        match listed {
-            Ok(listed) => Ok(decode(listed)),
-            Err(error) => {
-                self.forget_if_lost(&error);
-                Err(error.to_string())
+        match answered {
+            Ok(listed) => {
+                self.connection = Some(connection);
+                Ok(decode(listed))
             }
+            // A refusal is a daemon that answered. The connection it answered
+            // on is fine and the next question may well be answered too, so
+            // this says what it refused rather than claiming it is gone.
+            Err(refusal @ RequestError::Refused(_)) => {
+                self.connection = Some(connection);
+                Err(Unanswered::Refused(refusal.to_string()))
+            }
+            // A lost daemon and one that broke the protocol are both sockets
+            // this surface is done with: nobody is on the first, and the
+            // second cannot be trusted to be at a known place in the stream.
+            Err(error) => Err(Unanswered::Unreadable(error.to_string())),
         }
     }
 
@@ -293,8 +383,8 @@ fn decode(listed: SessionListResult) -> Listed {
 
 impl SessionList {
     /// Accept what the last poll produced.
-    fn take(&mut self, listed: Result<Listed, String>) {
-        match listed {
+    fn take(&mut self, answered: Result<Listed, Unanswered>) {
+        match answered {
             Ok(listed) => {
                 // The cursor follows the session it was on, not the position
                 // it was at: the daemon orders by start time, so a new session
@@ -305,26 +395,22 @@ impl SessionList {
                     .get(self.selected)
                     .map(|row| row.session_id.clone());
                 self.rows = listed.rows;
+                self.unrenderable = listed.unrenderable;
                 self.selected = was_on
                     .and_then(|id| self.rows.iter().position(|row| row.session_id == id))
                     .unwrap_or(0);
-                self.unreachable = None;
+                self.unanswered = None;
                 self.answered = true;
-                if listed.unrenderable > 0 {
-                    self.notice = Some(format!(
-                        "{} session(s) this build cannot render yet.",
-                        listed.unrenderable
-                    ));
-                }
             }
-            Err(reason) => {
+            Err(unanswered) => {
                 // Cleared, not kept: a list that keeps drawing its last
                 // snapshot while the daemon is gone is presenting a memory as
                 // current truth.
                 self.rows.clear();
+                self.unrenderable = 0;
                 self.selected = 0;
                 self.first = 0;
-                self.unreachable = Some(reason);
+                self.unanswered = Some(unanswered);
             }
         }
     }
@@ -465,15 +551,15 @@ fn draw(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> 
     // The last line is the footer or the prompt, with a line above it for
     // whatever the surface has to say.
     let tail = 1 + u16::from(list.notice.is_some() || list.typing.is_some());
-    let budget = frame.remaining().saturating_sub(tail + 1);
+    // The count of what could not be rendered sits under the rows, so the
+    // window has to be told a line is coming after it.
+    let counted = u16::from(list.unrenderable > 0);
+    let budget = frame.remaining().saturating_sub(tail + counted + 1);
 
-    if let Some(reason) = &list.unreachable {
-        frame.line(
-            Emphasis::Plain,
-            &format!("corrald could not be read: {reason}"),
-        );
+    if let Some(unanswered) = &list.unanswered {
+        frame.line(Emphasis::Plain, &unanswered.line());
         frame.line(Emphasis::Secondary, "Asking again every second.");
-    } else if list.rows.is_empty() {
+    } else if list.rows.is_empty() && list.unrenderable == 0 {
         frame.line(
             Emphasis::Plain,
             if list.answered {
@@ -491,6 +577,13 @@ fn draw(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> 
                 geometry,
             );
         }
+    }
+
+    if list.unrenderable > 0 {
+        frame.line(
+            Emphasis::Secondary,
+            &format!("{} more this build cannot render yet.", list.unrenderable),
+        );
     }
 
     while frame.remaining() > tail {
@@ -523,11 +616,14 @@ fn heading(list: &SessionList) -> String {
     // answered, or once it can no longer be read — and a heading saying zero
     // over a body saying the daemon is gone is the surface contradicting
     // itself.
-    if list.unreachable.is_some() || !list.answered {
+    if list.unanswered.is_some() || !list.answered {
         return "Corral".to_owned();
     }
 
-    match list.rows.len() {
+    // What the daemon reported, which is not what this build could draw: a
+    // heading counting only the rows would disagree with the line under them
+    // saying there are more.
+    match list.rows.len() + list.unrenderable {
         1 => "Corral — 1 session".to_owned(),
         other => format!("Corral — {other} sessions"),
     }

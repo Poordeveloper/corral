@@ -30,6 +30,12 @@ const FRAME: &str = "\x1b[?25l\x1b[H\x1b[2J";
 /// scrollback the alternate screen exists to protect.
 const RELEASE: &str = "\x1b[?1049l";
 
+/// Taking it. Written once on the way in, and again on the way back from every
+/// takeover: a session replays its child's own bytes, and a child that leaves
+/// the alternate screen on exit would otherwise leave the list drawing — and
+/// clearing — the person's own.
+const TAKE: &str = "\x1b[?1049h";
+
 const ROWS: u16 = 24;
 const COLS: u16 = 80;
 
@@ -110,6 +116,7 @@ fn the_list_opens_a_session_and_comes_back_to_a_current_one() {
     start_session(&mut client, 2, &["/bin/sleep", "30"]);
     let detached = terminal.typed(b"\x1c");
 
+    terminal.wait_for_after(detached, TAKE);
     let returned = frame_after(&terminal, detached);
 
     assert!(
@@ -254,6 +261,59 @@ fn a_slow_answer_does_not_build_a_queue_of_questions() {
         !daemon.overlapped(),
         "a question was sent before the last one was answered"
     );
+
+    terminal.typed(b"q");
+    assert!(terminal.wait_for_exit().success());
+}
+
+/// The keyboard keeps working while a daemon does not answer.
+///
+/// Raw mode holds `Ctrl-C` and `Ctrl-\`, so a surface that stops reading keys
+/// while it waits for an answer is one a person cannot leave from the terminal
+/// they are sitting at. Only a daemon far slower than a real one can hold the
+/// question open long enough to type into.
+#[test]
+fn the_keyboard_answers_while_a_daemon_does_not() {
+    let account = TestAccount::new("tui-key-during-wait");
+    let _daemon = spawn_fake_daemon(
+        &account.socket(),
+        FakeBehaviour::AnswerSlowly {
+            delay: Duration::from_secs(30),
+        },
+    );
+
+    let mut terminal = Terminal::spawn(account.corral_on_pty(&["tui"]), ROWS, COLS);
+    // Drawn before any answer: the first question is outstanding from here.
+    terminal.wait_for("Asking corrald…");
+
+    terminal.typed(b"q");
+
+    // Sooner than `ANSWER`, deliberately: a surface that only reads the key
+    // once its own patience with the daemon runs out has not read it.
+    let left = terminal
+        .exited_within(Duration::from_secs(2))
+        .expect("the surface answered the key while the question was outstanding");
+    assert!(left.success());
+}
+
+/// And the wait itself is bounded. A question with no answer is given up on
+/// and said so, rather than leaving the last frame up forever.
+#[test]
+fn a_question_that_is_never_answered_is_given_up_on() {
+    let account = TestAccount::new("tui-no-answer");
+    let _daemon = spawn_fake_daemon(
+        &account.socket(),
+        FakeBehaviour::AnswerSlowly {
+            delay: Duration::from_secs(30),
+        },
+    );
+
+    let mut terminal = Terminal::spawn(account.corral_on_pty(&["tui"]), ROWS, COLS);
+    let asking = terminal.wait_for("Asking corrald…");
+
+    // Both halves of the claim in one line: the list stopped waiting, and it
+    // says that is why — not that the daemon went away, which it did not.
+    terminal.wait_for_after(asking, "corrald could not be read: no answer in");
 
     terminal.typed(b"q");
     assert!(terminal.wait_for_exit().success());

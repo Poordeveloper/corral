@@ -278,6 +278,10 @@ impl Geometry {
 /// The one path every surface takes: `corral attach`, `corral new` and the
 /// list's Open all reach a session through here, so none of them can grow its
 /// own idea of what attaching means.
+///
+/// The terminal must already be in raw mode. Whoever started `keys` owns that:
+/// the reader must never be parked on a terminal still in line discipline, so
+/// the two are established together and this is downstream of both.
 pub async fn open(
     connection: &mut Connection,
     session_id: &str,
@@ -314,6 +318,11 @@ pub async fn open(
 /// separately: a person typing must not wait for the screen, and the screen
 /// must not wait for a keystroke. The keys arrive from the process's one
 /// reader rather than a thread started here — see `LocalKeys`.
+///
+/// Raw mode is the caller's, for the same reason the reader is: one terminal
+/// mode with one owner. A guard taken here would capture an already-raw
+/// terminal as the state to restore, which is a restore that restores
+/// nothing.
 pub async fn run(
     channel: TerminalChannel,
     session_geometry: Geometry,
@@ -321,7 +330,6 @@ pub async fn run(
 ) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let raw = RawMode::enter()?;
     let (mut from_daemon, mut to_daemon) = channel.stream.into_split();
 
     let mut stdout = std::io::stdout();
@@ -406,12 +414,10 @@ pub async fn run(
     // Closing the channel is not ending the session: the process keeps running,
     // which is what detaching means.
     let _ = to_daemon.shutdown().await;
-    drop(raw);
     // Leave the person's terminal on a fresh line rather than wherever the
     // session's cursor happened to be. Written rather than printed, because
-    // what this restored to may itself be raw — the list holds raw mode across
-    // the takeover — and a bare newline there moves down without returning to
-    // the first column.
+    // the terminal is still raw — the caller holds it — and a bare newline
+    // there moves down without returning to the first column.
     stdout.write_all(b"\r\n")?;
     stdout.flush()?;
     Ok(())

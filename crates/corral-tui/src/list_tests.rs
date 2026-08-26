@@ -14,8 +14,12 @@ fn session(id: &str, execution_state: &str, terminal_access: Option<&str>) -> Va
     value
 }
 
-fn answered(sessions: Vec<Value>) -> Result<Listed, String> {
+fn answered(sessions: Vec<Value>) -> Result<Listed, Unanswered> {
     Ok(decode(SessionListResult { sessions }))
+}
+
+fn lost() -> Result<Listed, Unanswered> {
+    Err(Unanswered::Unreadable("the daemon went away".to_owned()))
 }
 
 fn running(count: usize) -> Vec<Value> {
@@ -32,10 +36,33 @@ fn a_daemon_that_cannot_be_read_empties_the_list_rather_than_freezing_it() {
     let mut list = SessionList::default();
     list.take(answered(running(2)));
 
-    list.take(Err("the daemon went away".to_owned()));
+    list.take(lost());
 
     assert!(list.rows.is_empty(), "a stale list was left on screen");
-    assert_eq!(list.unreachable.as_deref(), Some("the daemon went away"));
+    assert!(
+        list.unanswered
+            .as_ref()
+            .is_some_and(|unanswered| unanswered.line().contains("could not be read"))
+    );
+}
+
+/// A daemon that refused answered. Saying it could not be read would claim
+/// something about a daemon that is demonstrably there — an older one that
+/// does not implement `session.list` is exactly this, and the list must not
+/// report it as unreachable (`AGENTS.md` §Protocol, §Runtime truth).
+#[test]
+fn a_refusal_is_not_reported_as_a_daemon_that_could_not_be_read() {
+    let mut list = SessionList::default();
+
+    list.take(Err(Unanswered::Refused("no such method".to_owned())));
+
+    let said = list
+        .unanswered
+        .as_ref()
+        .map(Unanswered::line)
+        .expect("the refusal is on screen");
+    assert!(said.contains("would not list"), "{said}");
+    assert!(!said.contains("could not be read"), "{said}");
 }
 
 /// And it comes back on its own. The poll is the retry: a person who restarted
@@ -43,12 +70,12 @@ fn a_daemon_that_cannot_be_read_empties_the_list_rather_than_freezing_it() {
 #[test]
 fn an_answer_after_a_loss_puts_the_list_back() {
     let mut list = SessionList::default();
-    list.take(Err("the daemon went away".to_owned()));
+    list.take(lost());
 
     list.take(answered(running(1)));
 
     assert_eq!(list.rows.len(), 1);
-    assert_eq!(list.unreachable, None);
+    assert!(list.unanswered.is_none());
 }
 
 /// The daemon orders by start time, so a session starting elsewhere moves
@@ -221,12 +248,46 @@ fn a_session_this_build_cannot_render_is_counted_rather_than_dropped() {
     ]));
 
     assert_eq!(list.rows.len(), 1);
-    assert!(
-        list.notice
-            .as_deref()
-            .is_some_and(|notice| notice.contains('1')),
-        "{:?}",
-        list.notice
+    assert_eq!(list.unrenderable, 1);
+    assert_eq!(
+        list.notice, None,
+        "a fact about the list was written where an answer to the person goes"
+    );
+}
+
+/// What the poll found and what the person's last action produced are two
+/// different things on the screen. A poll that wrote into the second would
+/// replace the answer to a keystroke a second after they read it — and would
+/// leave it there once the fact stopped being true.
+#[test]
+fn a_poll_neither_overwrites_nor_outlives_what_an_action_said() {
+    let mut list = SessionList::default();
+    list.take(answered(vec![session(
+        "s0-rest",
+        "running",
+        Some("unavailable"),
+    )]));
+    list.act(Key::Enter);
+    let said = list.notice.clone().expect("the refusal is on screen");
+
+    list.take(answered(vec![
+        session("s0-rest", "running", Some("unavailable")),
+        json!({"session_id": "s1-rest"}),
+    ]));
+    assert_eq!(
+        list.notice.as_ref(),
+        Some(&said),
+        "the poll took the screen"
+    );
+
+    list.take(answered(vec![session(
+        "s0-rest",
+        "running",
+        Some("unavailable"),
+    )]));
+    assert_eq!(
+        list.unrenderable, 0,
+        "a fact outlived the answer that held it"
     );
 }
 
@@ -273,8 +334,17 @@ fn the_heading_counts_nothing_it_has_not_been_told() {
     list.take(answered(running(2)));
     assert_eq!(heading(&list), "Corral — 2 sessions");
 
-    list.take(Err("the daemon went away".to_owned()));
+    list.take(lost());
     assert_eq!(heading(&list), "Corral");
+
+    // Told about three, able to draw two. The heading counts what it was told,
+    // or it contradicts the line under the rows saying there is one more.
+    list.take(answered(vec![
+        session("s0-rest", "running", Some("available")),
+        session("s1-rest", "running", Some("available")),
+        json!({"session_id": "s2-rest"}),
+    ]));
+    assert_eq!(heading(&list), "Corral — 3 sessions");
 }
 
 /// A refusal is about the row the person was on, so moving off it takes the
