@@ -23,7 +23,13 @@ impl Registry {
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("create the scratch directory");
         Self {
-            state: Arc::new(DaemonState::open(&directory.join("registry.sqlite3")).expect("open")),
+            state: Arc::new(
+                DaemonState::open(
+                    &directory.join("registry.sqlite3"),
+                    &directory.join("launch"),
+                )
+                .expect("open"),
+            ),
             directory,
         }
     }
@@ -108,4 +114,55 @@ async fn the_session_list_is_empty_and_says_so() {
         Outcome::Result(value) => assert_eq!(value, json!({"sessions": []})),
         Outcome::Error(error) => panic!("expected a result, got {error}"),
     }
+}
+
+/// The terminology law, enforced where it is easiest to break: every refusal a
+/// person reads names facts and actions, never Corral's machinery
+/// (`PRODUCT.md` §8).
+///
+/// Session is the one domain noun a person is shown. `run` survives in exactly
+/// one sentence — the one the founder fixed verbatim for an unverifiable end
+/// (grill Q7) — and nowhere else.
+#[test]
+fn no_continuation_refusal_exposes_corral_machinery() {
+    let refusals = [
+        ResumeRefused::NotThisDaemon,
+        ResumeRefused::IdentityUnknown,
+        ResumeRefused::Eligibility(NativeResumeEligibility::IdentityContested),
+        ResumeRefused::Eligibility(NativeResumeEligibility::AssuranceTooWeak),
+        ResumeRefused::Eligibility(NativeResumeEligibility::Eligible),
+        ResumeRefused::UnknownProvider("codex".to_owned()),
+        ResumeRefused::RunStillLive,
+        ResumeRefused::EndUnverifiable,
+        ResumeRefused::NoPreviousRun,
+    ];
+    for refusal in refusals {
+        let said = refusal.to_string().to_lowercase();
+        for jargon in [
+            "binding",
+            "assurance",
+            "evidence",
+            "contested",
+            "token",
+            "attested",
+            "heuristic",
+            "deterministic",
+            "eligibility",
+        ] {
+            assert!(!said.contains(jargon), "{said:?} exposes {jargon}");
+        }
+        assert!(!said.is_empty());
+    }
+}
+
+/// The one sanctioned exception, kept where a change to it is visible: the
+/// founder fixed this sentence, and a reworded version would be a different
+/// promise about what Corral checked (grill Q7).
+#[test]
+fn the_unverifiable_refusal_states_the_ruling_verbatim() {
+    assert_eq!(
+        ResumeRefused::EndUnverifiable.to_string(),
+        "Corral cannot verify that the previous run has exited, so it will not resume this \
+         provider session automatically",
+    );
 }

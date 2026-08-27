@@ -1,12 +1,19 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
-use corral_core::{Command, OccurrenceTime, RunId};
-use corral_state::{FatalState, Refusal, StartedManagedSession, StateError, Store};
+use corral_core::{
+    Binding, BindingKey, BindingKind, Command, CorralSessionId, Evidence, ExternalId, NodeId,
+    OccurrenceTime, Provenance, Run, RunId,
+};
+use corral_state::{
+    BindingResolution, Contested, FatalState, Refusal, StartedManagedSession, StateError, Store,
+};
 
+use crate::hook_evidence::{Delivered, Deliveries};
 use crate::in_flight::InFlightCommands;
+use crate::provider::{LaunchTokens, ReportedSessions};
 use crate::runtime::{AttachTokens, Integrity, ManagedSessions, RunObservations, observe_runs};
 
 /// How long a departing daemon waits for its last observed facts to land.
@@ -57,6 +64,19 @@ pub struct DaemonState {
     /// whether all of it was recorded.
     observations: RunObservations,
 
+    /// This node's identity, read once at startup. Every binding key is scoped
+    /// by it, and asking the store for it on each ingest would be a lock taken
+    /// for a value that cannot change.
+    node: NodeId,
+
+    /// Where per-launch provider configuration Corral owns is written.
+    launch_dir: PathBuf,
+
+    /// Where the hook endpoint puts what it received, and the receiver the
+    /// server hands to the one task that interprets deliveries.
+    deliveries: Deliveries,
+    incoming: Mutex<Option<tokio::sync::mpsc::Receiver<Delivered>>>,
+
     /// The mutating commands this daemon is executing right now.
     commands: InFlightCommands,
     /// The sessions this daemon is running, and the tokens it has issued for
@@ -73,6 +93,12 @@ pub struct DaemonState {
 pub struct Runtime {
     pub sessions: ManagedSessions,
     pub attach_tokens: AttachTokens,
+    /// The launches whose hook events this daemon can still place.
+    pub launch_tokens: LaunchTokens,
+    /// What providers have reported about those sessions. Live evidence: a
+    /// restart loses it and the rows return to bare runtime truth
+    /// (ADR 0004 D7).
+    pub reported: ReportedSessions,
 }
 
 impl DaemonState {
@@ -81,20 +107,54 @@ impl DaemonState {
     /// Called before the daemon binds its endpoint, so a store that cannot be
     /// used is a startup failure rather than something discovered a
     /// millisecond after a client's hello succeeded (ADR 0002, Q14).
-    pub fn open(registry: &Path) -> Result<Self, StateError> {
-        let store = Arc::new(Mutex::new(Store::open(registry)?));
+    pub fn open(registry: &Path, launch_dir: &Path) -> Result<Self, StateError> {
+        let store = Store::open(registry)?;
+        let node = store.node();
+        let store = Arc::new(Mutex::new(store));
         // Started with the store, not with the server: a runtime that could
         // report an ending before anything was draining the channel would fill
         // it and lose the accounting the daemon exists to keep.
         let (observations, observed) = observe_runs();
-        crate::run_lifecycle::record_observed_runs(Arc::clone(&store), observed);
+        crate::run_lifecycle::record_observed_runs(
+            Arc::clone(&store),
+            observed,
+            launch_dir.to_path_buf(),
+        );
+        let (deliveries, incoming) = crate::hook_evidence::queue();
         Ok(Self {
             store,
             cannot_vouch: AtomicBool::new(false),
             observations,
+            node,
+            launch_dir: launch_dir.to_path_buf(),
+            deliveries,
+            incoming: Mutex::new(Some(incoming)),
             commands: InFlightCommands::new(),
             runtime: Mutex::new(Runtime::default()),
         })
+    }
+
+    /// This node's identity.
+    pub fn node(&self) -> NodeId {
+        self.node
+    }
+
+    /// Where per-launch provider configuration Corral owns is written.
+    pub fn launch_dir(&self) -> &Path {
+        &self.launch_dir
+    }
+
+    /// Where the hook endpoint puts what it received.
+    pub fn deliveries(&self) -> Deliveries {
+        self.deliveries.clone()
+    }
+
+    /// The delivery stream, taken once by the task that interprets it.
+    ///
+    /// Once, because ingestion is serial on purpose: two drainers would let
+    /// two events race to establish one Session's first provider identity.
+    pub fn take_deliveries(&self) -> Option<tokio::sync::mpsc::Receiver<Delivered>> {
+        self.incoming.lock().ok().and_then(|mut held| held.take())
     }
 
     /// Where a managed runtime reports what it observed about its Run.
@@ -116,6 +176,24 @@ impl DaemonState {
         self.lock().end_unowned_managed_runs()
     }
 
+    /// Whether the log records this Run as having exited — `None` when it has
+    /// never heard of the Run at all.
+    ///
+    /// Synchronous, because its one caller is the startup sweep, which runs
+    /// before there is a reactor to keep free. Three answers rather than two:
+    /// "no such Run" and "a Run whose fate is not established" are what decide
+    /// whether a Corral-owned artifact may be destroyed, and collapsing them
+    /// would destroy the wrong one (grill Q10).
+    pub fn exit_established(&self, run: RunId) -> Option<bool> {
+        match self.lock().run(run) {
+            Ok(Some(run)) => Some(matches!(run.end(), Some(corral_core::RunEnd::Exited(_)))),
+            Ok(None) => None,
+            // A store that will not answer is not evidence that anything
+            // exited. Retained.
+            Err(_) => Some(false),
+        }
+    }
+
     /// Wait for every observed fact to be recorded, on the way out.
     pub fn settle_observations(&self) -> Integrity {
         self.observations.settle(SETTLE_GRACE)
@@ -134,11 +212,96 @@ impl DaemonState {
     pub async fn start_managed_session(
         self: &Arc<Self>,
         command: Command,
+        session: CorralSessionId,
         run: RunId,
         started: OccurrenceTime,
         at: SystemTime,
     ) -> Result<StartedManagedSession, StateError> {
-        self.off_the_reactor(move |store| store.start_managed_session(&command, run, started, at))
+        self.off_the_reactor(move |store| {
+            store.start_managed_session(&command, session, run, started, at)
+        })
+        .await
+    }
+
+    /// Open another Run of a Session that already exists.
+    pub async fn resume_managed_session(
+        self: &Arc<Self>,
+        command: Command,
+        session: CorralSessionId,
+        run: RunId,
+        started: OccurrenceTime,
+        at: SystemTime,
+    ) -> Result<StartedManagedSession, StateError> {
+        self.off_the_reactor(move |store| {
+            store.resume_managed_session(&command, session, run, started, at)
+        })
+        .await
+    }
+
+    /// A Session's Runs, oldest episode first.
+    pub async fn runs_of(
+        self: &Arc<Self>,
+        session: CorralSessionId,
+    ) -> Result<Vec<Run>, StateError> {
+        self.off_the_reactor(move |store| store.runs_of(session))
+            .await
+    }
+
+    /// The provider-session binding this Session holds, if it has learned one.
+    ///
+    /// At most one: binding uniqueness is on `(node, provider, external_id,
+    /// kind)`, and a Session that learned two provider identities is the
+    /// contest D8 rules on rather than a list to choose from. The first is
+    /// returned and a second is reported, because a store holding two is a
+    /// fact worth seeing rather than one to average over.
+    pub async fn provider_session_binding(
+        self: &Arc<Self>,
+        session: CorralSessionId,
+    ) -> Result<Option<Binding>, StateError> {
+        let bindings = self
+            .off_the_reactor(move |store| store.bindings_of(session))
+            .await?;
+        let mut provider_sessions = bindings
+            .into_iter()
+            .filter(|binding| binding.kind() == BindingKind::ProviderSession);
+        let first = provider_sessions.next();
+        if provider_sessions.next().is_some() {
+            tracing::warn!(%session, "a session holds more than one provider-session binding");
+        }
+        Ok(first)
+    }
+
+    /// Attach an external identity to a Session Corral already has.
+    pub async fn bind(
+        self: &Arc<Self>,
+        session: CorralSessionId,
+        key: BindingKey,
+        provenance: Provenance,
+        evidence: Evidence,
+        at: SystemTime,
+    ) -> Result<BindingResolution, StateError> {
+        self.off_the_reactor(move |store| store.bind(session, key, provenance, evidence, at))
+            .await
+    }
+
+    /// Replace the evidence supporting a binding.
+    pub async fn confirm_binding(
+        self: &Arc<Self>,
+        binding: corral_core::BindingId,
+        evidence: Evidence,
+    ) -> Result<Binding, StateError> {
+        self.off_the_reactor(move |store| store.confirm_binding(binding, evidence))
+            .await
+    }
+
+    /// Record that contradictory provider-identity evidence reached a binding.
+    pub async fn contest_binding(
+        self: &Arc<Self>,
+        binding: corral_core::BindingId,
+        conflicting: ExternalId,
+        evidence: Evidence,
+    ) -> Result<Contested, StateError> {
+        self.off_the_reactor(move |store| store.contest_binding(binding, conflicting, evidence))
             .await
     }
 

@@ -136,6 +136,7 @@ fn opened(
 ) -> Result<StartedManagedSession, StateError> {
     store.start_managed_session(
         command,
+        CorralSessionId::mint(),
         RunId::mint(),
         OccurrenceTime::Authoritative(at),
         at,
@@ -2128,6 +2129,7 @@ fn opening_a_managed_session_refuses_a_run_id_the_log_holds() {
     let refusal = store
         .start_managed_session(
             &command("cmd-2", "/elsewhere"),
+            CorralSessionId::mint(),
             taken.run(),
             OccurrenceTime::Authoritative(instant(20)),
             instant(20),
@@ -2159,5 +2161,415 @@ fn an_oversized_command_is_refused_before_it_is_looked_up() {
     assert!(matches!(
         refusal,
         StateError::Refused(Refusal::FingerprintTooLarge { .. })
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Identity conflict: the one durable fact this phase adds (ADR 0004 D8).
+// ---------------------------------------------------------------------------
+
+/// A Session with an Attested provider-session binding, the way a managed
+/// launch's first `SessionStart` leaves it.
+fn attested_provider_session(store: &mut Store, external: &str) -> (CorralSessionId, BindingId) {
+    let (session, _) = managed_session(store, &format!("runtime-for-{external}"));
+    let node = store.node();
+    let BindingResolution::Created(binding) = store
+        .bind(
+            session,
+            key(node, BindingKind::ProviderSession, external),
+            Provenance::Discovered,
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+            instant(20),
+        )
+        .expect("bound")
+    else {
+        panic!("a new provider identity is a new binding");
+    };
+    (session, binding.id())
+}
+
+#[test]
+fn a_conflicting_identity_report_contests_the_binding_it_contradicts() {
+    let mut store = TestStore::new("contest");
+    let (session, binding) = attested_provider_session(&mut store, "sess-x");
+
+    let outcome = store
+        .contest_binding(
+            binding,
+            ExternalId::new("sess-y").expect("usable"),
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+        )
+        .expect("contested");
+
+    assert!(matches!(outcome, Contested::Recorded(_)));
+    assert_eq!(
+        outcome.binding().identity_status(),
+        IdentityStatus::Contested
+    );
+    assert_eq!(
+        kinds(&store.events_of(session).expect("readable")),
+        vec![
+            "session-created",
+            "binding-added",
+            "binding-added",
+            "binding-contested",
+        ],
+    );
+}
+
+/// Contested is monotonic. A runtime that keeps naming a disputed identity
+/// must not grow the log by one transition event per hook, and later reports
+/// of either id change nothing.
+#[test]
+fn contesting_twice_records_one_fact() {
+    let mut store = TestStore::new("contest-monotonic");
+    let (session, binding) = attested_provider_session(&mut store, "sess-x");
+    let contest = |store: &mut Store, other: &str| {
+        store
+            .contest_binding(
+                binding,
+                ExternalId::new(other).expect("usable"),
+                evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+            )
+            .expect("answered")
+    };
+
+    assert!(matches!(
+        contest(&mut store, "sess-y"),
+        Contested::Recorded(_)
+    ));
+    // The conflicting id again, the original id, and a third: none of them is
+    // a transition, and none of them clears anything.
+    for reported in ["sess-y", "sess-x", "sess-z"] {
+        let repeat = contest(&mut store, reported);
+        assert!(matches!(repeat, Contested::Already(_)), "{reported}");
+        assert_eq!(
+            repeat.binding().identity_status(),
+            IdentityStatus::Contested
+        );
+    }
+
+    let contests = kinds(&store.events_of(session).expect("readable"))
+        .into_iter()
+        .filter(|kind| *kind == "binding-contested")
+        .count();
+    assert_eq!(contests, 1);
+}
+
+/// The contest records that an identifier was reported. It creates no binding
+/// to it, and the Session keeps exactly the identity it had.
+#[test]
+fn a_contest_creates_no_binding_to_the_conflicting_identity() {
+    let mut store = TestStore::new("contest-no-binding");
+    let (session, binding) = attested_provider_session(&mut store, "sess-x");
+    let node = store.node();
+
+    store
+        .contest_binding(
+            binding,
+            ExternalId::new("sess-y").expect("usable"),
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+        )
+        .expect("contested");
+
+    let held = store.bindings_of(session).expect("readable");
+    assert_eq!(held.len(), 2, "the runtime binding and the one identity");
+    assert!(
+        held.iter()
+            .all(|binding| binding.key() != &key(node, BindingKind::ProviderSession, "sess-y")),
+        "the reported identifier is not bound to anything",
+    );
+}
+
+/// Assurance stays orthogonal: Attested-and-contested is not Heuristic, and
+/// the evidence the binding rests on is not overwritten by the contest.
+#[test]
+fn a_contest_leaves_assurance_and_evidence_alone() {
+    let mut store = TestStore::new("contest-orthogonal");
+    let (_, binding) = attested_provider_session(&mut store, "sess-x");
+    let before = store.binding(binding).expect("readable").expect("held");
+
+    store
+        .contest_binding(
+            binding,
+            ExternalId::new("sess-y").expect("usable"),
+            Evidence::new(
+                EvidenceSource::ProviderHook,
+                Assurance::Attested,
+                instant(900),
+            ),
+        )
+        .expect("contested");
+
+    let after = store.binding(binding).expect("readable").expect("held");
+    assert_eq!(after.assurance(), Assurance::Attested);
+    assert_eq!(after.evidence(), before.evidence());
+    assert_eq!(after.identity_status(), IdentityStatus::Contested);
+}
+
+/// Contested survives a restart by construction. A contest that evaporated
+/// would let the next continuation act on an identity Corral already knows is
+/// disputed — which is the whole reason it is durable rather than a flag.
+#[test]
+fn a_contest_survives_the_process_that_recorded_it() {
+    let mut store = TestStore::new("contest-durable");
+    let (_, binding) = attested_provider_session(&mut store, "sess-x");
+    store
+        .contest_binding(
+            binding,
+            ExternalId::new("sess-y").expect("usable"),
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+        )
+        .expect("contested");
+
+    store.reopen();
+
+    let read = store.binding(binding).expect("readable").expect("held");
+    assert_eq!(read.identity_status(), IdentityStatus::Contested);
+    assert_eq!(
+        read.native_resume_eligibility(),
+        corral_core::NativeResumeEligibility::IdentityContested,
+    );
+}
+
+/// Projections are a summary of the log and never more. Clearing them and
+/// replaying has to reproduce a contest exactly.
+#[test]
+fn a_rebuild_reproduces_a_contest() {
+    let mut store = TestStore::new("contest-rebuild");
+    let (_, binding) = attested_provider_session(&mut store, "sess-x");
+    store
+        .contest_binding(
+            binding,
+            ExternalId::new("sess-y").expect("usable"),
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+        )
+        .expect("contested");
+    let before = store.binding(binding).expect("readable");
+
+    store.rebuild_projections().expect("rebuilt");
+
+    assert_eq!(store.binding(binding).expect("readable"), before);
+}
+
+/// A durable, unclearable fact may not rest on a guess.
+#[test]
+fn heuristic_evidence_does_not_contest_a_binding() {
+    let mut store = TestStore::new("contest-weak");
+    let (_, binding) = attested_provider_session(&mut store, "sess-x");
+
+    let refusal = store
+        .contest_binding(
+            binding,
+            ExternalId::new("sess-y").expect("usable"),
+            evidence(EvidenceSource::Correlation, Assurance::Heuristic),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::UnsupportedContest { .. })
+    ));
+}
+
+/// The claim that can become ambiguous is which provider conversation a
+/// Session names. A managed runtime's identity is Corral-minted, and nothing a
+/// provider says can contradict it (ADR 0008 D2).
+#[test]
+fn a_managed_runtime_binding_cannot_be_contested() {
+    let mut store = TestStore::new("contest-runtime");
+    let (_, runtime) = managed_session(&mut store, "run-a");
+
+    let refusal = store
+        .contest_binding(
+            runtime,
+            ExternalId::new("sess-y").expect("usable"),
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::NotAProviderSessionBinding(named)) if named == runtime
+    ));
+}
+
+#[test]
+fn contesting_a_binding_the_log_does_not_hold_is_refused() {
+    let mut store = TestStore::new("contest-unknown");
+
+    let refusal = store
+        .contest_binding(
+            BindingId::mint(),
+            ExternalId::new("sess-y").expect("usable"),
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::UnknownBinding(_))
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Continuation: the same Session, a new Run, the same runtime binding.
+// ---------------------------------------------------------------------------
+
+fn resume(
+    store: &mut Store,
+    command: &Command,
+    session: CorralSessionId,
+    at: SystemTime,
+) -> Result<StartedManagedSession, StateError> {
+    store.resume_managed_session(
+        command,
+        session,
+        RunId::mint(),
+        OccurrenceTime::Authoritative(at),
+        at,
+    )
+}
+
+/// One Session has one managed-runtime binding and many Runs under it, so a
+/// continuation reuses the binding rather than minting a second (ADR 0008 D2).
+#[test]
+fn a_continuation_reuses_the_managed_runtime_binding() {
+    let mut store = TestStore::new("resume-binding");
+    let first = opened(&mut store, &command("cmd-1", "/work"), instant(10)).expect("created");
+    store
+        .record_run_ended(
+            first.run(),
+            RunEnd::Exited(ExitCause::Completed),
+            OccurrenceTime::Authoritative(instant(20)),
+        )
+        .expect("ended");
+
+    let again = resume(
+        &mut store,
+        &command("cmd-2", "/work"),
+        first.session(),
+        instant(30),
+    )
+    .expect("resumed");
+
+    assert_eq!(again.session(), first.session());
+    assert_ne!(again.run(), first.run());
+    assert_eq!(
+        store.bindings_of(first.session()).expect("readable").len(),
+        1
+    );
+    let runs = store.runs_of(first.session()).expect("readable");
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].runtime_binding(), runs[1].runtime_binding());
+}
+
+/// A retry replays its own receipt, and a continuation's receipt names the Run
+/// it made — not the Session's first one.
+#[test]
+fn a_repeated_continuation_replays_the_run_it_made() {
+    let mut store = TestStore::new("resume-replay");
+    let first = opened(&mut store, &command("cmd-1", "/work"), instant(10)).expect("created");
+    store
+        .record_run_ended(
+            first.run(),
+            RunEnd::Exited(ExitCause::Completed),
+            OccurrenceTime::Authoritative(instant(20)),
+        )
+        .expect("ended");
+    let again = resume(
+        &mut store,
+        &command("cmd-2", "/work"),
+        first.session(),
+        instant(30),
+    )
+    .expect("resumed");
+
+    let replayed = resume(
+        &mut store,
+        &command("cmd-2", "/work"),
+        first.session(),
+        instant(40),
+    )
+    .expect("replayed");
+
+    assert!(matches!(
+        replayed.acceptance(),
+        CommandAcceptance::Replayed(_)
+    ));
+    assert_eq!(replayed.session(), again.session());
+    assert_eq!(replayed.run(), again.run(), "the run this command made");
+    assert_eq!(store.runs_of(first.session()).expect("readable").len(), 2);
+}
+
+/// The store's own invariant, enforced where it lives: one runtime is one
+/// episode at a time.
+#[test]
+fn a_continuation_of_a_still_running_session_is_refused() {
+    let mut store = TestStore::new("resume-live");
+    let first = opened(&mut store, &command("cmd-1", "/work"), instant(10)).expect("created");
+
+    let refusal = resume(
+        &mut store,
+        &command("cmd-2", "/work"),
+        first.session(),
+        instant(20),
+    )
+    .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::RunAlreadyLive { run, .. }) if run == first.run()
+    ));
+}
+
+#[test]
+fn a_continuation_of_a_session_the_log_does_not_hold_is_refused() {
+    let mut store = TestStore::new("resume-unknown");
+
+    let refusal = resume(
+        &mut store,
+        &command("cmd-1", "/work"),
+        CorralSessionId::mint(),
+        instant(10),
+    )
+    .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::UnknownSession(_))
+    ));
+}
+
+/// A Session with no control-capable runtime binding has nothing to file
+/// another Run's association under, and minting a second here would break the
+/// at-most-one rule from the other side.
+#[test]
+fn a_continuation_needs_a_runtime_binding_to_belong_to() {
+    let mut store = TestStore::new("resume-no-binding");
+    let node = store.node();
+    let SessionResolution::Created { session, .. } = store
+        .resolve_or_create_session(
+            key(node, BindingKind::ProviderSession, "sess-only"),
+            Provenance::Discovered,
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+            instant(10),
+        )
+        .expect("resolved")
+    else {
+        panic!("a new external identity is a new Session");
+    };
+
+    let refusal = resume(
+        &mut store,
+        &command("cmd-1", "/work"),
+        session.id(),
+        instant(20),
+    )
+    .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::NoManagedRuntimeBinding(named)) if named == session.id()
     ));
 }

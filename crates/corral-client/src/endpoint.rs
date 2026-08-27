@@ -12,10 +12,15 @@ use crate::error::ActivationError;
 pub const ENDPOINT_OVERRIDE: &str = "CORRAL_ENDPOINT";
 
 /// Which endpoint this activation is about, and whether it may start a daemon.
+///
+/// The canonical rendezvous is boxed because it is a whole layout — every
+/// pathname an account's Corral root holds — beside a variant that is one
+/// path. Storing the larger inline would make every `Explicit` selection
+/// carry the layout's footprint for nothing.
 #[derive(Clone, Debug)]
 pub enum EndpointSelection {
     /// The account's canonical rendezvous. Auto-activation happens only here.
-    Canonical(RendezvousPaths),
+    Canonical(Box<RendezvousPaths>),
     /// An externally managed endpoint. Connect only.
     Explicit(PathBuf),
 }
@@ -24,7 +29,7 @@ impl EndpointSelection {
     pub fn from_environment() -> Result<Self, ActivationError> {
         match std::env::var_os(ENDPOINT_OVERRIDE) {
             Some(raw) => Ok(Self::Explicit(validate_endpoint_path(&raw)?)),
-            None => Ok(Self::Canonical(RendezvousPaths::canonical()?)),
+            None => Ok(Self::Canonical(Box::new(RendezvousPaths::canonical()?))),
         }
     }
 

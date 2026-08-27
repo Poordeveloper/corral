@@ -22,7 +22,12 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 /// between the last client closing and the process exiting still reads as
 /// "owner present" to anyone probing — which is what stops a second daemon
 /// from starting into a half-dismantled rendezvous.
-pub async fn serve(socket: &Path, policy: DaemonPolicy, state: Arc<DaemonState>) -> io::Result<()> {
+pub async fn serve(
+    socket: &Path,
+    hook_socket: &Path,
+    policy: DaemonPolicy,
+    state: Arc<DaemonState>,
+) -> io::Result<()> {
     let listener = UnixListener::bind(socket)?;
     // The run directory is already user-private; the socket says so too rather
     // than inheriting whatever the umask happened to be.
@@ -42,6 +47,26 @@ pub async fn serve(socket: &Path, policy: DaemonPolicy, state: Arc<DaemonState>)
         Arc::clone(&lifecycle),
         state.observations().watch_integrity(),
     ));
+
+    // One task interprets every delivered hook event, in the order they
+    // arrived. Serial on purpose: two drainers would let two events race to
+    // establish one Session's first provider identity (ADR 0004 D5).
+    if let Some(incoming) = state.take_deliveries() {
+        tokio::spawn(crate::hook_evidence::ingest(Arc::clone(&state), incoming));
+    }
+    // A hook endpoint that will not bind costs awareness, never the daemon: the
+    // sessions this process owns keep running, and every relay that cannot
+    // reach it fails open in milliseconds.
+    let hook_socket = hook_socket.to_path_buf();
+    let deliveries = state.deliveries();
+    let hook_shutdown = lifecycle.subscribe();
+    tokio::spawn(async move {
+        if let Err(source) =
+            crate::hook_endpoint::serve(&hook_socket, deliveries, hook_shutdown).await
+        {
+            error!(%source, endpoint = %hook_socket.display(), "the hook endpoint could not serve");
+        }
+    });
 
     info!(endpoint = %socket.display(), "corrald is serving");
 

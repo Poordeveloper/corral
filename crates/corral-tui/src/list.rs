@@ -21,6 +21,7 @@ use crate::ANSWER;
 use crate::attach::{Geometry, LocalKeys, OpenFailed, RawMode};
 use crate::daemon::{Daemon, Unanswered};
 use crate::keys::{Key, Keyboard};
+use crate::launch::requested;
 use crate::presentation::{SessionPresentation, present};
 use crate::screen::{Emphasis, Frame, FullScreen};
 
@@ -33,7 +34,7 @@ const POLL: Duration = Duration::from_secs(1);
 
 /// The whole key map, which is also the footer: a person can see everything
 /// this surface does without being told about it anywhere else.
-const FOOTER: &str = "↑/↓ move · enter open · n new · q quit";
+const FOOTER: &str = "↑/↓ move · enter open · n new · c continue · q quit";
 
 /// How long an Escape waits to find out whether it was a key or the start of
 /// a sequence.
@@ -87,9 +88,14 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
                 list.notice = open(&mut daemon, &session, &mut keys).await;
                 returned(&mut screen, &mut list)?;
             }
-            Chosen::New(argv) => {
+            Chosen::New(requested) => {
                 screen.hand_over()?;
-                list.notice = start(&mut daemon, argv, &mut keys).await;
+                list.notice = start(&mut daemon, requested, &mut keys).await;
+                returned(&mut screen, &mut list)?;
+            }
+            Chosen::Continue(session) => {
+                screen.hand_over()?;
+                list.notice = continue_into(&mut daemon, &session, &mut keys).await;
                 returned(&mut screen, &mut list)?;
             }
         }
@@ -104,7 +110,9 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
 enum Chosen {
     Quit,
     Open(String),
-    New(Vec<String>),
+    New(crate::launch::Requested),
+    /// Continue a Session as a new Run, and go straight into it.
+    Continue(String),
 }
 
 /// One row: a session the daemon reported, and what this surface may say.
@@ -318,7 +326,11 @@ async fn open(daemon: &mut Daemon<'_>, session_id: &str, keys: &mut LocalKeys) -
 }
 
 /// Start a session and go straight into it, the way `corral new` does.
-async fn start(daemon: &mut Daemon<'_>, argv: Vec<String>, keys: &mut LocalKeys) -> Option<String> {
+async fn start(
+    daemon: &mut Daemon<'_>,
+    requested: crate::launch::Requested,
+    keys: &mut LocalKeys,
+) -> Option<String> {
     let started = {
         let connection = match daemon.connection() {
             Ok(connection) => connection,
@@ -329,7 +341,9 @@ async fn start(daemon: &mut Daemon<'_>, argv: Vec<String>, keys: &mut LocalKeys)
         // a session takes; here a person is looking at a screen nobody is
         // drawing. A session the daemon goes on to create is not lost by
         // this — it arrives in the next answer, which is what a list is for.
-        match tokio::time::timeout(ANSWER, crate::launch::start_session(connection, argv)).await {
+        match tokio::time::timeout(ANSWER, crate::launch::start_session(connection, requested))
+            .await
+        {
             Ok(started) => started,
             Err(_) => {
                 daemon.forget();
@@ -343,6 +357,45 @@ async fn start(daemon: &mut Daemon<'_>, argv: Vec<String>, keys: &mut LocalKeys)
 
     match started {
         Ok(started) => open(daemon, &started.session_id, keys).await,
+        Err(error) => {
+            daemon.forget_if_unusable(&error);
+            Some(error.to_string())
+        }
+    }
+}
+
+/// Continue a session and go straight into it, the way `new` does.
+///
+/// Every precondition is the daemon's: whether the identity is one Corral
+/// still stands behind, whether the previous run's exit is established, and
+/// where it ran. A surface that pre-judged any of them would be a second owner
+/// of a rule that fails closed, and its answer would be the one a person sees.
+async fn continue_into(
+    daemon: &mut Daemon<'_>,
+    session: &str,
+    keys: &mut LocalKeys,
+) -> Option<String> {
+    let continued = {
+        let connection = match daemon.connection() {
+            Ok(connection) => connection,
+            Err(reason) => return Some(reason),
+        };
+        match tokio::time::timeout(ANSWER, crate::launch::continue_session(connection, session))
+            .await
+        {
+            Ok(continued) => continued,
+            Err(_) => {
+                daemon.forget();
+                return Some(format!(
+                    "corrald did not answer within {} seconds",
+                    ANSWER.as_secs()
+                ));
+            }
+        }
+    };
+
+    match continued {
+        Ok(continued) => open(daemon, &continued.session_id, keys).await,
         Err(error) => {
             daemon.forget_if_unusable(&error);
             Some(error.to_string())
@@ -430,6 +483,7 @@ impl SessionList {
                 None
             }
             Key::Enter => self.open_selected(),
+            Key::Typed('c') => self.continue_selected(),
             Key::Typed('n') => {
                 self.notice = None;
                 self.typing = Some(String::new());
@@ -457,6 +511,17 @@ impl SessionList {
         Some(Chosen::Open(row.session_id.clone()))
     }
 
+    /// Ask for the selected session to run again.
+    ///
+    /// Nothing is refused here. Whether a Session can be continued rests on
+    /// facts only the daemon holds, and it states them in words this surface
+    /// shows unchanged.
+    fn continue_selected(&mut self) -> Option<Chosen> {
+        let row = self.rows.get(self.selected)?;
+        self.notice = None;
+        Some(Chosen::Continue(row.session_id.clone()))
+    }
+
     fn type_command(&mut self, key: Key) -> Option<Chosen> {
         let typed = self.typing.as_mut()?;
 
@@ -478,12 +543,9 @@ impl SessionList {
                 // arguments, never a line for something to interpret. The
                 // prompt says so, because a person who typed quotes would
                 // otherwise watch them arrive as part of an argument.
-                let argv: Vec<String> = typed.split_whitespace().map(str::to_owned).collect();
+                let words: Vec<String> = typed.split_whitespace().map(str::to_owned).collect();
                 self.typing = None;
-                if argv.is_empty() {
-                    return None;
-                }
-                Some(Chosen::New(argv))
+                requested(&words).map(Chosen::New)
             }
             _ => None,
         }
@@ -541,7 +603,7 @@ impl Row {
             format!("{}  {}", short_id(&item.session_id), item.title),
             presentation.state_line(),
         ];
-        lines.extend(presentation.screen.map(str::to_owned));
+        lines.extend(presentation.beneath());
 
         Self {
             session_id: item.session_id.clone(),
@@ -628,7 +690,8 @@ fn draw(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> 
             if frame.remaining() > 1 {
                 frame.line(
                     Emphasis::Secondary,
-                    "The program and its arguments. Quoting is not interpreted. esc cancels.",
+                    "An agent — claude — or -- and a command. Quoting is not interpreted. \
+                     esc cancels.",
                 );
             }
             // "new session", not "run": Run is an internal noun, and the one

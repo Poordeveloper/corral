@@ -9,8 +9,10 @@
 //! permanent once externally released (`AGENTS.md` §Protocol).
 //!
 //! The surface is deliberately only what protocol 2 actually serves: the
-//! bootstrap handshake, `ping`, `session.list`, `session.new`, and
-//! `terminal.attach`. Nothing here describes subscriptions, live events, or
+//! bootstrap handshake, `ping`, `session.list`, `session.new`,
+//! `session.resume`, and `terminal.attach` — plus the separately versioned
+//! hook channel in `hook`, which is a second protocol rather than part of
+//! this one (ADR 0004). Nothing here describes subscriptions, live events, or
 //! durable event streams, because a message that can be decoded from the wire
 //! is wire surface whether or not anything serves it (ADR 0001, "no ghost wire
 //! surface").
@@ -19,6 +21,7 @@ mod envelope;
 mod error;
 mod framing;
 mod hello;
+pub mod hook;
 pub mod method;
 pub mod terminal;
 

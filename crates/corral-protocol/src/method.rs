@@ -15,6 +15,13 @@ pub const SESSION_LIST: &str = "session.list";
 /// Start a managed session and its first Run.
 pub const SESSION_NEW: &str = "session.new";
 
+/// Continue an existing Session's provider session as a new Run.
+///
+/// The wire and domain operation is NativeResume; the product verb a person
+/// reads is "Continue in Corral". Two vocabularies on purpose
+/// (`PRODUCT.md` §8).
+pub const SESSION_RESUME: &str = "session.resume";
+
 /// Obtain a one-time token for a terminal data channel.
 pub const TERMINAL_ATTACH: &str = "terminal.attach";
 
@@ -96,6 +103,95 @@ fn terminal_access_or_unknown<'de, D: serde::Deserializer<'de>>(
         .and_then(TerminalAccess::from_wire))
 }
 
+/// What a session's agent last reported about itself.
+///
+/// Provider-neutral by construction: no provider event name reaches a client.
+/// The daemon's provider adapter owns the translation, which is the same
+/// placement law that keeps attention derivation in `corrald`
+/// (ADR 0004 D3, layer 3).
+///
+/// A kind this build does not know decodes to `Unknown` rather than failing
+/// the item, and a client renders no claim it cannot name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentEventKind {
+    SessionStarted,
+    TurnStarted,
+    TurnEnded,
+    AwaitingInput,
+    SessionEnded,
+    /// A kind a newer daemon named and this build has no word for. The raw
+    /// spelling is kept because it is the only thing a diagnostic can report.
+    Unknown(String),
+}
+
+impl AgentEventKind {
+    /// The wire spelling, and the only one.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::SessionStarted => "session_started",
+            Self::TurnStarted => "turn_started",
+            Self::TurnEnded => "turn_ended",
+            Self::AwaitingInput => "awaiting_input",
+            Self::SessionEnded => "session_ended",
+            Self::Unknown(raw) => raw,
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "session_started" => Self::SessionStarted,
+            "turn_started" => Self::TurnStarted,
+            "turn_ended" => Self::TurnEnded,
+            "awaiting_input" => Self::AwaitingInput,
+            "session_ended" => Self::SessionEnded,
+            _ => Self::Unknown(value.to_owned()),
+        }
+    }
+}
+
+impl Serialize for AgentEventKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentEventKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_wire(&String::deserialize(deserializer)?))
+    }
+}
+
+/// The latest still-relevant fact the agent reported about itself.
+///
+/// Past tense, with provenance and age, and superseded by any newer fact. It
+/// states what was reported and never asserts the present: main states are the
+/// attention engine's to assert (ADR 0004 D7).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentEvent {
+    pub kind: AgentEventKind,
+    /// When the daemon observed it, in milliseconds since the Unix epoch.
+    ///
+    /// The daemon's clock, because the daemon is what judges freshness. A
+    /// client renders age from it and derives nothing else.
+    pub at_ms: i64,
+}
+
+/// The provider identity Corral currently stands behind for a session.
+///
+/// `external_id` is a **current claim**, not history: after an identity
+/// contest it is omitted, meaning not currently assertable — never that no id
+/// ever existed. Durable history keeps both ids and their evidence as
+/// provenance, and one field never means both (ADR 0004 D8).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProviderFacts {
+    /// Which agent product this session runs. It came from the managed launch
+    /// and is not what an identity contest makes ambiguous, so it is retained
+    /// through one.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+}
+
 /// One session in a listing.
 ///
 /// The first concrete shape the wire commits to. Every field is a promise
@@ -131,6 +227,18 @@ pub struct SessionListItem {
         skip_serializing_if = "Option::is_none"
     )]
     pub terminal_access: Option<TerminalAccess>,
+    /// The provider identity behind this session, when Corral has one.
+    ///
+    /// Absent is unknown — this daemon has learned nothing about a provider
+    /// here — and never "there is no provider". Assurance is deliberately not
+    /// carried: every provider fact in this phase rides the Attested launch
+    /// channel, and a field for it would be one a later phase has to make
+    /// mean something.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderFacts>,
+    /// The latest still-relevant fact the agent reported. Absent means none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_event: Option<AgentEvent>,
 }
 
 /// `session.list`'s result.
@@ -161,8 +269,28 @@ pub struct SessionNewParams {
     /// retry — it replays, and the session keeps the size its first execution
     /// was given.
     pub command_id: String,
-    /// The program and its arguments. Never joined into a display label.
+    /// The program and its arguments, for the raw runtime harness. Never
+    /// joined into a display label.
+    ///
+    /// Mutually exclusive with `provider`: one names a command to run, the
+    /// other names an agent Corral composes a command for, and a request
+    /// carrying both or neither says nothing the daemon may act on. Empty
+    /// where `provider` is present, which is how an older peer's request —
+    /// always a non-empty `argv` — still means exactly what it always meant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub argv: Vec<String>,
+    /// The agent product to launch, when Corral composes the command.
+    ///
+    /// The daemon builds the final argv, including the hook injection that
+    /// makes the session attested. A client never composes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Extra arguments passed through to the provider's own command line.
+    ///
+    /// Part of what the command means, so it is fingerprinted. Meaningless
+    /// without `provider`, and refused there rather than ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
     /// Where the program runs. Absent means the caller has no preference and
     /// the daemon supplies one — it is never silently replaced when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -198,6 +326,31 @@ pub struct SessionNewParams {
 /// Two identities and no state field, for exactly that reason.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionNewResult {
+    pub session_id: String,
+    pub run_id: String,
+}
+
+/// `session.resume`'s parameters.
+///
+/// The Session, not the provider session: what a caller asks for is that this
+/// Session runs again, and which provider identity that means is Corral's to
+/// resolve from what it recorded. A caller able to name the provider id would
+/// be a caller able to resume an identity Corral does not stand behind.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionResumeParams {
+    /// The client's own id for this mutation. Same law as `session.new`: one
+    /// id means one semantic command, and a retry replays rather than starting
+    /// a second Run.
+    pub command_id: String,
+    pub session_id: String,
+}
+
+/// `session.resume`'s result.
+///
+/// The same Session, and the new Run under it. Never a new Session id: a
+/// continuation is the Session it continues (ADR 0002 D1).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionResumeResult {
     pub session_id: String,
     pub run_id: String,
 }

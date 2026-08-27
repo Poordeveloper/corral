@@ -11,10 +11,23 @@ publish = false
 name = "corral"
 path = "src/main.rs"
 
+# The sanctioned mock-provider harness. Behind `test-support` so it is never
+# built into a normal install: it is a stand-in for a coding agent, and the
+# end-to-end suite reaches it through `CARGO_BIN_EXE_corral-mock-provider`
+# exactly as it reaches the real binaries.
+[[bin]]
+name = "corral-mock-provider"
+path = "tests/support/mock_provider.rs"
+required-features = ["test-support"]
+
 [dependencies]
 clap = { workspace = true }
 corral-client = { workspace = true }
 corral-protocol = { workspace = true }
+# The hook relay resolves the endpoint the same way every other Corral process
+# does. A shim that carried a socket path from an injected file would point a
+# later daemon at a pathname an earlier one chose (ADR 0001 D1).
+corral-rendezvous = { workspace = true }
 # The terminal surfaces this binary drives: the session list, and the
 # attachment `attach` and `new` hand the terminal over to.
 corral-tui = { workspace = true }
@@ -38,7 +51,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 
 [features]
-test-support = ["corral-client/test-support"]
+test-support = ["corral-client/test-support", "corral-rendezvous/test-support"]
 
 
 [lints]

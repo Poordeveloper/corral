@@ -17,11 +17,12 @@ use corral_core::{
 };
 use serde_json::{Value, json};
 
+use crate::encoding::StoredOutcome;
 use crate::encoding::{
     assurance_from_token, assurance_token, binding_kind_from_token, binding_kind_token,
-    command_outcome_is, command_outcome_token, evidence_source_from_token, evidence_source_token,
-    from_millis, millis, provenance_from_token, provenance_token, run_end_from_token,
-    run_end_token, unreadable,
+    command_outcome_from_token, command_outcome_token, evidence_source_from_token,
+    evidence_source_token, from_millis, millis, provenance_from_token, provenance_token,
+    run_end_from_token, run_end_token, unreadable,
 };
 use crate::error::FatalState;
 
@@ -42,6 +43,22 @@ pub enum SessionEvent {
     BindingConfirmed {
         session: CorralSessionId,
         binding: BindingId,
+        evidence: Evidence,
+    },
+    /// A previously accepted provider binding received contradictory
+    /// provider-identity evidence through the managed launch channel
+    /// (ADR 0004 D8).
+    ///
+    /// `conflicting_external_id` records that this identifier was reported and
+    /// nothing else. It creates no binding, merges no Sessions, replaces no
+    /// external id, and does not assert that the conflicting id is the correct
+    /// one. The fact is durable rather than a projection flag because a
+    /// contest that evaporated on restart would let the next `session.resume`
+    /// silently act on an identity Corral already knows is disputed.
+    BindingContested {
+        session: CorralSessionId,
+        binding: BindingId,
+        conflicting_external_id: ExternalId,
         evidence: Evidence,
     },
     /// The process episode began.
@@ -100,15 +117,14 @@ impl SessionEvent {
         match self {
             Self::SessionCreated { session, .. }
             | Self::BindingConfirmed { session, .. }
+            | Self::BindingContested { session, .. }
             | Self::RunStarted { session, .. }
             | Self::RunEnded { session, .. }
             | Self::RunAttached { session, .. }
             | Self::RunDetached { session, .. } => *session,
             Self::BindingAdded(binding) => binding.session(),
             Self::SessionForkedFrom(lineage) => lineage.child(),
-            Self::CommandAccepted { outcome, .. } => match outcome {
-                CommandOutcome::SessionCreated(session) => *session,
-            },
+            Self::CommandAccepted { outcome, .. } => outcome.session(),
         }
     }
 
@@ -119,6 +135,7 @@ impl SessionEvent {
             Self::SessionCreated { .. } => "session-created",
             Self::BindingAdded(_) => "binding-added",
             Self::BindingConfirmed { .. } => "binding-confirmed",
+            Self::BindingContested { .. } => "binding-contested",
             Self::RunStarted { .. } => "run-started",
             Self::RunEnded { .. } => "run-ended",
             Self::RunAttached { .. } => "run-attached",
@@ -156,6 +173,18 @@ pub(crate) fn encode(event: &SessionEvent) -> Result<Value, FatalState> {
             "evidence_source": evidence_source_token(evidence.source()),
             "observed_at_ms": millis(evidence.observed_at())?,
         }),
+        SessionEvent::BindingContested {
+            binding,
+            conflicting_external_id,
+            evidence,
+            ..
+        } => json!({
+            "binding_id": binding.to_string(),
+            "conflicting_external_id": conflicting_external_id.as_str(),
+            "assurance": assurance_token(evidence.assurance()),
+            "evidence_source": evidence_source_token(evidence.source()),
+            "observed_at_ms": millis(evidence.observed_at())?,
+        }),
         SessionEvent::RunStarted {
             run,
             runtime_binding,
@@ -188,16 +217,19 @@ pub(crate) fn encode(event: &SessionEvent) -> Result<Value, FatalState> {
             fingerprint,
             outcome,
             accepted_at,
-        } => {
-            let CommandOutcome::SessionCreated(created) = outcome;
-            json!({
-                "command_id": command.as_str(),
-                "fingerprint": fingerprint.as_str(),
-                "outcome_kind": command_outcome_token(*outcome),
-                "outcome_target": created.to_string(),
-                "accepted_at_ms": millis(*accepted_at)?,
-            })
-        }
+        } => json!({
+            "command_id": command.as_str(),
+            "fingerprint": fingerprint.as_str(),
+            "outcome_kind": command_outcome_token(*outcome),
+            "outcome_target": outcome.session().to_string(),
+            // Written only by the kind that has one. A null here is that kind
+            // saying so, never a Run the encoder dropped.
+            "outcome_run": match outcome {
+                CommandOutcome::SessionCreated(_) => None,
+                CommandOutcome::RunStarted { run, .. } => Some(run.to_string()),
+            },
+            "accepted_at_ms": millis(*accepted_at)?,
+        }),
     };
     Ok(payload)
 }
@@ -247,6 +279,15 @@ pub(crate) fn decode(
             binding: identity(payload, "binding_id")?,
             evidence: evidence(payload)?,
         },
+        "binding-contested" => SessionEvent::BindingContested {
+            session,
+            binding: identity(payload, "binding_id")?,
+            conflicting_external_id: ExternalId::new(text(payload, "conflicting_external_id")?)
+                .map_err(|error| FatalState::Unreadable {
+                    detail: error.to_string(),
+                })?,
+            evidence: evidence(payload)?,
+        },
         "run-started" => SessionEvent::RunStarted {
             session,
             run: identity(payload, "run_id")?,
@@ -280,7 +321,14 @@ pub(crate) fn decode(
             })?,
         ),
         "command-accepted" => {
-            command_outcome_is(text(payload, "outcome_kind")?)?;
+            let session = identity(payload, "outcome_target")?;
+            let outcome = match command_outcome_from_token(text(payload, "outcome_kind")?)? {
+                StoredOutcome::SessionCreated => CommandOutcome::SessionCreated(session),
+                StoredOutcome::RunStarted => CommandOutcome::RunStarted {
+                    session,
+                    run: identity(payload, "outcome_run")?,
+                },
+            };
             SessionEvent::CommandAccepted {
                 command: CommandId::new(text(payload, "command_id")?).map_err(|error| {
                     FatalState::Unreadable {
@@ -288,7 +336,7 @@ pub(crate) fn decode(
                     }
                 })?,
                 fingerprint: CommandFingerprint::from_canonical(text(payload, "fingerprint")?),
-                outcome: CommandOutcome::SessionCreated(identity(payload, "outcome_target")?),
+                outcome,
                 accepted_at: from_millis(integer(payload, "accepted_at_ms")?),
             }
         }

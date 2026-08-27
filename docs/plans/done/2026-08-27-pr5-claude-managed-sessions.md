@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 class: C
 writes: [corrald, corral, corral-client, corral-protocol, corral-core, corral-state, corral-rendezvous, corral-tui]
 reads: [docs/adr/0004-hook-delivery.md, docs/decisions/2026-08-27-pr5-hook-delivery-grill.md, docs/adr/0002-resume-lineage.md, docs/adr/0006-provider-hook-integration-policy.md, docs/adr/0007-managed-session-lifetime.md, docs/adr/0008-managed-runtime-binding-identity.md, docs/references/2026-08-22-s2-session-identity-verification.md, ARCHITECTURE.md, PRODUCT.md, ROADMAP.md]

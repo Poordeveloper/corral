@@ -137,6 +137,7 @@ pub struct Binding {
     key: BindingKey,
     provenance: Provenance,
     evidence: Evidence,
+    identity_status: IdentityStatus,
     created_at: SystemTime,
 }
 
@@ -156,6 +157,11 @@ impl Binding {
             key,
             provenance,
             evidence,
+            // A binding is created by evidence Corral accepted, so it starts
+            // out as the identity Corral stands behind. Contest is a later
+            // fact about it and never a shape it can be born in
+            // (ADR 0004 D8).
+            identity_status: IdentityStatus::Confirmed,
             created_at,
         }
     }
@@ -210,6 +216,27 @@ impl Binding {
         self
     }
 
+    /// Whether Corral still stands behind the external identity this edge
+    /// names.
+    #[must_use]
+    pub fn identity_status(&self) -> IdentityStatus {
+        self.identity_status
+    }
+
+    /// The same edge, with its identity claim contested.
+    ///
+    /// Separate from evidence because a contest is not weaker evidence about
+    /// the same claim: it is positive evidence that two incompatible identity
+    /// claims were observed, and an assurance downgrade would misdescribe it
+    /// (ADR 0004 D8). Monotonic — nothing here returns a contested edge to
+    /// `Confirmed`, and clearing one needs a correction mechanism no accepted
+    /// decision yet describes.
+    #[must_use]
+    pub fn contested(mut self) -> Self {
+        self.identity_status = IdentityStatus::Contested;
+        self
+    }
+
     /// Whether control may be driven through this binding.
     ///
     /// This is the only place the question is answered. There is deliberately
@@ -223,6 +250,31 @@ impl Binding {
             ControlEligibility::Eligible
         } else {
             ControlEligibility::AssuranceTooWeak
+        }
+    }
+
+    /// Whether this binding may authorize continuing the provider's own
+    /// session — the authority `session.resume` derives from an identity
+    /// claim, and nothing else.
+    ///
+    /// Deliberately not folded into `control_eligibility`. That answer is
+    /// generic binding-control eligibility, and an `IdentityContested` arm
+    /// there would invite `!= Eligible → disable everything` — disabling Open
+    /// and attach, which ride the Deterministic runtime binding and are
+    /// untouched by a contest (ADR 0004 D8; founder emphasis, R2 Q2).
+    ///
+    /// The runtime preconditions a resume also has — no live Run, and a
+    /// previous Run whose exit is established — are not facts a binding holds,
+    /// so they are answered where they are known and never here.
+    #[must_use]
+    pub fn native_resume_eligibility(&self) -> NativeResumeEligibility {
+        match (self.identity_status, self.assurance().permits_control()) {
+            // Checked before assurance because a contested binding keeps the
+            // assurance it earned: Attested-and-contested is not Heuristic,
+            // and reporting it as too weak would name the wrong repair.
+            (IdentityStatus::Contested, _) => NativeResumeEligibility::IdentityContested,
+            (IdentityStatus::Confirmed, false) => NativeResumeEligibility::AssuranceTooWeak,
+            (IdentityStatus::Confirmed, true) => NativeResumeEligibility::Eligible,
         }
     }
 
@@ -254,12 +306,47 @@ impl Binding {
 }
 
 /// Whether control may be driven through a binding.
+///
+/// Generic binding-control eligibility, and it stays generic: the operations
+/// that depend on a *provider identity claim* ask
+/// `Binding::native_resume_eligibility` instead (ADR 0004 D8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlEligibility {
     Eligible,
     /// The association is not sure enough to act on. Heuristic evidence never
     /// enables control, however plainly the runtime itself is visible.
     AssuranceTooWeak,
+}
+
+/// Whether Corral still stands behind the external identity a binding names.
+///
+/// Orthogonal to assurance, and that orthogonality is the point: an Attested
+/// binding whose identity is contested is still Attested, because what became
+/// unsafe is the claim about *which* external identity this is, not how the
+/// association was learned (ADR 0004 D8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum IdentityStatus {
+    Confirmed,
+    /// Contradictory provider-identity evidence has been observed. Monotonic
+    /// in this phase: no accepted fact returns a binding to `Confirmed`.
+    Contested,
+}
+
+/// Whether the provider's own session may be continued through this binding.
+///
+/// Operation-specific by construction. It answers one question — may a
+/// provider external id be placed into a native resume — and a consumer that
+/// wanted a different question answered has to ask a different one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeResumeEligibility {
+    Eligible,
+    /// The association is not sure enough to continue the provider's session
+    /// under it.
+    AssuranceTooWeak,
+    /// Two incompatible identity claims have been observed, so Corral does not
+    /// know which provider session this names. No external id reaches a resume
+    /// argv from here.
+    IdentityContested,
 }
 
 impl fmt::Display for BindingKind {

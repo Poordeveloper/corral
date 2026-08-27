@@ -10,12 +10,15 @@
 //! store's question; what this owns is that every fact reaches it, and that a
 //! fact which does not is loud.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use corral_core::RunEnd;
 use corral_state::{Durability, Refusal, StateError, Store};
 use tracing::{error, warn};
 
+use crate::provider::InjectedSettings;
 use crate::runtime::{ObservedRuns, RunOccurrence, Weight};
 
 /// How many times one fact is offered to a store that is momentarily held.
@@ -51,12 +54,26 @@ pub const LONGEST_RECORD: Duration =
     Duration::from_millis(ATTEMPTS as u64 * (STORE_WAIT_MILLIS + BETWEEN_ATTEMPTS_MILLIS));
 
 /// Record every run occurrence this daemon observes, on a thread of its own.
-pub fn record_observed_runs(store: Arc<Mutex<Store>>, observed: ObservedRuns) {
+///
+/// It also destroys the per-launch provider configuration of a Run whose exit
+/// it just established. That belongs here rather than beside the endpoint
+/// because this is the one place that learns an exit *and* what kind of end it
+/// was: the file is removed on an established exit and retained on an
+/// unverifiable one, and no other party has both facts (ADR 0004 D6).
+pub fn record_observed_runs(store: Arc<Mutex<Store>>, observed: ObservedRuns, launch_dir: PathBuf) {
     std::thread::spawn(move || {
         // Ends when the last runtime that could report is gone, which for this
         // daemon means the process is ending.
         while let Some(observation) = observed.next() {
             let occurrence = observation.occurrence();
+            if let RunOccurrence::Exited {
+                run,
+                end: RunEnd::Exited(_),
+                ..
+            } = occurrence
+            {
+                InjectedSettings::remove_for(&launch_dir, run);
+            }
             // Only a fact the daemon must be able to account for ends the
             // accounting. An attachment the store would not take costs a line
             // of history and nothing else: attachment activity is advisory,

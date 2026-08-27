@@ -11,6 +11,7 @@
 //! ADR 0002 fixed, and PR3 adds no new ones.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
@@ -208,6 +209,14 @@ pub struct SessionHandle {
     session: CorralSessionId,
     run: RunId,
     title: String,
+    /// Where this session's runtime was launched.
+    ///
+    /// Held because a continuation has to run in the same place: a provider
+    /// resolves which of its own sessions an id names by the directory it was
+    /// started in, and resuming somewhere else would ask for a conversation
+    /// that is not there. It is live state — a daemon that did not launch a
+    /// session does not know it, and says so rather than substituting one.
+    working_directory: PathBuf,
     asks: SyncSender<Ask>,
     started_at: Instant,
     /// Weak proof that the screen thread is still there.
@@ -254,6 +263,10 @@ impl SessionHandle {
 
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    pub fn working_directory(&self) -> &Path {
+        &self.working_directory
     }
 
     pub fn started_at(&self) -> Instant {
@@ -519,6 +532,7 @@ pub struct PendingSession {
     began: SystemTime,
     geometry: PtyGeometry,
     title: String,
+    working_directory: PathBuf,
 }
 
 /// A spawned runtime's own parts, separated so the destructor can take them.
@@ -574,6 +588,7 @@ pub fn spawn_session(
         began,
         geometry,
         title: request.display_title(),
+        working_directory: request.working_directory().to_path_buf(),
     })
 }
 
@@ -623,6 +638,7 @@ impl PendingSession {
         } = runtime;
         let geometry = self.geometry;
         let title = std::mem::take(&mut self.title);
+        let working_directory = std::mem::take(&mut self.working_directory);
 
         // Bounded so a client that floods input cannot make the daemon
         // allocate without limit; generous because the screen thread drains it
@@ -679,6 +695,7 @@ impl PendingSession {
             session,
             run,
             title,
+            working_directory,
             asks,
             started_at: Instant::now(),
             alive: weak,

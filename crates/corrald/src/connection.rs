@@ -1,9 +1,14 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use corral_core::{Command, CommandFingerprint, CommandId, CommandKind, OccurrenceTime};
+use corral_core::{
+    Command, CommandFingerprint, CommandId, CommandKind, CorralSessionId, NativeResumeEligibility,
+    OccurrenceTime, RunEnd, RunId,
+};
 use corral_protocol::method::{
-    self, PingResult, SessionListItem, SessionListResult, SessionNewParams, SessionNewResult,
+    self, AgentEvent, PingResult, ProviderFacts, SessionListItem, SessionListResult,
+    SessionNewParams, SessionNewResult, SessionResumeParams, SessionResumeResult,
     TerminalAttachParams, TerminalAttachResult,
 };
 use corral_protocol::{
@@ -18,6 +23,10 @@ use tracing::{debug, error, warn};
 use crate::in_flight::{self, Claim, Concluded};
 use crate::lifecycle::{EstablishedGuard, Lifecycle, ShutdownReason};
 use crate::policy::DaemonPolicy;
+use crate::provider::{
+    self, InjectedSettings, InjectionFailed, KnownProvider, LaunchScope, LaunchToken,
+    ReportedSession,
+};
 use crate::runtime::{
     AttachGrant, AttachToken, LaunchRequest, ManagedSession, PendingSession, PtyGeometry,
     TerminalAccess,
@@ -382,6 +391,17 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             )),
             Err(error) => Dispatch::FailClosed(error),
         },
+        // The same gate `session.new` takes, for the same reason: a
+        // continuation is a mutation, and a mutation must not be admitted
+        // under the condition a read is refused.
+        method::SESSION_RESUME => match state.vouch().await {
+            Ok(Vouched::Yes) => session_resume(request, state).await,
+            Ok(Vouched::NotNow) => Dispatch::Reply(Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::Busy, "the registry is held by another writer"),
+            )),
+            Err(error) => Dispatch::FailClosed(error),
+        },
         method::TERMINAL_ATTACH => match state.vouch().await {
             Ok(Vouched::Yes) => Dispatch::Reply(terminal_attach(request, state)),
             Ok(Vouched::NotNow) => Dispatch::Reply(Frame::error(
@@ -407,14 +427,31 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
 
 /// The sessions this daemon runs, in the wire's first concrete session shape.
 fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
-    let Some(described) = state.with_runtime(|runtime| runtime.sessions.describe()) else {
+    // Both under one lock. The runtime's own view of a session and what its
+    // provider has reported are two halves of one row, and reading them
+    // separately would let a row claim an identity for a session the other
+    // half no longer holds.
+    let Some(described) = state.with_runtime(|runtime| {
+        runtime
+            .sessions
+            .describe()
+            .into_iter()
+            .map(|session| {
+                let reported = runtime.reported.get(session.session).cloned();
+                (session, reported)
+            })
+            .collect::<Vec<_>>()
+    }) else {
         return Frame::error(
             id,
             ProtocolError::new(ErrorCode::Busy, "the runtime could not be consulted"),
         );
     };
 
-    let sessions: Vec<serde_json::Value> = described.iter().map(encode_session).collect();
+    let sessions: Vec<serde_json::Value> = described
+        .iter()
+        .map(|(session, reported)| encode_session(session, reported.as_ref()))
+        .collect();
     match serde_json::to_value(SessionListResult { sessions }) {
         Ok(value) => Frame::result(id, value),
         Err(source) => Frame::error(
@@ -424,7 +461,10 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
     }
 }
 
-fn encode_session(session: &ManagedSession) -> serde_json::Value {
+fn encode_session(
+    session: &ManagedSession,
+    reported: Option<&ReportedSession>,
+) -> serde_json::Value {
     serde_json::to_value(SessionListItem {
         session_id: session.session.to_string(),
         title: session.title.clone(),
@@ -433,8 +473,42 @@ fn encode_session(session: &ManagedSession) -> serde_json::Value {
         // runs, and absence on the wire means unknown rather than a value it
         // declined to send.
         terminal_access: Some(session.terminal_access.as_wire()),
+        // Absent for a raw command, which has no provider — and absent again
+        // after a restart, when live evidence is gone. Both mean unknown, and
+        // neither means "there is no provider here".
+        provider: reported.map(|reported| ProviderFacts {
+            name: reported.provider.as_str().to_owned(),
+            // A current claim: withdrawn while contested, and never a
+            // conflicting id promoted into a replacement (ADR 0004 D8).
+            external_id: reported
+                .external_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned()),
+        }),
+        agent_event: reported
+            .and_then(|reported| reported.latest)
+            .and_then(|fact| {
+                Some(AgentEvent {
+                    kind: fact.kind.as_wire(),
+                    at_ms: unix_millis(fact.observed_at)?,
+                })
+            }),
     })
     .unwrap_or_else(|_| serde_json::json!({}))
+}
+
+/// An instant as the wire carries it, or nothing.
+///
+/// A clock far enough out to overflow this cannot describe an age either, and
+/// a row that omits the fact says unknown — which is true — where a saturated
+/// number would say something false with confidence.
+fn unix_millis(at: SystemTime) -> Option<i64> {
+    match at.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(since) => i64::try_from(since.as_millis()).ok(),
+        Err(before) => i64::try_from(before.duration().as_millis())
+            .ok()
+            .map(|millis| -millis),
+    }
 }
 
 /// Spawn on the blocking pool.
@@ -457,8 +531,26 @@ async fn spawn_off_the_reactor(
 /// What one `session.new` needs, once the wire has been read.
 struct NewSession {
     command: Command,
-    launch: LaunchRequest,
+    plan: LaunchPlan,
     geometry: PtyGeometry,
+}
+
+/// What the daemon is being asked to start.
+///
+/// The provider form cannot be turned into a `LaunchRequest` at read time: its
+/// argv names a Corral-owned file that does not exist yet, and that file's
+/// content names a token that has to resolve to the Session and Run this
+/// request is about to mint.
+enum LaunchPlan {
+    /// The raw runtime harness: a command the caller composed.
+    Raw(LaunchRequest),
+    /// An agent Corral composes the command for, including the hook injection
+    /// that makes the session attested.
+    Provider {
+        provider: KnownProvider,
+        args: Vec<String>,
+        working_directory: PathBuf,
+    },
 }
 
 /// Start a managed session and its first Run, exactly once per command id.
@@ -484,7 +576,7 @@ async fn session_new(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
         // exists to prevent.
         Claim::Waiting(concluded) => Dispatch::Reply(
             match in_flight::joined(concluded, in_flight::JOIN_DEADLINE).await {
-                Some(concluded) => answer(id, concluded),
+                Some(concluded) => answer(id, concluded, Produced::NewSession),
                 // Its owner ended without publishing, or is still going after
                 // longer than one may take. Either way nothing this request
                 // can report was completed, and the command may be sent again
@@ -503,7 +595,7 @@ async fn session_new(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
                 // Published before the claim is released with `owner`, so a
                 // waiter cannot slip between the two and start a second run.
                 owner.publish(concluded.clone());
-                Dispatch::Reply(answer(id, concluded))
+                Dispatch::Reply(answer(id, concluded, Produced::NewSession))
             }
             // Nothing is published: the store can no longer vouch for durable
             // truth, and the daemon stops serving rather than answering from
@@ -527,10 +619,6 @@ fn read_session_new(request: &Request) -> Result<NewSession, ProtocolError> {
     let command_id = CommandId::new(params.command_id.clone())
         .map_err(|refusal| invalid(refusal.to_string()))?;
 
-    let Some((program, arguments)) = params.argv.split_first() else {
-        return Err(invalid("session.new needs a command".to_owned()));
-    };
-
     // An absent working directory is the caller having no preference, so the
     // daemon supplies one. A directory the caller named and the daemon cannot
     // use is refused rather than quietly replaced.
@@ -540,12 +628,48 @@ fn read_session_new(request: &Request) -> Result<NewSession, ProtocolError> {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
 
-    let launch = LaunchRequest::new(
-        program,
-        arguments.iter().map(std::ffi::OsString::from),
-        &working_directory,
-    )
-    .map_err(|refusal| invalid(refusal.to_string()))?;
+    // Exactly one of the two. A request carrying both is two commands, and one
+    // carrying neither is none: guessing which was meant is how a provider name
+    // and a program name stop being distinct namespaces (grill Q6).
+    let plan = match (&params.provider, params.argv.split_first()) {
+        (Some(_), Some(_)) => {
+            return Err(invalid(
+                "session.new takes a provider or a command, never both".to_owned(),
+            ));
+        }
+        (None, None) => {
+            return Err(invalid(
+                "session.new needs a provider or a command".to_owned(),
+            ));
+        }
+        (Some(name), None) => {
+            let provider =
+                KnownProvider::from_name(name).ok_or_else(|| invalid(unknown_provider(name)))?;
+            LaunchPlan::Provider {
+                provider,
+                args: params.args.clone(),
+                working_directory,
+            }
+        }
+        (None, Some((program, arguments))) => {
+            // Meaningless without a provider, and refused rather than ignored:
+            // silently dropping them would run a command the caller did not
+            // ask for.
+            if !params.args.is_empty() {
+                return Err(invalid(
+                    "session.new takes args only with a provider".to_owned(),
+                ));
+            }
+            LaunchPlan::Raw(
+                LaunchRequest::new(
+                    program,
+                    arguments.iter().map(std::ffi::OsString::from),
+                    &working_directory,
+                )
+                .map_err(|refusal| invalid(refusal.to_string()))?,
+            )
+        }
+    };
 
     // A size from the wire is a request, not a fact: zero rows builds a page
     // list the emulator only null-checks in debug, and an unbounded one asks
@@ -555,9 +679,22 @@ fn read_session_new(request: &Request) -> Result<NewSession, ProtocolError> {
 
     Ok(NewSession {
         command: Command::new(command_id, fingerprint(&params)),
-        launch,
+        plan,
         geometry,
     })
+}
+
+/// Name the fix rather than guess what was meant.
+fn unknown_provider(name: &str) -> String {
+    let known: Vec<&str> = KnownProvider::ALL
+        .iter()
+        .map(|provider| provider.as_str())
+        .collect();
+    format!(
+        "{name} is not a provider this daemon integrates ({}). For a raw command, \
+         send it as argv instead.",
+        known.join(", "),
+    )
 }
 
 /// The semantic identity of one `session.new`.
@@ -583,6 +720,16 @@ fn fingerprint(params: &SessionNewParams) -> CommandFingerprint {
     // impersonate a different argument list.
     for (position, argument) in params.argv.iter().enumerate() {
         fingerprint = fingerprint.input(format!("argv.{position}"), argument);
+    }
+    // The provider and its arguments are what the command means just as much as
+    // an argv is: the same id carrying a different provider is a different
+    // command, and a retry that changed them must conflict rather than replay.
+    // Named apart from `argv` so no argument can impersonate a provider arg.
+    if let Some(provider) = &params.provider {
+        fingerprint = fingerprint.input("provider", provider);
+    }
+    for (position, argument) in params.args.iter().enumerate() {
+        fingerprint = fingerprint.input(format!("args.{position}"), argument);
     }
     // Absence is itself an input — "the daemon chooses" is a different command
     // from "run it here" — and an absent name is how the builder records it.
@@ -611,7 +758,7 @@ async fn execute_session_new(
 ) -> Result<Concluded, corral_state::StateError> {
     let NewSession {
         command,
-        launch,
+        plan,
         geometry,
     } = new;
 
@@ -633,14 +780,48 @@ async fn execute_session_new(
     // needs an id to name, and a process that exits instantly is already being
     // reaped while a store call would still be returning one. Minting an id is
     // not asserting that a runtime exists — a spawn that fails simply leaves
-    // this unused (grill Q3).
+    // these unused (grill Q3). The Session id is minted here for the same
+    // reason plus one more: a provider launch has to embed a token naming it
+    // into the process it is about to create.
+    let session = CorralSessionId::mint();
     let run = corral_core::RunId::mint();
+
+    let (launch, injected) = match plan {
+        LaunchPlan::Raw(launch) => (launch, None),
+        LaunchPlan::Provider {
+            provider,
+            args,
+            working_directory,
+        } => {
+            match compose_provider_launch(
+                state,
+                session,
+                run,
+                provider,
+                &working_directory,
+                |settings| provider::launch_argv(provider, settings, &args),
+            ) {
+                Ok(composed) => composed,
+                // Nothing has been spawned, so nothing is left running. A managed
+                // session that could not be given its hook injection is refused
+                // rather than started unattested: a session that looks managed and
+                // can never report is worse than one that did not start.
+                Err(message) => {
+                    return Ok(Concluded::Refused {
+                        code: ErrorCode::InvalidParams,
+                        message,
+                    });
+                }
+            }
+        }
+    };
 
     let pending = match spawn_off_the_reactor(launch, geometry).await {
         Ok(pending) => pending,
         // The command never ran, so no Run exists to report. Saying otherwise
         // would record a runtime occurrence that never happened.
         Err(error) => {
+            abandon_injection(state, injected, run);
             return Ok(Concluded::Refused {
                 code: ErrorCode::InvalidParams,
                 message: error,
@@ -663,6 +844,7 @@ async fn execute_session_new(
     let started = match state
         .start_managed_session(
             command.clone(),
+            session,
             run,
             OccurrenceTime::Authoritative(began),
             SystemTime::now(),
@@ -676,6 +858,7 @@ async fn execute_session_new(
             // and no ending is reported: with no durable start there is no Run
             // to end (grill Q9).
             abandon(pending);
+            abandon_injection(state, injected, run);
             return refused_by_store(&command, error);
         }
     };
@@ -686,13 +869,13 @@ async fn execute_session_new(
     // leave a second process running.
     if !started.executed() {
         abandon(pending);
+        abandon_injection(state, injected, run);
         return Ok(Concluded::Accepted {
             session: started.session(),
             run: started.run(),
         });
     }
 
-    let session = started.session();
     let handle = pending.serve(session, run, state.observations().clone());
 
     // The child is already running by now, so the handle must not simply be
@@ -723,6 +906,406 @@ async fn execute_session_new(
     }
 
     Ok(Concluded::Accepted { session, run })
+}
+
+/// What one `session.resume` needs, once the wire has been read.
+struct ResumeSession {
+    command: Command,
+    session: CorralSessionId,
+}
+
+/// Continue an existing Session's provider session as a new Run, exactly once
+/// per command id.
+///
+/// The same claim-then-consult order `session.new` uses, for the same reason:
+/// two concurrent retries that both read "no receipt" would both start a Run.
+async fn session_resume(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
+    let id = request.id;
+    let resume = match read_session_resume(request) {
+        Ok(resume) => resume,
+        Err(error) => return Dispatch::Reply(Frame::error(id, error)),
+    };
+
+    match state.commands().claim(&resume.command) {
+        Claim::Conflict => Dispatch::Reply(Frame::error(id, conflict(&resume.command))),
+        Claim::Waiting(concluded) => Dispatch::Reply(
+            match in_flight::joined(concluded, in_flight::JOIN_DEADLINE).await {
+                Some(concluded) => answer(id, concluded, Produced::ResumedSession),
+                None => Frame::error(
+                    id,
+                    ProtocolError::new(
+                        ErrorCode::Busy,
+                        "this command's first execution did not complete; send it again",
+                    ),
+                ),
+            },
+        ),
+        Claim::Owner(owner) => match execute_session_resume(resume, state).await {
+            Ok(concluded) => {
+                owner.publish(concluded.clone());
+                Dispatch::Reply(answer(id, concluded, Produced::ResumedSession))
+            }
+            Err(error) => Dispatch::FailClosed(error),
+        },
+    }
+}
+
+fn read_session_resume(request: &Request) -> Result<ResumeSession, ProtocolError> {
+    let invalid = |detail: String| ProtocolError::new(ErrorCode::InvalidParams, detail);
+
+    let params: SessionResumeParams = match request.params.clone() {
+        Some(params) => {
+            serde_json::from_value(params).map_err(|source| invalid(source.to_string()))?
+        }
+        None => return Err(invalid("session.resume needs a session".to_owned())),
+    };
+    let command_id = CommandId::new(params.command_id.clone())
+        .map_err(|refusal| invalid(refusal.to_string()))?;
+    let session: CorralSessionId = params
+        .session_id
+        .parse()
+        .map_err(|error: corral_core::MalformedId| invalid(error.to_string()))?;
+
+    let kind = CommandKind::new(method::SESSION_RESUME)
+        .unwrap_or_else(|_| unreachable!("{} is a usable command kind", method::SESSION_RESUME));
+    // The Session is the whole of what this command means. There is no argv to
+    // fingerprint — Corral composes it from what it recorded — so a retry
+    // naming a different Session is a different command, and that is the only
+    // way this one can differ.
+    let fingerprint = CommandFingerprint::builder(kind)
+        .input("session", session.to_string())
+        .build();
+
+    Ok(ResumeSession {
+        command: Command::new(command_id, fingerprint),
+        session,
+    })
+}
+
+/// Why a Session cannot be continued right now.
+///
+/// Every arm is a fact stated to the person, and none of them has an override.
+/// M1 offers no `--force`, no "I know it is dead", and no pid heuristic: a
+/// second native resume of a provider session that may still be live is two
+/// executions driving one conversation (grill Q7).
+enum ResumeRefused {
+    NotThisDaemon,
+    IdentityUnknown,
+    Eligibility(NativeResumeEligibility),
+    UnknownProvider(String),
+    RunStillLive,
+    EndUnverifiable,
+    NoPreviousRun,
+}
+
+/// Decide whether a continuation may happen, before anything is spawned.
+///
+/// Identity first, then the runtime preconditions. The order is the one the
+/// design states, and it matters: a contested Session that has also just been
+/// restarted must be refused for the reason that will not go away, not for the
+/// one that would.
+async fn resume_plan(
+    state: &Arc<DaemonState>,
+    session: CorralSessionId,
+) -> Result<Result<ResumePlan, ResumeRefused>, corral_state::StateError> {
+    let Some(binding) = state.provider_session_binding(session).await? else {
+        return Ok(Err(ResumeRefused::IdentityUnknown));
+    };
+    match binding.native_resume_eligibility() {
+        NativeResumeEligibility::Eligible => {}
+        refused => return Ok(Err(ResumeRefused::Eligibility(refused))),
+    }
+    let Some(provider) = KnownProvider::from_name(binding.key().provider().as_str()) else {
+        return Ok(Err(ResumeRefused::UnknownProvider(
+            binding.key().provider().as_str().to_owned(),
+        )));
+    };
+
+    let runs = state.runs_of(session).await?;
+    if runs.iter().any(|run| run.end().is_none()) {
+        return Ok(Err(ResumeRefused::RunStillLive));
+    }
+    match runs.last().map(corral_core::Run::end) {
+        None => return Ok(Err(ResumeRefused::NoPreviousRun)),
+        Some(Some(RunEnd::Exited(_))) => {}
+        // Unreachable given the live check above, and stated rather than
+        // wildcarded so a new end state has to be decided rather than
+        // defaulted.
+        Some(None) => return Ok(Err(ResumeRefused::RunStillLive)),
+        Some(Some(RunEnd::Unverifiable)) => return Ok(Err(ResumeRefused::EndUnverifiable)),
+    }
+
+    // Live state, and the last precondition on purpose: a daemon that did not
+    // launch this Session does not know where it ran, and a provider resolves
+    // which of its own sessions an id names by the directory it was started
+    // in. Substituting one would ask for a conversation that is not there.
+    let Some(working_directory) = state.with_runtime(|runtime| {
+        runtime
+            .sessions
+            .get(session)
+            .map(|handle| handle.working_directory().to_path_buf())
+    }) else {
+        return Ok(Err(ResumeRefused::NotThisDaemon));
+    };
+    let Some(working_directory) = working_directory else {
+        return Ok(Err(ResumeRefused::NotThisDaemon));
+    };
+
+    Ok(Ok(ResumePlan {
+        provider,
+        external_id: binding.key().external_id().clone(),
+        working_directory,
+    }))
+}
+
+/// Everything a continuation needs, once it is allowed to happen.
+struct ResumePlan {
+    provider: KnownProvider,
+    external_id: corral_core::ExternalId,
+    working_directory: PathBuf,
+}
+
+/// Perform one `session.resume`, as the owner of its command id.
+async fn execute_session_resume(
+    resume: ResumeSession,
+    state: &Arc<DaemonState>,
+) -> Result<Concluded, corral_state::StateError> {
+    let ResumeSession { command, session } = resume;
+
+    match state.completed_managed_session(command.clone()).await {
+        Ok(Some(already)) => {
+            return Ok(Concluded::Accepted {
+                session: already.session(),
+                run: already.run(),
+            });
+        }
+        Ok(None) => {}
+        Err(error) => return refused_by_store(&command, error),
+    }
+
+    let plan = match resume_plan(state, session).await {
+        Ok(Ok(plan)) => plan,
+        Ok(Err(refused)) => {
+            return Ok(Concluded::Refused {
+                code: ErrorCode::InvalidParams,
+                message: refused.to_string(),
+            });
+        }
+        Err(error) => return refused_by_store(&command, error),
+    };
+
+    let run = RunId::mint();
+    let (launch, injected) = match compose_provider_launch(
+        state,
+        session,
+        run,
+        plan.provider,
+        &plan.working_directory,
+        |settings| provider::resume_argv(plan.provider, &plan.external_id, settings),
+    ) {
+        Ok(composed) => composed,
+        Err(message) => {
+            return Ok(Concluded::Refused {
+                code: ErrorCode::InvalidParams,
+                message,
+            });
+        }
+    };
+
+    // The geometry a resumed Run is born at. The request carries none — a
+    // continuation is asked for by a person looking at a list, not by a
+    // terminal offering its size — and the first attach reconciles it, exactly
+    // as it does for a session started without one.
+    let geometry = PtyGeometry::new(24, 80).unwrap_or_else(|impossible| {
+        unreachable!("a 24x80 terminal is a usable geometry: {impossible}")
+    });
+    let pending = match spawn_off_the_reactor(launch, geometry).await {
+        Ok(pending) => pending,
+        Err(error) => {
+            abandon_injection(state, injected, run);
+            return Ok(Concluded::Refused {
+                code: ErrorCode::InvalidParams,
+                message: error,
+            });
+        }
+    };
+
+    let began = pending.began();
+    let started = match state
+        .resume_managed_session(
+            command.clone(),
+            session,
+            run,
+            OccurrenceTime::Authoritative(began),
+            SystemTime::now(),
+        )
+        .await
+    {
+        Ok(started) => started,
+        Err(error) => {
+            abandon(pending);
+            abandon_injection(state, injected, run);
+            return refused_by_store(&command, error);
+        }
+    };
+
+    if !started.executed() {
+        abandon(pending);
+        abandon_injection(state, injected, run);
+        return Ok(Concluded::Accepted {
+            session: started.session(),
+            run: started.run(),
+        });
+    }
+
+    let handle = pending.serve(session, run, state.observations().clone());
+    // The prior Run's final screen is superseded by the new Run's live screen:
+    // one Session shows one runtime, and the record it replaces is the episode
+    // that ended (ADR 0007 L1).
+    let mut orphan = Some(handle);
+    let stored = state.with_runtime(|runtime| {
+        if let Some(handle) = orphan.take() {
+            runtime.sessions.insert(handle);
+        }
+    });
+    if stored.is_none() {
+        if let Some(orphaned) = orphan.take() {
+            orphaned.shut_down();
+        }
+        error!(%session, %run, "a resumed run could not be registered and was ended");
+    }
+
+    Ok(Concluded::Accepted { session, run })
+}
+
+impl std::fmt::Display for ResumeRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotThisDaemon => f.write_str(
+                "this session was not started by the running Corral daemon, so Corral does not \
+                 know where it ran and will not continue it somewhere else",
+            ),
+            Self::IdentityUnknown => f.write_str(
+                "Corral has not learned which provider session this is, so there is nothing to \
+                 continue",
+            ),
+            Self::Eligibility(NativeResumeEligibility::IdentityContested) => f.write_str(
+                "this session reported a provider identity that contradicts the one Corral \
+                 accepted, so Corral will not continue it",
+            ),
+            Self::Eligibility(NativeResumeEligibility::AssuranceTooWeak) => f.write_str(
+                "Corral is not sure enough which provider session this is to continue it",
+            ),
+            Self::Eligibility(NativeResumeEligibility::Eligible) => {
+                f.write_str("this session can be continued")
+            }
+            Self::UnknownProvider(name) => write!(
+                f,
+                "this session runs {name}, which this build does not know how to continue"
+            ),
+            Self::RunStillLive => {
+                f.write_str("this session is still running, so there is nothing to continue")
+            }
+            Self::EndUnverifiable => f.write_str(
+                "Corral cannot verify that the previous run has exited, so it will not resume \
+                 this provider session automatically",
+            ),
+            Self::NoPreviousRun => f.write_str("this session has no recorded run to continue from"),
+        }
+    }
+}
+
+/// Build the launch of a managed provider session, hook injection included.
+///
+/// The order is load-bearing. The token is minted and registered *before* the
+/// process exists, because a child fires its first hook within milliseconds of
+/// starting and a token that became resolvable afterwards would lose the very
+/// event identity is learned from. Then the Corral-owned settings file, then
+/// the argv that names it.
+///
+/// One function for both a fresh launch and a continuation, because the two
+/// differ in exactly one thing — the arguments — and everything the order
+/// above protects is the same for both. `argv` receives the injected file's
+/// path and returns the provider's command line.
+fn compose_provider_launch(
+    state: &Arc<DaemonState>,
+    session: CorralSessionId,
+    run: RunId,
+    provider: KnownProvider,
+    working_directory: &std::path::Path,
+    argv: impl FnOnce(&std::path::Path) -> Vec<std::ffi::OsString>,
+) -> Result<(LaunchRequest, Option<Injected>), String> {
+    let scope = LaunchScope {
+        session,
+        run,
+        provider,
+    };
+    let token = state
+        .with_runtime(|runtime| {
+            let token = runtime.launch_tokens.mint(scope);
+            if token.is_ok() {
+                // Recorded with the token, so a row says which agent it runs
+                // from the first list that includes it rather than only once a
+                // hook has arrived.
+                runtime.reported.launched(session, provider);
+            }
+            token
+        })
+        .ok_or_else(|| "the runtime could not be consulted".to_owned())?
+        .map_err(|_| InjectionFailed::NoRandomness.to_string())?;
+    // Nothing below leaves a half-made launch behind: a token that named a
+    // process nobody started would keep resolving for the daemon's whole life.
+    let forget = |state: &Arc<DaemonState>| {
+        state.with_runtime(|runtime| {
+            runtime.launch_tokens.forget(token);
+            runtime.reported.forget(session);
+        });
+    };
+
+    let settings = match provider::launch::relay_command(provider, token)
+        .and_then(|relay| InjectedSettings::write(state.launch_dir(), run, provider, &relay))
+    {
+        Ok(settings) => settings,
+        Err(failed) => {
+            forget(state);
+            return Err(failed.to_string());
+        }
+    };
+
+    match LaunchRequest::new(
+        provider::program(provider),
+        argv(settings.path()),
+        working_directory,
+    ) {
+        Ok(launch) => Ok((launch, Some(Injected { token, session }))),
+        Err(refusal) => {
+            InjectedSettings::remove_for(state.launch_dir(), run);
+            forget(state);
+            Err(refusal.to_string())
+        }
+    }
+}
+
+/// What a launch that may still be abandoned left behind.
+struct Injected {
+    token: LaunchToken,
+    session: CorralSessionId,
+}
+
+/// Undo a launch that never became one.
+///
+/// The file is removed here rather than left for the startup sweep, because
+/// this is the moment its owner is known not to exist. The token goes with it:
+/// it names a Session and Run nothing can ever present.
+fn abandon_injection(state: &Arc<DaemonState>, injected: Option<Injected>, run: RunId) {
+    let Some(injected) = injected else {
+        return;
+    };
+    InjectedSettings::remove_for(state.launch_dir(), run);
+    state.with_runtime(|runtime| {
+        runtime.launch_tokens.forget(injected.token);
+        runtime.reported.forget(injected.session);
+    });
 }
 
 /// End a runtime whose Run never became a durable fact.
@@ -793,12 +1376,29 @@ fn conflict(command: &Command) -> ProtocolError {
 
 /// The frame one concluded command produces, for its owner and its waiters
 /// alike.
-fn answer(id: RequestId, concluded: Concluded) -> Frame {
+/// Which method's result shape an accepted outcome is encoded as.
+///
+/// The two carry the same two identities today and are still separate wire
+/// types, so encoding one as the other would make a later divergence look
+/// safe.
+#[derive(Clone, Copy)]
+enum Produced {
+    NewSession,
+    ResumedSession,
+}
+
+fn answer(id: RequestId, concluded: Concluded, produced: Produced) -> Frame {
     match concluded {
-        Concluded::Accepted { session, run } => match serde_json::to_value(SessionNewResult {
-            session_id: session.to_string(),
-            run_id: run.to_string(),
-        }) {
+        Concluded::Accepted { session, run } => match match produced {
+            Produced::NewSession => serde_json::to_value(SessionNewResult {
+                session_id: session.to_string(),
+                run_id: run.to_string(),
+            }),
+            Produced::ResumedSession => serde_json::to_value(SessionResumeResult {
+                session_id: session.to_string(),
+                run_id: run.to_string(),
+            }),
+        } {
             Ok(value) => Frame::result(id, value),
             Err(source) => Frame::error(
                 id,

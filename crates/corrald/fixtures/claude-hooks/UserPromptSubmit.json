@@ -1,0 +1,9 @@
+{
+  "session_id": "d2dfcafd-9a73-4162-aa70-dddf99aa6e75",
+  "transcript_path": "/home/example/.claude/projects/-work-demo/d2dfcafd-9a73-4162-aa70-dddf99aa6e75.jsonl",
+  "cwd": "/work/demo",
+  "prompt_id": "b496009e-32fc-44cb-a0cd-65284884ce1f",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "say hello"
+}

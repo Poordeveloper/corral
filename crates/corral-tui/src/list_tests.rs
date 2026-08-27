@@ -123,20 +123,74 @@ fn open_is_offered_when_terminal_access_is_unknown() {
     }
 }
 
-#[test]
-fn a_command_typed_at_the_prompt_becomes_the_program_and_its_arguments() {
+fn typed(line: &[u8]) -> Option<Chosen> {
     let mut list = SessionList::default();
     list.act(Key::Typed('n'));
-
-    for key in crate::keys::decode(b"/bin/sh -c  sleep") {
+    for key in crate::keys::decode(line) {
         list.act(key);
     }
-    let chosen = list.act(Key::Enter);
+    list.act(Key::Enter)
+}
 
-    match chosen {
-        Some(Chosen::New(argv)) => assert_eq!(argv, ["/bin/sh", "-c", "sleep"]),
+/// The separator is what tells the two namespaces apart, and it is the same
+/// separator the command line uses (grill Q6).
+#[test]
+fn a_command_typed_after_the_separator_becomes_the_program_and_its_arguments() {
+    match typed(b"-- /bin/sh -c  sleep") {
+        Some(Chosen::New(crate::launch::Requested::Command(argv))) => {
+            assert_eq!(argv, ["/bin/sh", "-c", "sleep"]);
+        }
         other => panic!("{}", other.map_or("nothing", |_| "something else")),
     }
+}
+
+#[test]
+fn an_agent_typed_at_the_prompt_becomes_a_provider_request() {
+    match typed(b"claude") {
+        Some(Chosen::New(crate::launch::Requested::Provider { name, args })) => {
+            assert_eq!(name, "claude");
+            assert!(args.is_empty());
+        }
+        other => panic!("{}", other.map_or("nothing", |_| "something else")),
+    }
+}
+
+/// An agent's own arguments pass through, with or without the separator a
+/// person may or may not type.
+#[test]
+fn an_agents_own_arguments_pass_through() {
+    for line in [&b"claude --model opus"[..], &b"claude -- --model opus"[..]] {
+        match typed(line) {
+            Some(Chosen::New(crate::launch::Requested::Provider { name, args })) => {
+                assert_eq!(name, "claude");
+                assert_eq!(args, ["--model", "opus"]);
+            }
+            other => panic!(
+                "{:?}: {}",
+                std::str::from_utf8(line),
+                other.map_or("nothing", |_| "something else")
+            ),
+        }
+    }
+}
+
+/// Nothing is guessed. A name this surface does not recognise is still sent as
+/// an agent, and the daemon — the one owner of the provider list — refuses it
+/// by name.
+#[test]
+fn an_unrecognised_first_word_is_still_an_agent_request() {
+    match typed(b"bash") {
+        Some(Chosen::New(crate::launch::Requested::Provider { name, .. })) => {
+            assert_eq!(name, "bash");
+        }
+        other => panic!("{}", other.map_or("nothing", |_| "something else")),
+    }
+}
+
+/// A separator with nothing after it names neither an agent nor a command.
+#[test]
+fn a_separator_with_no_command_starts_nothing() {
+    assert!(typed(b"--").is_none());
 }
 
 #[test]
@@ -430,4 +484,39 @@ fn an_answer_with_nothing_in_it_is_not_counted_in_the_heading() {
     list.take(answered(vec![]));
 
     assert_eq!(heading(&list), "Corral");
+}
+
+/// Every precondition of a continuation is the daemon's, so the keystroke asks
+/// rather than judges: a surface that pre-refused would be a second owner of a
+/// rule that fails closed, and its answer is the one a person would see.
+#[test]
+fn continuing_a_row_asks_the_daemon_about_it() {
+    let mut list = SessionList::default();
+    list.take(answered(vec![session("s0-exited", "exited", None)]));
+
+    let chosen = list.act(Key::Typed('c'));
+
+    assert!(
+        matches!(chosen, Some(Chosen::Continue(ref id)) if id == "s0-exited"),
+        "c on a row asks for that row",
+    );
+}
+
+/// An empty list has no action, and inventing a message for it would be noise
+/// on the one screen that already says "No sessions."
+#[test]
+fn continuing_with_nothing_selected_does_nothing() {
+    let mut list = SessionList::default();
+    list.take(answered(Vec::new()));
+
+    assert!(list.act(Key::Typed('c')).is_none());
+}
+
+/// The footer is the whole key map: a person can see everything this surface
+/// does without being told about it anywhere else.
+#[test]
+fn the_footer_names_every_action_the_list_has() {
+    for action in ["open", "new", "continue", "quit"] {
+        assert!(FOOTER.contains(action), "{FOOTER} omits {action}");
+    }
 }

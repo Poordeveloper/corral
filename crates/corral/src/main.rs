@@ -9,6 +9,8 @@
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+
+mod relay;
 use corral_client::{ActivationError, ClientActivationPolicy, Connection, RequestError, activate};
 use corral_protocol::method::SessionListItem;
 use corral_tui::LocalKeys;
@@ -31,10 +33,25 @@ enum Command {
     /// List the sessions corrald knows about.
     List,
     /// Start a session and attach to it.
+    ///
+    /// Provider-first: `corral new claude` starts a managed Claude session,
+    /// and `corral new -- bash` runs a raw command. An unknown first word is
+    /// refused by name rather than guessed at, so the two namespaces stay
+    /// distinct (grill Q6).
     New {
-        /// The command to run. Everything after `--` is the command's own.
-        #[arg(last = true, required = true)]
-        argv: Vec<String>,
+        /// The agent to start, or nothing when a command follows `--`.
+        provider: Option<String>,
+        /// Arguments after `--`: the agent's own, or the command to run.
+        #[arg(last = true)]
+        rest: Vec<String>,
+    },
+    /// Continue a session as a new run, and attach to it.
+    ///
+    /// "Continue", not "resume": the product verb a person reads is Continue
+    /// in Corral (`PRODUCT.md` §5).
+    Continue {
+        /// The session's id, or enough of its start to be unambiguous.
+        session: String,
     },
     /// Attach to a session corrald is already running.
     Attach {
@@ -43,11 +60,37 @@ enum Command {
     },
     /// Open the session list.
     Tui,
+    /// Deliver one provider hook event to corrald. Internal.
+    ///
+    /// Hidden because nobody invokes it: an injected provider configuration
+    /// does, once per hook. It is a subcommand of this binary rather than a
+    /// second artifact so that installation, versioning, and the path a
+    /// settings file names stay one thing (ADR 0004 D1).
+    #[command(hide = true)]
+    HookRelay {
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        token: String,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
+    // Before the command line is even read: the relay's budget is the
+    // interference one hook invocation costs the user's agent, and the parse
+    // is part of the invocation (ADR 0004 D4).
+    let started = std::time::Instant::now();
     let cli = Cli::parse();
+
+    // Before activation, and that is the whole point: the relay never starts
+    // `corrald` and never takes the rendezvous lock. A shim that could
+    // activate the daemon would be a shim that can delay the user's agent by
+    // however long a cold start takes (ADR 0004 D1).
+    if let Command::HookRelay { provider, token } = &cli.command {
+        return relay::deliver(token, provider, started);
+    }
+
     let policy = ClientActivationPolicy::resolve();
 
     let mut connection = match activate(&policy).await {
@@ -58,8 +101,11 @@ async fn main() -> ExitCode {
     match cli.command {
         Command::Ping => ping(&mut connection).await,
         Command::List => list(&mut connection).await,
-        Command::New { argv } => new_session(&mut connection, argv).await,
+        Command::New { provider, rest } => new_session(&mut connection, provider, rest).await,
+        Command::Continue { session } => continue_session(&mut connection, &session).await,
         Command::Attach { session } => attach(&mut connection, &session).await,
+        // Answered above, before anything activated a daemon.
+        Command::HookRelay { .. } => ExitCode::SUCCESS,
         Command::Tui => session_list(&policy, connection).await,
     }
 }
@@ -80,16 +126,60 @@ async fn session_list(policy: &ClientActivationPolicy, connection: Connection) -
 }
 
 /// Start a session and attach to it.
-async fn new_session(connection: &mut Connection, argv: Vec<String>) -> ExitCode {
-    let started = match corral_tui::start_session(connection, argv).await {
+async fn new_session(
+    connection: &mut Connection,
+    provider: Option<String>,
+    rest: Vec<String>,
+) -> ExitCode {
+    let requested = match provider {
+        Some(name) => corral_tui::Requested::Provider {
+            name: name.clone(),
+            args: rest,
+        },
+        None if rest.is_empty() => {
+            eprintln!("corral: new needs an agent or a command");
+            eprintln!("  corral new claude");
+            eprintln!("  corral new -- bash");
+            return ExitCode::FAILURE;
+        }
+        None => corral_tui::Requested::Command(rest),
+    };
+    // Kept for the hint below: an unknown agent is refused by the daemon, and
+    // the fix is a command-line form only this surface knows.
+    let named = match &requested {
+        corral_tui::Requested::Provider { name, .. } => Some(name.clone()),
+        corral_tui::Requested::Command(_) => None,
+    };
+
+    let started = match corral_tui::start_session(connection, requested).await {
         Ok(started) => started,
-        Err(error) => return report_request_failure(&error),
+        Err(error) => {
+            let code = report_request_failure(&error);
+            if let Some(named) = named {
+                eprintln!("For a raw command, use: corral new -- {named}");
+            }
+            return code;
+        }
     };
 
     // Standard error, because standard output belongs to the session from the
     // moment the terminal opens.
     eprintln!("session {}", started.session_id);
     attach(connection, &started.session_id).await
+}
+
+/// Continue a session as a new run, and attach to it.
+async fn continue_session(connection: &mut Connection, session: &str) -> ExitCode {
+    let resolved = match resolve_session(connection, session).await {
+        Ok(resolved) => resolved,
+        Err(code) => return code,
+    };
+    let continued = match corral_tui::continue_session(connection, &resolved).await {
+        Ok(continued) => continued,
+        Err(error) => return report_request_failure(&error),
+    };
+    eprintln!("session {}", continued.session_id);
+    attach(connection, &continued.session_id).await
 }
 
 /// Attach to a running session until the person detaches.
@@ -241,7 +331,7 @@ const STATE_COLUMN: usize = 36;
 /// What `corral list` prints for one session.
 ///
 /// One line, because a list read at a glance should stay one line per session,
-/// plus the capability line when there is one. Every word of it comes from the
+/// plus whatever secondary lines the projection allows. Every word of it comes from the
 /// shared projection: this surface and the session list say the same thing
 /// about the same session or one of them is lying (grill Q2).
 fn session_rows(item: &SessionListItem) -> Vec<String> {
@@ -252,11 +342,14 @@ fn session_rows(item: &SessionListItem) -> Vec<String> {
         presented.state_line(),
         item.title
     )];
-    // Indented under the state it qualifies rather than beside the id.
+    // Indented under the state they qualify rather than beside the id, and in
+    // the projection's order: what the two surfaces must agree on is the words
+    // and where they sit relative to each other (grill Q2).
     rows.extend(
         presented
-            .screen
-            .map(|screen| format!("{:ID_COLUMN$}{screen}", "")),
+            .beneath()
+            .into_iter()
+            .map(|line| format!("{:ID_COLUMN$}{line}", "")),
     );
     rows
 }

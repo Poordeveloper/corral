@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use corral_protocol::method::{
-    self, SessionListResult, SessionNewParams, SessionNewResult, TerminalAttachParams,
-    TerminalAttachResult,
+    self, SessionListResult, SessionNewParams, SessionNewResult, SessionResumeParams,
+    SessionResumeResult, TerminalAttachParams, TerminalAttachResult,
 };
 use corral_protocol::{
     ClientHello, Compatibility, ConnectionRole, Frame, FrameError, FrameReader, FrameWriter,
@@ -145,6 +145,20 @@ impl Connection {
         let value = self.call(method::SESSION_NEW, Some(encoded)).await?;
         serde_json::from_value(value).map_err(|source| RequestError::Protocol {
             detail: format!("the new session did not decode: {source}"),
+        })
+    }
+
+    /// Continue an existing Session's provider session as a new Run.
+    pub async fn session_resume(
+        &mut self,
+        params: SessionResumeParams,
+    ) -> Result<SessionResumeResult, RequestError> {
+        let encoded = serde_json::to_value(params).map_err(|source| RequestError::Protocol {
+            detail: format!("the request did not encode: {source}"),
+        })?;
+        let value = self.call(method::SESSION_RESUME, Some(encoded)).await?;
+        serde_json::from_value(value).map_err(|source| RequestError::Protocol {
+            detail: format!("the continued session did not decode: {source}"),
         })
     }
 

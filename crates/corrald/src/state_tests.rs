@@ -27,7 +27,11 @@ fn registry(name: &str) -> Registry {
     ));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("create the scratch directory");
-    let state = DaemonState::open(&directory.join("registry.sqlite3")).expect("open");
+    let state = DaemonState::open(
+        &directory.join("registry.sqlite3"),
+        &directory.join("launch"),
+    )
+    .expect("open");
     Registry {
         state: Arc::new(state),
         directory,
