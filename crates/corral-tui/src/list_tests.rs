@@ -19,7 +19,7 @@ fn answered(sessions: Vec<Value>) -> Result<Listed, Unanswered> {
 }
 
 fn lost() -> Result<Listed, Unanswered> {
-    Err(Unanswered::Unreadable("the daemon went away".to_owned()))
+    Err(Unanswered::Silent("the daemon went away".to_owned()))
 }
 
 fn running(count: usize) -> Vec<Value> {
@@ -42,8 +42,35 @@ fn a_daemon_that_cannot_be_read_empties_the_list_rather_than_freezing_it() {
     assert!(
         list.unanswered
             .as_ref()
-            .is_some_and(|unanswered| unanswered.line().contains("could not be read"))
+            .is_some_and(|unanswered| unanswered.line().contains("did not answer"))
     );
+}
+
+/// Three claims, and only one of them says nothing is there. A daemon that
+/// refused and one whose answer this build could not read have both
+/// demonstrably answered — reporting either as silence asserts something about
+/// a daemon that is running (`AGENTS.md` §Runtime truth).
+#[test]
+fn what_a_failed_request_says_about_the_daemon_behind_it() {
+    let endpoint = std::path::PathBuf::from("/nowhere");
+    let cases = [
+        (
+            about(&RequestError::Protocol {
+                detail: "a response for request 2 arrived while 3 was outstanding".to_owned(),
+            }),
+            "cannot read",
+        ),
+        (
+            about(&RequestError::DaemonConnectionLost { endpoint }),
+            "did not answer",
+        ),
+    ];
+
+    for (unanswered, expected) in cases {
+        let said = unanswered.line();
+
+        assert!(said.contains(expected), "{said}");
+    }
 }
 
 /// A daemon that refused answered. Saying it could not be read would claim
@@ -62,7 +89,7 @@ fn a_refusal_is_not_reported_as_a_daemon_that_could_not_be_read() {
         .map(Unanswered::line)
         .expect("the refusal is on screen");
     assert!(said.contains("would not list"), "{said}");
-    assert!(!said.contains("could not be read"), "{said}");
+    assert!(!said.contains("did not answer"), "{said}");
 }
 
 /// And it comes back on its own. The poll is the retry: a person who restarted
@@ -381,37 +408,16 @@ fn the_frame_shows_the_lines_the_row_says_it_has() {
     draw_row(&mut frame, row, false, terminal);
 
     let drawn = frame.text().into_owned();
-    for line in row.lines() {
-        assert!(drawn.contains(&line), "{line:?} was not drawn:\n{drawn:?}");
+    for line in &row.lines {
+        assert!(drawn.contains(line), "{line:?} was not drawn:\n{drawn:?}");
     }
     let item: SessionListItem =
         serde_json::from_value(session("s0-rest", "running", Some("unavailable"))).expect("decode");
     assert_eq!(
         row_text(&item),
-        row.lines(),
+        row.lines.clone(),
         "the CLI reads a different row"
     );
-}
-
-/// The layout asks how tall a row is once per row per frame, so the answer is
-/// counted rather than measured — and has to keep agreeing with the lines.
-#[test]
-fn a_rows_height_is_the_lines_it_has() {
-    let mut list = SessionList::default();
-    list.take(answered(vec![
-        session("s0-rest", "running", Some("unavailable")),
-        session("s1-rest", "running", Some("available")),
-        session("s2-rest", "exited", None),
-    ]));
-
-    for row in &list.rows {
-        assert_eq!(
-            usize::from(row.height()),
-            row.lines().len(),
-            "{:?}",
-            row.lines()
-        );
-    }
 }
 
 /// A session that goes away does not send the cursor to the top of the list —

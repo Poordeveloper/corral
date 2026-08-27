@@ -169,7 +169,6 @@ dependencies = [
  "rustix",
  "serde_json",
  "tokio",
- "uuid",
 ]
 
 [[package]]

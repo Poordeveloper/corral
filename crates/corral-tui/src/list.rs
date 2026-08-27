@@ -56,7 +56,14 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
     // that is not raw turns into SIGQUIT for whoever is in the foreground. The
     // attachment enters raw mode of its own and restores what it found, which
     // is this.
-    let _raw = RawMode::enter()?;
+    let Some(_raw) = RawMode::enter()? else {
+        // Not a condition to carry on through. Everything above says why: a
+        // terminal in line discipline echoes over the frame, holds what was
+        // typed until Enter, and turns the detach byte into SIGQUIT.
+        return Err(std::io::Error::other(
+            "the session list needs a terminal it can put in raw mode",
+        ));
+    };
     let Some(mut keys) = LocalKeys::start() else {
         return Err(std::io::Error::other(
             "something is already reading this terminal",
@@ -85,12 +92,12 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
             Chosen::Open(session) => {
                 screen.hand_over()?;
                 list.notice = open(&mut daemon, &session, &mut keys).await;
-                screen.take_back()?;
+                returned(&mut screen, &mut list)?;
             }
             Chosen::New(argv) => {
                 screen.hand_over()?;
                 list.notice = start(&mut daemon, argv, &mut keys).await;
-                screen.take_back()?;
+                returned(&mut screen, &mut list)?;
             }
         }
         // Returning here re-enters `show`, whose first poll fires immediately:
@@ -110,8 +117,15 @@ enum Chosen {
 /// One row: a session the daemon reported, and what this surface may say.
 struct Row {
     session_id: String,
-    title: String,
     presentation: SessionPresentation,
+    /// What this row says, in order: the session, its state, and the
+    /// capability line when there is one.
+    ///
+    /// Built once per answer rather than per frame, and the one place a row's
+    /// text is decided: `draw_row` puts these on a screen and `row_text` hands
+    /// them to the CLI, so neither can start saying something the other does
+    /// not.
+    lines: Vec<String>,
 }
 
 /// Everything the list holds between redraws.
@@ -185,6 +199,20 @@ async fn show(
     }
 }
 
+/// Take the terminal back, and say at once if the takeover had something to
+/// report.
+///
+/// The poll below redraws, but a daemon that is slow or gone is exactly when
+/// it will not do so soon — and until it does, the person is looking at
+/// whatever the takeover left on the screen, with no sign of what just failed.
+fn returned(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> {
+    screen.take_back()?;
+    if list.notice.is_some() {
+        draw(screen, list)?;
+    }
+    Ok(())
+}
+
 /// The next answer, once the next poll is due.
 ///
 /// One future over both the wait and the question, so exactly one question is
@@ -216,7 +244,7 @@ async fn open(daemon: &mut Daemon<'_>, session_id: &str, keys: &mut LocalKeys) -
         Ok(()) => None,
         Err(error) => {
             if let OpenFailed::Refused(refused) = &error {
-                daemon.forget_if_lost(refused);
+                daemon.forget_if_unusable(refused);
             }
             Some(error.to_string())
         }
@@ -236,7 +264,7 @@ async fn start(daemon: &mut Daemon<'_>, argv: Vec<String>, keys: &mut LocalKeys)
     match started {
         Ok(started) => open(daemon, &started.session_id, keys).await,
         Err(error) => {
-            daemon.forget_if_lost(&error);
+            daemon.forget_if_unusable(&error);
             Some(error.to_string())
         }
     }
@@ -295,16 +323,37 @@ impl Backoff {
 /// connection that is fine; one that could not be read may not be there at all
 /// (`AGENTS.md` §Runtime truth).
 enum Unanswered {
+    /// It answered, and the answer was a refusal.
     Refused(String),
+    /// It answered, and the answer was not one this build can read.
     Unreadable(String),
+    /// Nothing answered.
+    Silent(String),
 }
 
 impl Unanswered {
     fn line(&self) -> String {
         match self {
             Self::Refused(detail) => format!("corrald would not list its sessions: {detail}"),
-            Self::Unreadable(detail) => format!("corrald could not be read: {detail}"),
+            Self::Unreadable(detail) => {
+                format!("corrald answered with something this build cannot read: {detail}")
+            }
+            Self::Silent(detail) => format!("corrald did not answer: {detail}"),
         }
+    }
+}
+
+/// What one failed request says about the daemon behind it.
+///
+/// The claim and the disposal are two decisions, and only one of them is the
+/// same for both: a protocol fault and a lost daemon both leave a connection
+/// this client cannot ask again, but only one of them means nothing is there
+/// (`AGENTS.md` §Runtime truth).
+fn about(error: &RequestError) -> Unanswered {
+    match error {
+        RequestError::Refused(_) => Unanswered::Refused(error.to_string()),
+        RequestError::Protocol { .. } => Unanswered::Unreadable(error.to_string()),
+        RequestError::DaemonConnectionLost { .. } => Unanswered::Silent(error.to_string()),
     }
 }
 
@@ -321,9 +370,7 @@ impl Daemon<'_> {
         match self.connection {
             Some(ref mut connection) => Ok(connection),
             None => {
-                let fresh = activate(self.policy)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                let fresh = self.activated().await.map_err(|why| why.line())?;
                 Ok(self.connection.insert(fresh))
             }
         }
@@ -338,13 +385,22 @@ impl Daemon<'_> {
     /// one arrived means an abandoned question costs a reconnect and never a
     /// mismatched answer.
     async fn borrow_for_one_question(&mut self) -> Result<Connection, Unanswered> {
-        if let Some(connection) = self.connection.take() {
-            return Ok(connection);
+        match self.connection.take() {
+            Some(connection) => Ok(connection),
+            None => self.activated().await,
         }
+    }
 
+    /// A connection to a running daemon, starting one if there is none and the
+    /// last attempt is far enough behind.
+    ///
+    /// The one place this surface activates. Both the poll and the person's
+    /// own actions come through here, so a daemon that cannot start is not
+    /// started once per second by one and once per keystroke by the other.
+    async fn activated(&mut self) -> Result<Connection, Unanswered> {
         if let Some(waiting) = self.retry.as_ref().and_then(Backoff::waiting) {
-            return Err(Unanswered::Unreadable(format!(
-                "no corrald answered; trying again in {} seconds",
+            return Err(Unanswered::Silent(format!(
+                "no corrald is running; trying again in {} seconds",
                 waiting.as_secs().max(1)
             )));
         }
@@ -357,7 +413,7 @@ impl Daemon<'_> {
             }
             Err(error) => {
                 self.retry = Some(Backoff::after(failures));
-                Err(Unanswered::Unreadable(error.to_string()))
+                Err(Unanswered::Silent(error.to_string()))
             }
         }
     }
@@ -367,8 +423,8 @@ impl Daemon<'_> {
         let mut connection = self.borrow_for_one_question().await?;
 
         let Ok(answered) = tokio::time::timeout(ANSWER, connection.session_list()).await else {
-            return Err(Unanswered::Unreadable(format!(
-                "no answer in {} seconds",
+            return Err(Unanswered::Silent(format!(
+                "nothing within {} seconds",
                 ANSWER.as_secs()
             )));
         };
@@ -378,27 +434,28 @@ impl Daemon<'_> {
                 self.connection = Some(connection);
                 Ok(decode(listed))
             }
-            // A refusal is a daemon that answered. The connection it answered
-            // on is fine and the next question may well be answered too, so
-            // this says what it refused rather than claiming it is gone.
-            Err(refusal @ RequestError::Refused(_)) => {
-                self.connection = Some(connection);
-                Err(Unanswered::Refused(refusal.to_string()))
+            Err(error) => {
+                // Put back only what can be asked again. A refusal came on a
+                // connection that is fine; the others left one with nobody on
+                // it, or at a place in the stream this client cannot find.
+                if matches!(error, RequestError::Refused(_)) {
+                    self.connection = Some(connection);
+                }
+                Err(about(&error))
             }
-            // A lost daemon and one that broke the protocol are both sockets
-            // this surface is done with: nobody is on the first, and the
-            // second cannot be trusted to be at a known place in the stream.
-            Err(error) => Err(Unanswered::Unreadable(error.to_string())),
         }
     }
 
-    /// Drop a connection the daemon is no longer on the other end of, so the
-    /// next question activates instead of asking a socket nobody holds.
+    /// Drop a connection that cannot be asked another question.
     ///
-    /// A refusal is not that: the daemon answered, and the connection it
-    /// answered on is fine.
-    fn forget_if_lost(&mut self, error: &RequestError) {
-        if matches!(error, RequestError::DaemonConnectionLost { .. }) {
+    /// A daemon that went away has nobody on the other end, and one that broke
+    /// the protocol may have left the stream at a place this client cannot
+    /// find — asking again on either would answer the wrong question. A
+    /// refusal is neither: the daemon answered, on a connection that is fine.
+    ///
+    /// The same rule `sessions` applies, because it is the same connection.
+    fn forget_if_unusable(&mut self, error: &RequestError) {
+        if !matches!(error, RequestError::Refused(_)) {
             self.connection = None;
         }
     }
@@ -573,35 +630,23 @@ impl SessionList {
 
 impl Row {
     fn of(item: &SessionListItem) -> Self {
+        let presentation = present(item);
+        let mut lines = vec![
+            format!("{}  {}", short_id(&item.session_id), item.title),
+            presentation.state_line(),
+        ];
+        lines.extend(presentation.screen.map(str::to_owned));
+
         Self {
-            presentation: present(item),
             session_id: item.session_id.clone(),
-            title: item.title.clone(),
+            presentation,
+            lines,
         }
     }
 
-    /// What this row says, in order: the session, its state, and the
-    /// capability line when there is one to show.
-    ///
-    /// The one place a row's text is decided. `draw_row` puts these on a
-    /// screen and `row_text` hands them to the CLI, so neither can start
-    /// saying something the other does not.
-    fn lines(&self) -> Vec<String> {
-        let mut lines = vec![
-            format!("{}  {}", short_id(&self.session_id), self.title),
-            self.presentation.state_line(),
-        ];
-        lines.extend(self.presentation.screen.map(str::to_owned));
-        lines
-    }
-
-    /// How many lines this row occupies.
-    ///
-    /// Counted rather than measured, because it is asked once per row per
-    /// frame while laying the screen out; `a_rows_height_is_the_lines_it_has`
-    /// holds it to `lines`.
+    /// How many lines this row occupies, which is how many it has.
     fn height(&self) -> u16 {
-        2 + u16::from(self.presentation.screen.is_some())
+        u16::try_from(self.lines.len()).unwrap_or(u16::MAX)
     }
 }
 
@@ -704,7 +749,7 @@ fn heading(list: &SessionList) -> String {
 }
 
 fn draw_row(frame: &mut Frame, row: &Row, selected: bool, geometry: Geometry) {
-    let mut lines = row.lines().into_iter();
+    let mut lines = row.lines.iter();
     let Some(heading) = lines.next() else { return };
 
     let marker = if selected { "> " } else { "  " };
@@ -741,7 +786,7 @@ pub fn short_id(session_id: &str) -> &str {
 /// Exists so the CLI's own list can be held to saying exactly what this one
 /// says about the same session (grill Q2).
 pub fn row_text(item: &SessionListItem) -> Vec<String> {
-    Row::of(item).lines()
+    Row::of(item).lines
 }
 
 #[cfg(test)]

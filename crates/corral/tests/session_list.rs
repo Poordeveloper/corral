@@ -37,6 +37,10 @@ const RELEASE: &str = "\x1b[?1049l";
 /// clearing — the person's own.
 const TAKE: &str = "\x1b[?1049h";
 
+/// Turning mouse reporting off, which the list does wherever it claims the
+/// terminal.
+const NO_MOUSE: &str = "\x1b[?1000l";
+
 const ROWS: u16 = 24;
 const COLS: u16 = 80;
 
@@ -118,6 +122,10 @@ fn the_list_opens_a_session_and_comes_back_to_a_current_one() {
     let detached = terminal.typed(b"\x1c");
 
     terminal.wait_for_after(detached, TAKE);
+    // A session may have turned mouse reporting on and died with it on. A
+    // terminal still reporting sends three coordinate bytes for every click,
+    // and a click in the eighty-first column sends `q`.
+    terminal.wait_for_after(detached, NO_MOUSE);
     let returned = frame_after(&terminal, detached);
 
     assert!(
@@ -211,7 +219,7 @@ fn a_lost_daemon_is_reported_and_the_list_recovers() {
     terminal.wait_for("Corral — 1 session");
 
     daemon.signal(rustix::process::Signal::KILL);
-    let reported = terminal.wait_for("corrald could not be read");
+    let reported = terminal.wait_for("corrald did not answer");
     let disconnected = frame_after(&terminal, reported);
 
     assert!(
@@ -332,8 +340,8 @@ fn a_question_that_is_never_answered_is_given_up_on() {
     let asking = terminal.wait_for("Asking corrald…");
 
     // Both halves of the claim in one line: the list stopped waiting, and it
-    // says that is why — not that the daemon went away, which it did not.
-    terminal.wait_for_after(asking, "corrald could not be read: no answer in");
+    // says that is why.
+    terminal.wait_for_after(asking, "corrald did not answer: nothing within");
 
     terminal.typed(b"q");
     assert!(terminal.wait_for_exit().success());

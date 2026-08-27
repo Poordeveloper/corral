@@ -20,10 +20,6 @@ corral-protocol = { workspace = true }
 corral-tui = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-# A command id for every mutation the CLI sends. Already in the tree under
-# corral-core, so it adds no supply chain; the alternative was hand-rolling a
-# random token from `getrandom`, which is this crate's job for nobody.
-uuid = { workspace = true }
 
 [dev-dependencies]
 corral-protocol = { workspace = true }

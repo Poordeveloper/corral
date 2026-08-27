@@ -22,6 +22,13 @@ const TAKE: &[u8] = b"\x1b[?1049h";
 const RELEASE: &[u8] = b"\x1b[?25h\x1b[?1049l";
 /// Scrolling covers the whole screen again, whatever a session left set.
 const WHOLE_SCREEN: &[u8] = b"\x1b[r";
+/// No mouse reporting, in any of the ways a program turns it on.
+///
+/// A terminal still reporting sends `ESC [ M` and three coordinate bytes for
+/// every click, and those bytes are indistinguishable from someone typing: a
+/// click in the eighty-first column sends `q`. Nothing here reads a mouse, so
+/// this is not a mode this surface can be left in.
+const NO_MOUSE: &[u8] = b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l";
 
 const HIDE_CURSOR: &str = "\x1b[?25l";
 const SHOW_CURSOR: &str = "\x1b[?25h";
@@ -68,13 +75,24 @@ pub struct Frame {
 
 impl FullScreen {
     pub fn take() -> std::io::Result<Self> {
-        let mut out = std::io::stdout();
-        out.write_all(TAKE)?;
-        out.flush()?;
-        Ok(Self {
-            out,
+        let mut screen = Self {
+            out: std::io::stdout(),
             last: Geometry::of(&std::io::stdin()),
-        })
+        };
+        screen.claim()?;
+        Ok(screen)
+    }
+
+    /// Put the terminal in the state this surface needs.
+    ///
+    /// Asserted rather than assumed, and in one place, because there are two
+    /// moments it has to be true: taking the terminal, and taking it back from
+    /// a session that drew whatever it liked on it.
+    fn claim(&mut self) -> std::io::Result<()> {
+        self.out.write_all(TAKE)?;
+        self.out.write_all(WHOLE_SCREEN)?;
+        self.out.write_all(NO_MOUSE)?;
+        self.out.flush()
     }
 
     /// This terminal's size right now.
@@ -111,15 +129,13 @@ impl FullScreen {
     ///
     /// A takeover replays a child's own bytes, so the terminal comes back in
     /// whatever state that child left: `vim` on exit writes `\x1b[?1049l` and
-    /// drops out of the alternate screen, and a full-screen program may leave
-    /// a scroll region set. Neither is something this surface can detect, and
-    /// a list that went on drawing would then be clearing the person's own
-    /// screen once a second — so both are re-asserted rather than assumed to
-    /// have held.
+    /// drops out of the alternate screen, a full-screen program may leave a
+    /// scroll region set, and one killed mid-run leaves mouse reporting on.
+    /// None of that is something this surface can detect, and each of them
+    /// breaks it differently — so what it needs is asserted again rather than
+    /// assumed to have held.
     pub fn take_back(&mut self) -> std::io::Result<()> {
-        self.out.write_all(TAKE)?;
-        self.out.write_all(WHOLE_SCREEN)?;
-        self.out.flush()
+        self.claim()
     }
 }
 

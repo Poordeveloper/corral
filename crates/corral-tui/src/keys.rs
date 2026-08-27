@@ -69,6 +69,12 @@ impl Keyboard {
 const CSI: u8 = b'[';
 const SS3: u8 = b'O';
 
+/// The bytes a sequence may carry between its introducer and its end:
+/// parameters and intermediates.
+const PARAMETERS: std::ops::RangeInclusive<u8> = 0x20..=0x3f;
+/// The byte that ends a sequence and says which one it was.
+const FINAL: std::ops::RangeInclusive<u8> = 0x40..=0x7e;
+
 /// Every key in one burst, for tests with no read boundary to model.
 ///
 /// Through `Keyboard`, so what these assert is what the surface runs.
@@ -114,17 +120,31 @@ pub fn decode_one(bytes: &[u8]) -> Option<(Key, usize)> {
 fn escape_sequence(bytes: &[u8]) -> Option<(Key, usize)> {
     match bytes.get(1) {
         Some(&CSI) | Some(&SS3) => {
-            // Parameters and intermediates run until the byte that ends the
-            // sequence. Unterminated means it is not all here yet.
-            let end = bytes[2..]
-                .iter()
-                .position(|byte| (0x40..=0x7e).contains(byte))?;
-            let key = match bytes[2 + end] {
-                b'A' => Key::Up,
-                b'B' => Key::Down,
-                _ => Key::Unknown,
-            };
-            Some((key, 3 + end))
+            for (offset, byte) in bytes[2..].iter().enumerate() {
+                // Parameters and intermediates, which a sequence may carry any
+                // number of before the byte that ends it.
+                if PARAMETERS.contains(byte) {
+                    continue;
+                }
+                if FINAL.contains(byte) {
+                    let key = match byte {
+                        b'A' => Key::Up,
+                        b'B' => Key::Down,
+                        _ => Key::Unknown,
+                    };
+                    return Some((key, 3 + offset));
+                }
+                // Anything else abandons the sequence, and what abandoned it
+                // is a key: Ctrl-C among them, which raw mode has already
+                // taken from the kernel, so this is the only path that
+                // delivers it. Held as a parameter it would never arrive, and
+                // a surface that cannot deliver Ctrl-C is one a person cannot
+                // leave. Stop before it, and let it decode on its own.
+                return Some((Key::Unknown, 2 + offset));
+            }
+
+            // Nothing but parameters so far: still arriving.
+            None
         }
         // Escape on its own, and Escape at the end of a burst: a terminal
         // sends a cursor key's bytes in one write, so an introducer that is

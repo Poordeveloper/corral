@@ -9,7 +9,9 @@
 //! One byte is not passed through. `Ctrl-\` detaches, unconditionally, and is
 //! never forwarded — so a literal 0x1C cannot reach the child through Corral's
 //! M1 attach. That is a limitation we chose, recorded rather than discovered
-//! (grill Q4).
+//! (`docs/decisions/2026-08-24-pr3-plan-grill.md` Q4). This crate's other
+//! citations are PR4's grill; this file predates it and its own are PR3's, so
+//! they name their document.
 //!
 //! The list opens sessions through here rather than composing terminals of its
 //! own: Open is a full-screen takeover of the same attachment this module
@@ -246,7 +248,7 @@ pub fn input_frame(epoch: Epoch, bytes: Vec<u8>) -> TerminalFrame {
 ///
 /// Sent only when the local terminal actually changed size — never because the
 /// daemon reported a new geometry, which would make two differently sized
-/// viewers reassert forever (grill Q6).
+/// viewers reassert forever (`docs/decisions/2026-08-24-pr3-plan-grill.md` Q6).
 pub fn resize_frame(epoch: Epoch, geometry: Geometry) -> TerminalFrame {
     let mut payload = Vec::with_capacity(4);
     payload.extend_from_slice(&geometry.rows.to_be_bytes());
@@ -402,7 +404,8 @@ pub async fn run(
             _ = geometry_check.tick() => {
                 // A resize is sent only when this terminal's own size changed —
                 // never because the daemon reported one, which would make two
-                // differently sized viewers reassert forever (grill Q6). On a
+                // differently sized viewers reassert forever
+                // (`docs/decisions/2026-08-24-pr3-plan-grill.md` Q6). On a
                 // tick rather than only on a keystroke: a person who resizes
                 // and then just watches still needs a correct screen.
                 let now = Geometry::of(&std::io::stdin());

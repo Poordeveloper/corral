@@ -120,3 +120,28 @@ fn every_byte_is_either_a_key_or_waiting_for_the_rest_of_one() {
         }
     }
 }
+
+/// The escape hatch survives a sequence that never ends.
+///
+/// Raw mode has taken Ctrl-C from the kernel, so the decoder is the only thing
+/// that delivers it. A held introducer that swallowed everything after it
+/// would make the list unleavable from the terminal the person is at.
+#[test]
+fn an_abandoned_sequence_does_not_swallow_the_key_that_abandoned_it() {
+    let mut keyboard = Keyboard::default();
+    keyboard.add(b"\x1b[1;");
+
+    assert_eq!(
+        keyboard.next(),
+        None,
+        "an unfinished sequence decoded early"
+    );
+
+    keyboard.add(&[0x03]);
+    assert_eq!(
+        keyboard.next(),
+        Some(Key::Unknown),
+        "the abandoned sequence"
+    );
+    assert_eq!(keyboard.next(), Some(Key::Interrupt));
+}
