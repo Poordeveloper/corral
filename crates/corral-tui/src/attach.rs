@@ -81,8 +81,10 @@ pub fn local_geometry(fd: BorrowedFd<'_>) -> Option<Geometry> {
 pub enum LocalInput {
     /// Bytes to send to the daemon.
     Send(Vec<u8>),
-    /// The detach byte arrived: send what came before it, then stop.
-    Detach(Vec<u8>),
+    /// The detach byte arrived: send what came before it, then stop. What came
+    /// after it was typed for whatever the person is going back to, so it is
+    /// carried rather than dropped.
+    Detach { before: Vec<u8>, after: Vec<u8> },
 }
 
 /// Everything the person types, read once for the whole surface.
@@ -94,6 +96,14 @@ pub enum LocalInput {
 /// the attachment it hands over to share this rather than each starting one.
 pub struct LocalKeys {
     typed: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    /// Bytes read by one surface and meant for the next.
+    ///
+    /// A burst can carry the key that opens a session and the first thing the
+    /// person meant to type into it, and the detach byte with what they typed
+    /// after it. Whoever stops reading hands the rest back rather than
+    /// dropping it — dropping it is the vanished character this type exists to
+    /// prevent.
+    unconsumed: Vec<u8>,
 }
 
 /// Whether this process has already claimed the local terminal's input.
@@ -103,10 +113,15 @@ impl LocalKeys {
     /// Start reading the local terminal, or refuse because something already
     /// is.
     ///
-    /// `None` is a caller bug rather than a runtime condition — there is one
-    /// terminal and one person at it — and it is reported rather than
-    /// asserted, because the consequence of getting it wrong is a keystroke
-    /// disappearing rather than a crash.
+    /// The claim is the process's and lasts as long as the process does. A
+    /// thread parked in `read` cannot be woken, so the reader started here
+    /// cannot be reclaimed: releasing the claim would let a second one start
+    /// while the first is still able to take one keystroke off the terminal on
+    /// its way out. `None` therefore means this process already started its
+    /// reader, not that a `LocalKeys` is alive somewhere.
+    ///
+    /// It is reported rather than asserted because the consequence of getting
+    /// it wrong is a keystroke disappearing rather than a crash.
     pub fn start() -> Option<Self> {
         if READING.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return None;
@@ -125,12 +140,29 @@ impl LocalKeys {
             }
         });
 
-        Some(Self { typed: received })
+        Some(Self {
+            typed: received,
+            unconsumed: Vec::new(),
+        })
     }
 
     /// The next bytes the person typed, or `None` once their terminal closed.
     pub async fn next(&mut self) -> Option<Vec<u8>> {
+        if !self.unconsumed.is_empty() {
+            return Some(std::mem::take(&mut self.unconsumed));
+        }
         self.typed.recv().await
+    }
+
+    /// Hand back bytes read but not consumed, for whoever reads next.
+    pub fn put_back(&mut self, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        // In front of anything already waiting: these were typed first.
+        let mut whole = bytes;
+        whole.append(&mut self.unconsumed);
+        self.unconsumed = whole;
     }
 }
 
@@ -152,7 +184,10 @@ pub enum OpenFailed {
 /// apart and guessing would make detaching unreliable.
 pub fn split_at_detach(bytes: &[u8]) -> LocalInput {
     match bytes.iter().position(|byte| *byte == DETACH_BYTE) {
-        Some(at) => LocalInput::Detach(bytes[..at].to_vec()),
+        Some(at) => LocalInput::Detach {
+            before: bytes[..at].to_vec(),
+            after: bytes[at + 1..].to_vec(),
+        },
         None => LocalInput::Send(bytes.to_vec()),
     }
 }
@@ -389,7 +424,10 @@ pub async fn run(
                     // is still the person's input and is delivered first.
                     let (payload, detaching) = match split_at_detach(&bytes) {
                         LocalInput::Send(bytes) => (bytes, false),
-                        LocalInput::Detach(bytes) => (bytes, true),
+                        LocalInput::Detach { before, after } => {
+                            keys.put_back(after);
+                            (before, true)
+                        }
                     };
 
                     if !payload.is_empty() {

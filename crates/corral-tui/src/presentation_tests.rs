@@ -85,7 +85,7 @@ fn an_unserveable_screen_is_secondary_and_refuses_open() {
     let presented = present(&listed("running", Some(TerminalAccess::Unavailable)));
 
     assert_eq!(presented.screen, Some("Screen unavailable"));
-    assert!(presented.open_is_refused());
+    assert_eq!(presented.refuses_open(), Some("Screen unavailable"));
     assert_eq!(
         presented.state_line(),
         "Running · Status unknown",
@@ -123,6 +123,6 @@ fn an_unknown_terminal_access_does_not_refuse_open() {
         let presented = present(&listed("running", access));
 
         assert_eq!(presented.screen, None);
-        assert!(!presented.open_is_refused());
+        assert_eq!(presented.refuses_open(), None);
     }
 }

@@ -61,6 +61,8 @@ pub struct FullScreen {
 pub struct Frame {
     geometry: Geometry,
     drawn: u16,
+    /// Rows at the bottom the caller has spoken for and will draw last.
+    reserved: u16,
     bytes: Vec<u8>,
 }
 
@@ -139,13 +141,34 @@ impl Frame {
         Self {
             geometry,
             drawn: 0,
+            reserved: 0,
             bytes,
         }
     }
 
-    /// How many rows are still free below what has been drawn.
+    /// What this frame would write, for tests that assert about its text.
+    #[cfg(test)]
+    pub(crate) fn text(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.bytes)
+    }
+
+    /// Set aside rows at the bottom for lines that are drawn last.
+    ///
+    /// A footer and a prompt are written after the body but belong under it,
+    /// so their rows have to be spoken for before the body starts: a body
+    /// larger than the screen would otherwise take them, and the prompt is the
+    /// only line that shows the cursor — losing it leaves a person typing
+    /// blind into something they cannot see.
+    pub fn reserve(&mut self, rows: u16) {
+        self.reserved = rows;
+    }
+
+    /// How many rows are still free below what has been drawn, not counting
+    /// what is reserved.
     pub fn remaining(&self) -> u16 {
-        self.geometry.rows.saturating_sub(self.drawn)
+        self.geometry
+            .rows
+            .saturating_sub(self.drawn.saturating_add(self.reserved))
     }
 
     /// Draw one line, truncated to the terminal's width.
@@ -205,18 +228,31 @@ impl Frame {
         self.drawn += 1;
     }
 
-    /// The text this terminal has room for, cut on a character boundary.
+    /// The text this terminal has room for, with nothing in it that moves the
+    /// cursor.
     ///
-    /// Counted in characters rather than display columns: this surface renders
+    /// A row shows a title, which is the file name of a program somebody
+    /// chose, and error text the daemon wrote. A Unix file name may contain a
+    /// newline or an escape byte; drawn as it arrived it would advance rows
+    /// this frame is not counting, or leave a colour the next line inherits.
+    /// So a control character becomes the character that says a character
+    /// could not be shown.
+    ///
+    /// Cut in characters rather than display columns: this surface renders
     /// program names and hexadecimal ids, so a double-width character can cost
     /// alignment but never correctness, and a width table is a dependency Q5's
     /// reasoning declines for the same reason it declined a framework.
     fn truncated(&self, text: &str) -> String {
-        let room = usize::from(self.geometry.cols);
-        match text.char_indices().nth(room) {
-            Some((at, _)) => text[..at].to_owned(),
-            None => text.to_owned(),
-        }
+        text.chars()
+            .map(|character| {
+                if character.is_control() {
+                    char::REPLACEMENT_CHARACTER
+                } else {
+                    character
+                }
+            })
+            .take(usize::from(self.geometry.cols))
+            .collect()
     }
 }
 

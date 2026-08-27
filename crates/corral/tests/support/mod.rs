@@ -16,6 +16,7 @@ compile_error!(
      or cargo test --features corral/test-support,corrald/test-support"
 );
 
+pub mod corpus;
 pub mod pty;
 pub mod wire;
 

@@ -20,10 +20,12 @@
 
 mod attach;
 mod keys;
+mod launch;
 mod list;
 mod presentation;
 mod screen;
 
 pub use attach::{Geometry, LocalKeys, OpenFailed, RawMode, open};
+pub use launch::start_session;
 pub use list::{row_text, run, short_id};
 pub use presentation::{MainState, SessionPresentation, present};

@@ -147,7 +147,7 @@ fn a_command_typed_at_the_prompt_becomes_the_program_and_its_arguments() {
     let mut list = SessionList::default();
     list.act(Key::Typed('n'));
 
-    for key in keys::decode(b"/bin/sh -c  sleep") {
+    for key in crate::keys::decode(b"/bin/sh -c  sleep") {
         list.act(key);
     }
     let chosen = list.act(Key::Enter);
@@ -197,7 +197,7 @@ fn the_prompt_takes_the_keys_the_list_would_have_acted_on() {
 fn backspace_removes_a_whole_character() {
     let mut list = SessionList::default();
     list.act(Key::Typed('n'));
-    for key in keys::decode("aé".as_bytes()) {
+    for key in crate::keys::decode("aé".as_bytes()) {
         list.act(key);
     }
 
@@ -362,4 +362,96 @@ fn moving_the_cursor_clears_what_the_last_action_said() {
     list.act(Key::Down);
 
     assert_eq!(list.notice, None);
+}
+
+/// One row, rendered once. The screen and the CLI both draw what `lines` says,
+/// so neither can start saying something the other does not (grill Q2).
+#[test]
+fn the_frame_shows_the_lines_the_row_says_it_has() {
+    let terminal = Geometry { rows: 24, cols: 80 };
+    let mut list = SessionList::default();
+    list.take(answered(vec![session(
+        "s0-rest",
+        "running",
+        Some("unavailable"),
+    )]));
+    let row = &list.rows[0];
+    let mut frame = Frame::new(terminal);
+
+    draw_row(&mut frame, row, false, terminal);
+
+    let drawn = frame.text().into_owned();
+    for line in row.lines() {
+        assert!(drawn.contains(&line), "{line:?} was not drawn:\n{drawn:?}");
+    }
+    let item: SessionListItem =
+        serde_json::from_value(session("s0-rest", "running", Some("unavailable"))).expect("decode");
+    assert_eq!(
+        row_text(&item),
+        row.lines(),
+        "the CLI reads a different row"
+    );
+}
+
+/// The layout asks how tall a row is once per row per frame, so the answer is
+/// counted rather than measured — and has to keep agreeing with the lines.
+#[test]
+fn a_rows_height_is_the_lines_it_has() {
+    let mut list = SessionList::default();
+    list.take(answered(vec![
+        session("s0-rest", "running", Some("unavailable")),
+        session("s1-rest", "running", Some("available")),
+        session("s2-rest", "exited", None),
+    ]));
+
+    for row in &list.rows {
+        assert_eq!(
+            usize::from(row.height()),
+            row.lines().len(),
+            "{:?}",
+            row.lines()
+        );
+    }
+}
+
+/// A session that goes away does not send the cursor to the top of the list —
+/// which, ordered newest first, is whatever started most recently and is one
+/// keystroke from being opened.
+#[test]
+fn a_vanished_selection_leaves_the_cursor_where_it_was() {
+    let mut list = SessionList::default();
+    list.take(answered(running(4)));
+    list.selected = 2;
+
+    // The session it was on is gone, and a newer one is now at the top.
+    list.take(answered(vec![
+        session("newest-0", "running", Some("available")),
+        session("s0-rest", "running", Some("available")),
+        session("s1-rest", "running", Some("available")),
+        session("s3-rest", "running", Some("available")),
+    ]));
+
+    assert_eq!(list.rows[list.selected].session_id, "s1-rest");
+}
+
+/// A corrald that dies on startup leaves no owner behind, so a poll that
+/// activated every second would start one every second. The wait between
+/// attempts grows, and stops growing.
+#[test]
+fn activation_waits_longer_each_time_it_fails_and_stops_at_a_ceiling() {
+    let first = Backoff::after(0);
+    assert_eq!(first.failures, 1);
+    assert!(
+        first
+            .waiting()
+            .is_some_and(|waiting| waiting <= Duration::from_secs(1))
+    );
+
+    let later = Backoff::after(20);
+    assert!(
+        later
+            .waiting()
+            .is_some_and(|waiting| waiting <= Backoff::CEILING),
+        "the wait grew past its ceiling"
+    );
 }

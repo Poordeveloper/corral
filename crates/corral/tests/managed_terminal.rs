@@ -13,10 +13,10 @@ mod support;
 
 use std::io::{BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use support::corpus;
 use support::wire::{RawClient, error_code};
 use support::{SETTLE, TestAccount, run, stderr, stdout};
 
@@ -870,20 +870,6 @@ fn a_listed_session_says_whether_its_terminal_can_be_served() {
     );
 }
 
-/// The reproducer the pre-merge fuzz campaign distilled, read from the corpus
-/// it already lives in: two files carrying the same bytes would be one file
-/// too many to keep true
-/// (`docs/evidence/pr3-terminal-fuzz-2026-08-24.md`).
-fn poisoning_input() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("corrald")
-        .join("tests")
-        .join("corpus")
-        .join("terminal")
-        .join("osc-title-truncation-splits-a-character.bin")
-}
-
 /// The two dimensions, end to end. A screen Corral may no longer read is
 /// reported as a terminal it cannot serve — and says nothing about the child,
 /// which is still running (grill Q7).
@@ -893,7 +879,7 @@ fn a_screen_corral_cannot_read_is_a_capability_fact_not_a_death() {
     let _daemon = account.start_daemon();
     let mut client = RawClient::connect(&account.socket());
     client.establish();
-    let script = format!("cat '{}'; sleep 30", poisoning_input().display());
+    let script = format!("cat '{}'; sleep 30", corpus::poisoning_input().display());
     start_session(&mut client, 1, &["/bin/sh", "-c", &script]);
 
     let mut described = Value::Null;

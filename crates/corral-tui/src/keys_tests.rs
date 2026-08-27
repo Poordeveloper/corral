@@ -24,7 +24,50 @@ fn a_sequence_this_build_has_no_meaning_for_is_consumed_whole() {
 /// first would put escape bytes in the prompt.
 #[test]
 fn an_unterminated_sequence_is_not_read_as_characters() {
-    assert_eq!(decode(b"\x1b[1;"), vec![Key::Unknown]);
+    assert!(decode(b"\x1b[1;").is_empty());
+    assert_eq!(decode(b"\x1b[1;5C"), vec![Key::Unknown]);
+}
+
+/// A read boundary can fall anywhere, including inside a cursor key. Decoding
+/// what arrived would make `ESC [ 1 ;` and `5 C` into the characters `5` and
+/// `C` — two the person never typed, in the command they are about to run.
+#[test]
+fn a_sequence_split_across_two_reads_is_still_one_key() {
+    let mut keyboard = Keyboard::default();
+
+    keyboard.add(b"\x1b[");
+    assert_eq!(keyboard.next(), None);
+
+    keyboard.add(b"B");
+    assert_eq!(keyboard.next(), Some(Key::Down));
+    assert_eq!(keyboard.next(), None);
+}
+
+/// The same for a character whose bytes are split.
+#[test]
+fn a_character_split_across_two_reads_is_still_one_key() {
+    let mut keyboard = Keyboard::default();
+    let bytes = "é".as_bytes();
+
+    keyboard.add(&bytes[..1]);
+    assert_eq!(keyboard.next(), None);
+
+    keyboard.add(&bytes[1..]);
+    assert_eq!(keyboard.next(), Some(Key::Typed('é')));
+}
+
+/// What the list did not act on is still the person's. A burst carrying the
+/// key that opens a session and the first thing they meant to type into it
+/// must not lose the second.
+#[test]
+fn what_was_read_but_not_acted_on_goes_back() {
+    let mut keyboard = Keyboard::default();
+    keyboard.add(b"\ryes\x1b[");
+
+    assert_eq!(keyboard.next(), Some(Key::Enter));
+
+    assert_eq!(keyboard.unread(), b"yes\x1b[");
+    assert_eq!(keyboard.next(), None);
 }
 
 /// Escape on its own is the Escape key. Waiting for a continuation that never
@@ -62,13 +105,18 @@ fn a_multi_byte_character_is_one_key() {
     );
 }
 
-/// Every byte is accounted for. A decoder that could consume nothing would
-/// spin on the byte it did not understand.
+/// Every byte is either a key or the start of one, and no key costs zero
+/// bytes: a decoder that could consume nothing would spin on the byte it did
+/// not understand.
 #[test]
-fn every_byte_produces_a_key_and_none_is_left_behind() {
+fn every_byte_is_either_a_key_or_waiting_for_the_rest_of_one() {
     for byte in 0..=255_u8 {
-        let keys = decode(&[byte]);
-
-        assert_eq!(keys.len(), 1, "{byte:#04x} decoded to {keys:?}");
+        match decode_one(&[byte]) {
+            Some((_, consumed)) => assert!(consumed >= 1, "{byte:#04x} consumed nothing"),
+            None => assert!(
+                utf8_width(byte) > 1,
+                "{byte:#04x} decoded to nothing and was not the start of a character"
+            ),
+        }
     }
 }

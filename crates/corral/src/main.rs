@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use corral_client::{ActivationError, ClientActivationPolicy, Connection, RequestError, activate};
-use corral_protocol::method::{SessionListItem, SessionNewParams};
+use corral_protocol::method::SessionListItem;
 use corral_tui::LocalKeys;
 
 #[derive(Debug, Parser)]
@@ -81,28 +81,7 @@ async fn session_list(policy: &ClientActivationPolicy, connection: Connection) -
 
 /// Start a session and attach to it.
 async fn new_session(connection: &mut Connection, argv: Vec<String>) -> ExitCode {
-    let stdin = std::io::stdin();
-    let geometry = corral_tui::Geometry::of(&stdin);
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|path| path.to_string_lossy().into_owned());
-
-    // Minted per invocation, and the same id is what a retry would carry: it
-    // is what stops a lost response from starting a second agent. This surface
-    // does not retry yet, so nothing here re-sends it — the id is the daemon's
-    // protection against a client that does (ADR 0002, Q13).
-    let command_id = uuid::Uuid::new_v4().as_hyphenated().to_string();
-
-    let started = match connection
-        .session_new(SessionNewParams {
-            command_id,
-            argv,
-            cwd,
-            rows: geometry.map(|geometry| geometry.rows),
-            cols: geometry.map(|geometry| geometry.cols),
-        })
-        .await
-    {
+    let started = match corral_tui::start_session(connection, argv).await {
         Ok(started) => started,
         Err(error) => return report_request_failure(&error),
     };

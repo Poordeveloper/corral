@@ -1,19 +1,29 @@
 use super::*;
 
 /// The detach byte never reaches the daemon, and what came before it still
-/// does: a person who typed `abc` then detached meant to send `abc`.
+/// does: a person who typed `abc` then detached meant to send `abc`. What they
+/// typed after it was meant for the list they are going back to, and is
+/// carried there rather than dropped.
 #[test]
 fn the_detach_byte_ends_input_and_is_never_forwarded() {
     let typed = [b'a', b'b', b'c', DETACH_BYTE, b'd'];
 
     let outcome = split_at_detach(&typed);
 
-    assert_eq!(outcome, LocalInput::Detach(vec![b'a', b'b', b'c']));
+    assert_eq!(
+        outcome,
+        LocalInput::Detach {
+            before: vec![b'a', b'b', b'c'],
+            after: vec![b'd'],
+        }
+    );
     match outcome {
-        LocalInput::Detach(bytes) => assert!(
-            !bytes.contains(&DETACH_BYTE),
-            "the detach byte was about to be sent to the child"
-        ),
+        LocalInput::Detach { before, after } => {
+            assert!(
+                !before.contains(&DETACH_BYTE) && !after.contains(&DETACH_BYTE),
+                "the detach byte was about to be passed on"
+            );
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -29,7 +39,10 @@ fn a_pasted_detach_byte_detaches_exactly_as_a_typed_one_does() {
 
     assert_eq!(
         outcome,
-        LocalInput::Detach(b"some pasted text".to_vec()),
+        LocalInput::Detach {
+            before: b"some pasted text".to_vec(),
+            after: b"with more after".to_vec(),
+        },
         "a detach byte arriving in a burst was forwarded to the child"
     );
 }
@@ -43,7 +56,13 @@ fn ordinary_input_passes_through_untouched() {
 
 #[test]
 fn a_detach_byte_alone_sends_nothing_and_detaches() {
-    assert_eq!(split_at_detach(&[DETACH_BYTE]), LocalInput::Detach(vec![]));
+    assert_eq!(
+        split_at_detach(&[DETACH_BYTE]),
+        LocalInput::Detach {
+            before: vec![],
+            after: vec![],
+        }
+    );
 }
 
 /// A snapshot is the whole screen, so it clears first: replaying it over stale

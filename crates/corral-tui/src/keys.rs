@@ -27,6 +27,40 @@ pub enum Key {
     Unknown,
 }
 
+/// A decoder that survives a read boundary.
+///
+/// A burst is whatever one `read` returned, not whatever the person finished
+/// typing: `ESC [ 1 ;` and `5 C` can arrive as two of them. Bytes that are not
+/// a key yet are held here until the rest arrive, and bytes nobody acted on go
+/// back to the person's terminal rather than being dropped.
+#[derive(Default)]
+pub struct Keyboard {
+    held: Vec<u8>,
+}
+
+impl Keyboard {
+    /// Add what one read produced to whatever was left over from the last.
+    pub fn add(&mut self, bytes: &[u8]) {
+        self.held.extend_from_slice(bytes);
+    }
+
+    /// The next key, or `None` while what is held is not a key yet.
+    pub fn next(&mut self) -> Option<Key> {
+        let (key, consumed) = decode_one(&self.held)?;
+        self.held.drain(..consumed);
+        Some(key)
+    }
+
+    /// Everything read but not turned into a key.
+    ///
+    /// Taken when the terminal is handed to a session: what the person typed
+    /// after the key that opened it was typed for what they opened, and a
+    /// surface that has stopped reading has no claim on it.
+    pub fn unread(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.held)
+    }
+}
+
 /// The escape-sequence introducers a cursor key arrives under.
 ///
 /// Both, because a terminal in application cursor mode sends `ESC O A` where
@@ -35,102 +69,88 @@ pub enum Key {
 const CSI: u8 = b'[';
 const SS3: u8 = b'O';
 
-/// Decode a burst of typing into the keys it carries.
-pub fn decode(bytes: &[u8]) -> Vec<Key> {
-    let mut keys = Vec::new();
-    let mut at = 0;
+/// Every key in one burst, for tests with no read boundary to model.
+///
+/// Through `Keyboard`, so what these assert is what the surface runs.
+#[cfg(test)]
+pub(crate) fn decode(bytes: &[u8]) -> Vec<Key> {
+    let mut keyboard = Keyboard::default();
+    keyboard.add(bytes);
+    std::iter::from_fn(|| keyboard.next()).collect()
+}
 
-    while at < bytes.len() {
-        let byte = bytes[at];
-        match byte {
-            0x1b => {
-                let (key, consumed) = escape_sequence(&bytes[at..]);
-                keys.push(key);
-                at += consumed;
-            }
-            b'\r' | b'\n' => {
-                keys.push(Key::Enter);
-                at += 1;
-            }
-            // Both, because which one a terminal sends for its backspace key
-            // is a local setting rather than a fact about the key.
-            0x7f | 0x08 => {
-                keys.push(Key::Backspace);
-                at += 1;
-            }
-            0x03 => {
-                keys.push(Key::Interrupt);
-                at += 1;
-            }
-            // `Ctrl-N` and `Ctrl-P`, so the muscle memory of every other list
-            // in a terminal works here too.
-            0x0e => {
-                keys.push(Key::Down);
-                at += 1;
-            }
-            0x10 => {
-                keys.push(Key::Up);
-                at += 1;
-            }
-            _ if byte.is_ascii_control() => {
-                keys.push(Key::Unknown);
-                at += 1;
-            }
-            _ => {
-                let (key, consumed) = character(&bytes[at..]);
-                keys.push(key);
-                at += consumed;
-            }
-        }
+/// The next key, and how many bytes it took.
+///
+/// `None` when these bytes end in the middle of something that is not a key
+/// yet — a `CSI` sequence with no final byte, a character with only some of
+/// its bytes. A read boundary can fall anywhere, and deciding what a half of
+/// something means is how `ESC [ 1 ;` becomes the characters `5` and `C` in
+/// the command a person is about to run.
+pub fn decode_one(bytes: &[u8]) -> Option<(Key, usize)> {
+    let byte = *bytes.first()?;
+
+    match byte {
+        0x1b => escape_sequence(bytes),
+        b'\r' | b'\n' => Some((Key::Enter, 1)),
+        // Both, because which one a terminal sends for its backspace key is a
+        // local setting rather than a fact about the key.
+        0x7f | 0x08 => Some((Key::Backspace, 1)),
+        0x03 => Some((Key::Interrupt, 1)),
+        // `Ctrl-N` and `Ctrl-P`, so the muscle memory of every other list in a
+        // terminal works here too.
+        0x0e => Some((Key::Down, 1)),
+        0x10 => Some((Key::Up, 1)),
+        _ if byte.is_ascii_control() => Some((Key::Unknown, 1)),
+        _ => character(bytes),
     }
-
-    keys
 }
 
 /// One escape sequence, and how many bytes it took.
 ///
 /// A lone escape is the Escape key: it is what a person pressing it produces,
-/// and waiting for a continuation that will never come would swallow it.
-fn escape_sequence(bytes: &[u8]) -> (Key, usize) {
+/// and waiting for a continuation that will never come would swallow it. An
+/// introducer with nothing after it yet is the other case — that one is a
+/// sequence still arriving, and it waits.
+fn escape_sequence(bytes: &[u8]) -> Option<(Key, usize)> {
     match bytes.get(1) {
         Some(&CSI) | Some(&SS3) => {
             // Parameters and intermediates run until the byte that ends the
-            // sequence; anything unterminated in this burst is consumed whole
-            // rather than leaking out as typed characters.
+            // sequence. Unterminated means it is not all here yet.
             let end = bytes[2..]
                 .iter()
-                .position(|byte| (0x40..=0x7e).contains(byte));
-            match end {
-                Some(offset) => {
-                    let key = match bytes[2 + offset] {
-                        b'A' => Key::Up,
-                        b'B' => Key::Down,
-                        _ => Key::Unknown,
-                    };
-                    (key, 3 + offset)
-                }
-                None => (Key::Unknown, bytes.len()),
-            }
+                .position(|byte| (0x40..=0x7e).contains(byte))?;
+            let key = match bytes[2 + end] {
+                b'A' => Key::Up,
+                b'B' => Key::Down,
+                _ => Key::Unknown,
+            };
+            Some((key, 3 + end))
         }
-        _ => (Key::Escape, 1),
+        // Escape on its own, and Escape at the end of a burst: a terminal
+        // sends a cursor key's bytes in one write, so an introducer that is
+        // not here yet is one that is not coming.
+        _ => Some((Key::Escape, 1)),
     }
 }
 
 /// One character, and how many bytes it took.
 ///
-/// A multi-byte character split across two reads loses its first half here.
-/// Accepted rather than buffered: the one place characters are typed is the
-/// prompt for a command to run, and carrying a decoder's state across reads
-/// would be machinery for a case a person fixes with backspace.
-fn character(bytes: &[u8]) -> (Key, usize) {
+/// A multi-byte character whose bytes have not all arrived is not a character
+/// yet, and waits for the rest rather than being decoded from its first half.
+fn character(bytes: &[u8]) -> Option<(Key, usize)> {
     let width = utf8_width(bytes[0]);
-    let taken = width.min(bytes.len());
-    match std::str::from_utf8(&bytes[..taken])
+    if bytes.len() < width {
+        return None;
+    }
+
+    match std::str::from_utf8(&bytes[..width])
         .ok()
         .and_then(|text| text.chars().next())
     {
-        Some(character) => (Key::Typed(character), taken),
-        None => (Key::Unknown, 1),
+        Some(character) => Some((Key::Typed(character), width)),
+        // Not a character at all: a continuation byte with no lead, or a
+        // sequence no width covers. One byte, so the rest still decodes.
+        None => Some((Key::Unknown, 1)),
     }
 }
 

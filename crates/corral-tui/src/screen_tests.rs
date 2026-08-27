@@ -101,3 +101,42 @@ fn a_frame_clears_before_it_draws() {
     assert!(text.starts_with(HIDE_CURSOR), "{text:?}");
     assert!(text.contains(HOME_AND_CLEAR), "{text:?}");
 }
+
+/// Rows spoken for stay spoken for. A body bigger than the screen takes the
+/// blank rows above the footer, never the footer's own — and never the
+/// prompt's, which is the only line that shows the cursor.
+#[test]
+fn a_reserved_row_is_not_taken_by_the_body() {
+    let mut frame = Frame::new(SMALL);
+    frame.reserve(1);
+
+    for _ in 0..10 {
+        frame.line(Emphasis::Plain, "a row");
+    }
+    assert_eq!(frame.remaining(), 0);
+    assert_eq!(frame.drawn, SMALL.rows - 1);
+
+    frame.reserve(0);
+    frame.prompt("new session: ");
+
+    let text = drawn(frame);
+    assert!(text.ends_with(SHOW_CURSOR), "{text:?}");
+}
+
+/// A title is the file name of a program somebody chose, and a file name may
+/// carry a newline or an escape byte. Drawn as it arrived it would move the
+/// cursor rows this frame is not counting, or leave a colour behind for the
+/// next line to inherit.
+#[test]
+fn text_from_elsewhere_cannot_move_the_cursor() {
+    let mut frame = Frame::new(SMALL);
+
+    frame.line(Emphasis::Plain, "a\r\n\x1b[2Jb");
+
+    let lines = frame.drawn;
+    let text = drawn(frame);
+    assert_eq!(lines, 1);
+    assert_eq!(text.matches("\r\n").count(), 0, "{text:?}");
+    // The frame clears once, at the top. A second one came out of the text.
+    assert_eq!(text.matches(HOME_AND_CLEAR).count(), 1, "{text:?}");
+}

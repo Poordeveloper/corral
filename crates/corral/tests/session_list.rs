@@ -13,6 +13,7 @@ mod support;
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use support::corpus;
 use support::pty::Terminal;
 use support::wire::{FakeBehaviour, RawClient, spawn_fake_daemon};
 use support::{SETTLE, TestAccount, wait_until};
@@ -140,16 +141,7 @@ fn a_session_whose_screen_cannot_be_served_refuses_to_be_opened() {
     let _daemon = account.start_daemon();
     let mut client = RawClient::connect(&account.socket());
     client.establish();
-    // The reproducer the pre-merge fuzz campaign distilled, read from the
-    // corpus it lives in (`docs/evidence/pr3-terminal-fuzz-2026-08-24.md`).
-    let reproducer = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("corrald")
-        .join("tests")
-        .join("corpus")
-        .join("terminal")
-        .join("osc-title-truncation-splits-a-character.bin");
-    let script = format!("cat '{}'; sleep 30", reproducer.display());
+    let script = format!("cat '{}'; sleep 30", corpus::poisoning_input().display());
     start_session(&mut client, 1, &["/bin/sh", "-c", &script]);
 
     let mut terminal = Terminal::spawn(account.corral_on_pty(&["tui"]), ROWS, COLS);
@@ -262,6 +254,34 @@ fn a_slow_answer_does_not_build_a_queue_of_questions() {
         "a question was sent before the last one was answered"
     );
 
+    terminal.typed(b"q");
+    assert!(terminal.wait_for_exit().success());
+}
+
+/// What a person typed after the key that opened a session was typed for the
+/// session, and gets there.
+///
+/// One `read` can carry both. A surface that stopped decoding at the key it
+/// acted on and dropped the rest would lose exactly the character they meant
+/// for their agent — the failure `LocalKeys` exists to prevent.
+#[test]
+fn what_was_typed_after_open_reaches_the_session() {
+    let account = TestAccount::new("tui-typed-through");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    // Echoes what it is given, so what arrived is what is drawn.
+    start_session(&mut client, 1, &["/bin/cat"]);
+
+    let mut terminal = Terminal::spawn(account.corral_on_pty(&["tui"]), ROWS, COLS);
+    terminal.wait_for("Running · Status unknown");
+
+    // One write: the key that opens, and what was meant for what it opened.
+    let opened = terminal.typed(b"\rxyzzy");
+
+    terminal.wait_for_after(opened, "xyzzy");
+
+    terminal.typed(b"\x1c");
     terminal.typed(b"q");
     assert!(terminal.wait_for_exit().success());
 }

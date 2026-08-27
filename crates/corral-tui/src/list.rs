@@ -12,13 +12,13 @@
 //! and what a row is allowed to say, which is `presentation`'s.
 
 use std::ops::RangeInclusive;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use corral_client::{ClientActivationPolicy, Connection, RequestError, activate};
-use corral_protocol::method::{SessionListItem, SessionListResult, SessionNewParams};
+use corral_protocol::method::{SessionListItem, SessionListResult};
 
 use crate::attach::{Geometry, LocalKeys, OpenFailed, RawMode};
-use crate::keys::{self, Key};
+use crate::keys::{Key, Keyboard};
 use crate::presentation::{SessionPresentation, present};
 use crate::screen::{Emphasis, Frame, FullScreen};
 
@@ -66,6 +66,7 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
     let mut daemon = Daemon {
         policy,
         connection: Some(connection),
+        retry: None,
     };
     let mut list = SessionList::default();
     // Taken once and held across every takeover, because the takeover happens
@@ -149,6 +150,10 @@ async fn show(
     list: &mut SessionList,
     keys: &mut LocalKeys,
 ) -> std::io::Result<Chosen> {
+    // Kept across the whole pass: a read boundary can fall inside a cursor
+    // key, and the half that arrived is not a key until the rest does.
+    let mut keyboard = Keyboard::default();
+
     let mut poll = tokio::time::interval(POLL);
     // The first tick fires immediately, and a slow answer delays the next
     // question rather than queueing one behind it — polls do not overlap,
@@ -165,8 +170,12 @@ async fn show(
                 // The person's terminal closed. Nothing is left to read and
                 // nothing is left to draw on.
                 let Some(bytes) = typed else { return Ok(Chosen::Quit) };
-                for key in keys::decode(&bytes) {
+                keyboard.add(&bytes);
+                while let Some(key) = keyboard.next() {
                     if let Some(chosen) = list.act(key) {
+                        // The rest of the burst was typed for whatever this
+                        // opens, not for the list that is leaving the screen.
+                        keys.put_back(keyboard.unread());
                         return Ok(chosen);
                     }
                 }
@@ -216,30 +225,12 @@ async fn open(daemon: &mut Daemon<'_>, session_id: &str, keys: &mut LocalKeys) -
 
 /// Start a session and go straight into it, the way `corral new` does.
 async fn start(daemon: &mut Daemon<'_>, argv: Vec<String>, keys: &mut LocalKeys) -> Option<String> {
-    let geometry = Geometry::of(&std::io::stdin());
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|path| path.to_string_lossy().into_owned());
-    // Minted per invocation, and the same id is what a retry would carry: it
-    // is what stops a lost response from starting a second agent. This surface
-    // does not retry, so nothing here re-sends it — the id is the daemon's
-    // protection against a client that does (ADR 0002, Q13).
-    let command_id = uuid::Uuid::new_v4().as_hyphenated().to_string();
-
     let started = {
         let connection = match daemon.connection().await {
             Ok(connection) => connection,
             Err(reason) => return Some(reason),
         };
-        connection
-            .session_new(SessionNewParams {
-                command_id,
-                argv,
-                cwd,
-                rows: geometry.map(|geometry| geometry.rows),
-                cols: geometry.map(|geometry| geometry.cols),
-            })
-            .await
+        crate::launch::start_session(connection, argv).await
     };
 
     match started {
@@ -261,6 +252,40 @@ async fn start(daemon: &mut Daemon<'_>, argv: Vec<String>, keys: &mut LocalKeys)
 struct Daemon<'a> {
     policy: &'a ClientActivationPolicy,
     connection: Option<Connection>,
+    /// When activation may be attempted again, and how many have failed in a
+    /// row.
+    ///
+    /// Activation may start a daemon. A `corrald` that dies on startup leaves
+    /// no owner behind, so a poll that activated every second would start one
+    /// every second forever — a retry loop that is indistinguishable, from the
+    /// outside, from a fork bomb with a one-second fuse. The poll keeps its
+    /// cadence; only starting one backs off.
+    retry: Option<Backoff>,
+}
+
+/// How long to wait before trying to activate again.
+struct Backoff {
+    failures: u32,
+    until: Instant,
+}
+
+impl Backoff {
+    /// Doubling, to a ceiling: long enough that a daemon which cannot start is
+    /// not started repeatedly, short enough that a person who fixes whatever
+    /// stopped it does not wait long to see the list come back.
+    const CEILING: Duration = Duration::from_secs(30);
+
+    fn after(failures: u32) -> Self {
+        let seconds = 1_u64 << failures.min(5);
+        Self {
+            failures: failures.saturating_add(1),
+            until: Instant::now() + Duration::from_secs(seconds).min(Self::CEILING),
+        }
+    }
+
+    fn waiting(&self) -> Option<Duration> {
+        self.until.checked_duration_since(Instant::now())
+    }
 }
 
 /// Why there is no list to show.
@@ -313,11 +338,27 @@ impl Daemon<'_> {
     /// one arrived means an abandoned question costs a reconnect and never a
     /// mismatched answer.
     async fn borrow_for_one_question(&mut self) -> Result<Connection, Unanswered> {
-        match self.connection.take() {
-            Some(connection) => Ok(connection),
-            None => activate(self.policy)
-                .await
-                .map_err(|error| Unanswered::Unreadable(error.to_string())),
+        if let Some(connection) = self.connection.take() {
+            return Ok(connection);
+        }
+
+        if let Some(waiting) = self.retry.as_ref().and_then(Backoff::waiting) {
+            return Err(Unanswered::Unreadable(format!(
+                "no corrald answered; trying again in {} seconds",
+                waiting.as_secs().max(1)
+            )));
+        }
+
+        let failures = self.retry.as_ref().map_or(0, |backoff| backoff.failures);
+        match activate(self.policy).await {
+            Ok(connection) => {
+                self.retry = None;
+                Ok(connection)
+            }
+            Err(error) => {
+                self.retry = Some(Backoff::after(failures));
+                Err(Unanswered::Unreadable(error.to_string()))
+            }
         }
     }
 
@@ -369,11 +410,7 @@ fn decode(listed: SessionListResult) -> Listed {
 
     for session in listed.sessions {
         match serde_json::from_value::<SessionListItem>(session) {
-            Ok(item) => rows.push(Row {
-                presentation: present(&item),
-                session_id: item.session_id,
-                title: item.title,
-            }),
+            Ok(item) => rows.push(Row::of(&item)),
             Err(_) => unrenderable += 1,
         }
     }
@@ -394,11 +431,16 @@ impl SessionList {
                     .rows
                     .get(self.selected)
                     .map(|row| row.session_id.clone());
+                let was_at = self.selected;
                 self.rows = listed.rows;
                 self.unrenderable = listed.unrenderable;
+                // Gone, so the cursor stays where the person left it rather
+                // than going to the top — which under newest-first ordering is
+                // whatever started most recently, and one keystroke from being
+                // opened.
                 self.selected = was_on
                     .and_then(|id| self.rows.iter().position(|row| row.session_id == id))
-                    .unwrap_or(0);
+                    .unwrap_or_else(|| was_at.min(self.rows.len().saturating_sub(1)));
                 self.unanswered = None;
                 self.answered = true;
             }
@@ -453,7 +495,7 @@ impl SessionList {
         // Refused before the keystroke rather than after it. The row stays in
         // the list, its execution state is untouched, and the reason has been
         // on screen since the poll that reported it (grill Q7).
-        if let Some(refusal) = row.presentation.screen {
+        if let Some(refusal) = row.presentation.refuses_open() {
             self.notice = Some(format!("{refusal}: this session cannot be opened."));
             return None;
         }
@@ -530,8 +572,34 @@ impl SessionList {
 }
 
 impl Row {
-    /// How many lines this row occupies: the session, its state, and the
+    fn of(item: &SessionListItem) -> Self {
+        Self {
+            presentation: present(item),
+            session_id: item.session_id.clone(),
+            title: item.title.clone(),
+        }
+    }
+
+    /// What this row says, in order: the session, its state, and the
     /// capability line when there is one to show.
+    ///
+    /// The one place a row's text is decided. `draw_row` puts these on a
+    /// screen and `row_text` hands them to the CLI, so neither can start
+    /// saying something the other does not.
+    fn lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            format!("{}  {}", short_id(&self.session_id), self.title),
+            self.presentation.state_line(),
+        ];
+        lines.extend(self.presentation.screen.map(str::to_owned));
+        lines
+    }
+
+    /// How many lines this row occupies.
+    ///
+    /// Counted rather than measured, because it is asked once per row per
+    /// frame while laying the screen out; `a_rows_height_is_the_lines_it_has`
+    /// holds it to `lines`.
     fn height(&self) -> u16 {
         2 + u16::from(self.presentation.screen.is_some())
     }
@@ -551,14 +619,18 @@ fn draw(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> 
     // The last line is the footer or the prompt, with a line above it for
     // whatever the surface has to say.
     let tail = 1 + u16::from(list.notice.is_some() || list.typing.is_some());
-    // The count of what could not be rendered sits under the rows, so the
-    // window has to be told a line is coming after it.
+    // The count of what could not be rendered sits under the rows, so its row
+    // is spoken for too, and one blank row keeps the tail off the last of
+    // them. Reserved rather than subtracted: `line` then stops at the
+    // reservation, so a row taller than what is left cannot take the footer's
+    // place — or the prompt's, which is the only line that shows the cursor.
     let counted = u16::from(list.unrenderable > 0);
-    let budget = frame.remaining().saturating_sub(tail + counted + 1);
+    frame.reserve(tail + counted + 1);
+    let budget = frame.remaining();
 
     if let Some(unanswered) = &list.unanswered {
         frame.line(Emphasis::Plain, &unanswered.line());
-        frame.line(Emphasis::Secondary, "Asking again every second.");
+        frame.line(Emphasis::Secondary, "Asking again.");
     } else if list.rows.is_empty() && list.unrenderable == 0 {
         frame.line(
             Emphasis::Plain,
@@ -579,6 +651,7 @@ fn draw(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> 
         }
     }
 
+    frame.reserve(tail);
     if list.unrenderable > 0 {
         frame.line(
             Emphasis::Secondary,
@@ -586,10 +659,11 @@ fn draw(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> 
         );
     }
 
-    while frame.remaining() > tail {
+    while frame.remaining() > 0 {
         frame.line(Emphasis::Plain, "");
     }
 
+    frame.reserve(0);
     match &list.typing {
         Some(typed) => {
             frame.line(
@@ -630,8 +704,11 @@ fn heading(list: &SessionList) -> String {
 }
 
 fn draw_row(frame: &mut Frame, row: &Row, selected: bool, geometry: Geometry) {
+    let mut lines = row.lines().into_iter();
+    let Some(heading) = lines.next() else { return };
+
     let marker = if selected { "> " } else { "  " };
-    let heading = format!("{marker}{}  {}", short_id(&row.session_id), row.title);
+    let heading = format!("{marker}{heading}");
     if selected {
         // Padded so the highlight reads as a row rather than as a word: an
         // inverse run that stops at the title looks like emphasis on the
@@ -644,12 +721,8 @@ fn draw_row(frame: &mut Frame, row: &Row, selected: bool, geometry: Geometry) {
         frame.line(Emphasis::Plain, &heading);
     }
 
-    frame.line(
-        Emphasis::Secondary,
-        &format!("    {}", row.presentation.state_line()),
-    );
-    if let Some(screen) = row.presentation.screen {
-        frame.line(Emphasis::Secondary, &format!("    {screen}"));
+    for beneath in lines {
+        frame.line(Emphasis::Secondary, &format!("    {beneath}"));
     }
 }
 
@@ -668,13 +741,7 @@ pub fn short_id(session_id: &str) -> &str {
 /// Exists so the CLI's own list can be held to saying exactly what this one
 /// says about the same session (grill Q2).
 pub fn row_text(item: &SessionListItem) -> Vec<String> {
-    let presented = present(item);
-    let mut lines = vec![
-        format!("{}  {}", short_id(&item.session_id), item.title),
-        presented.state_line(),
-    ];
-    lines.extend(presented.screen.map(str::to_owned));
-    lines
+    Row::of(item).lines()
 }
 
 #[cfg(test)]

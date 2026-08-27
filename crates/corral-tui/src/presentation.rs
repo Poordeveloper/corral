@@ -97,12 +97,14 @@ impl SessionPresentation {
         }
     }
 
-    /// Whether Open is refused before the person presses it.
+    /// Why Open is refused before the person presses it, when it is.
     ///
+    /// The same line the row already shows, because a refusal should repeat
+    /// what a person was told rather than invent a second vocabulary for it.
     /// The row stays in the list either way, and its execution state is
     /// untouched: what is refused is Corral's ability to show the screen.
-    pub fn open_is_refused(&self) -> bool {
-        self.screen.is_some()
+    pub fn refuses_open(&self) -> Option<&'static str> {
+        self.screen
     }
 }
 

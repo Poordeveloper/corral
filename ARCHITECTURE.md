@@ -496,6 +496,8 @@ crates/
 │                      facing representations
 ├── corral-rendezvous  canonical rendezvous paths, OS-account home
 │                      resolution, singleton lock/socket artifact rules
+├── corral-state       the registry store: the durable semantic event log,
+│                      its encoding, and the projections over it
 ├── corral-client      shared client/core logic
 ├── corral-tui         terminal surfaces: the session list, and the
 │                      attachment it hands the terminal over to
