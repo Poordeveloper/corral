@@ -145,3 +145,43 @@ fn an_abandoned_sequence_does_not_swallow_the_key_that_abandoned_it() {
     );
     assert_eq!(keyboard.next(), Some(Key::Interrupt));
 }
+
+/// A cursor key can arrive as `ESC` and then the rest — behind ssh or tmux the
+/// kernel decides where a read ends. Deciding on the `ESC` alone makes Down
+/// cancel the prompt and then type `[` and `B` into whatever comes next.
+#[test]
+fn an_escape_at_a_read_boundary_waits_for_what_follows() {
+    let mut keyboard = Keyboard::default();
+
+    keyboard.add(&[0x1b]);
+    assert_eq!(keyboard.next(), None);
+    assert!(keyboard.undecided());
+
+    keyboard.add(b"[B");
+    assert!(!keyboard.undecided());
+    assert_eq!(keyboard.next(), Some(Key::Down));
+}
+
+/// And it is still the Escape key when nothing follows it.
+#[test]
+fn an_escape_nothing_follows_is_the_escape_key() {
+    let mut keyboard = Keyboard::default();
+    keyboard.add(&[0x1b]);
+
+    assert_eq!(keyboard.settle(), Some(Key::Escape));
+    assert!(!keyboard.undecided());
+    assert_eq!(keyboard.next(), None);
+}
+
+/// Only a bare Escape is undecided. One with anything after it is already
+/// decidable, and settling would throw the rest away.
+#[test]
+fn only_an_escape_on_its_own_waits() {
+    let mut keyboard = Keyboard::default();
+    keyboard.add(b"\x1bq");
+
+    assert!(!keyboard.undecided());
+    assert_eq!(keyboard.settle(), None);
+    assert_eq!(keyboard.next(), Some(Key::Escape));
+    assert_eq!(keyboard.next(), Some(Key::Typed('q')));
+}

@@ -19,7 +19,7 @@ use crate::attach::Geometry;
 /// Corral's to consume.
 const TAKE: &[u8] = b"\x1b[?1049h";
 /// Give it back, cursor and all.
-const RELEASE: &[u8] = b"\x1b[?25h\x1b[?1049l";
+const RELEASE: &[u8] = b"\x1b[?7h\x1b[?25h\x1b[?1049l";
 /// Scrolling covers the whole screen again, whatever a session left set.
 const WHOLE_SCREEN: &[u8] = b"\x1b[r";
 /// No mouse reporting, in any of the ways a program turns it on.
@@ -29,6 +29,22 @@ const WHOLE_SCREEN: &[u8] = b"\x1b[r";
 /// click in the eighty-first column sends `q`. Nothing here reads a mouse, so
 /// this is not a mode this surface can be left in.
 const NO_MOUSE: &[u8] = b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l";
+/// Paste arrives as itself, not wrapped in markers this decoder has no meaning
+/// for.
+const NO_BRACKETED_PASTE: &[u8] = b"\x1b[?2004l";
+/// The plain character set in G0. A program killed with the line-drawing set
+/// selected leaves the whole list rendered as box glyphs, with nothing on
+/// screen to say why.
+const ASCII_CHARSET: &[u8] = b"\x1b(B";
+/// No autowrap.
+///
+/// A frame draws exactly one row per line and counts on that: a line wider
+/// than the terminal would take a second row, put the frame's last line on the
+/// bottom margin, and scroll the whole thing up. Character counts cannot
+/// prevent it — a double-width character is one character and two columns —
+/// so the terminal is told to clip instead of wrap, and the frame's arithmetic
+/// is true whatever it draws.
+const NO_WRAP: &[u8] = b"\x1b[?7l";
 
 const HIDE_CURSOR: &str = "\x1b[?25l";
 const SHOW_CURSOR: &str = "\x1b[?25h";
@@ -92,6 +108,9 @@ impl FullScreen {
         self.out.write_all(TAKE)?;
         self.out.write_all(WHOLE_SCREEN)?;
         self.out.write_all(NO_MOUSE)?;
+        self.out.write_all(NO_BRACKETED_PASTE)?;
+        self.out.write_all(ASCII_CHARSET)?;
+        self.out.write_all(NO_WRAP)?;
         self.out.flush()
     }
 
@@ -129,11 +148,11 @@ impl FullScreen {
     ///
     /// A takeover replays a child's own bytes, so the terminal comes back in
     /// whatever state that child left: `vim` on exit writes `\x1b[?1049l` and
-    /// drops out of the alternate screen, a full-screen program may leave a
-    /// scroll region set, and one killed mid-run leaves mouse reporting on.
-    /// None of that is something this surface can detect, and each of them
-    /// breaks it differently — so what it needs is asserted again rather than
-    /// assumed to have held.
+    /// drops out of the alternate screen, and one killed mid-run leaves behind
+    /// whatever it had set — a scroll region, mouse reporting, bracketed
+    /// paste, the line-drawing character set. None of that is something this
+    /// surface can detect, and each of them breaks it differently, so what it
+    /// needs is asserted again rather than assumed to have held.
     pub fn take_back(&mut self) -> std::io::Result<()> {
         self.claim()
     }
@@ -247,6 +266,11 @@ impl Frame {
     /// The text this terminal has room for, with nothing in it that moves the
     /// cursor.
     ///
+    /// A bound on how much is written, not on how many columns it paints:
+    /// autowrap is off (`NO_WRAP`), so a line wider than the terminal is
+    /// clipped by the terminal rather than taking a second row. A double-width
+    /// character therefore costs alignment and nothing else.
+    ///
     /// A row shows a title, which is the file name of a program somebody
     /// chose, and error text the daemon wrote. A Unix file name may contain a
     /// newline or an escape byte; drawn as it arrived it would advance rows
@@ -254,10 +278,10 @@ impl Frame {
     /// So a control character becomes the character that says a character
     /// could not be shown.
     ///
-    /// Cut in characters rather than display columns: this surface renders
-    /// program names and hexadecimal ids, so a double-width character can cost
-    /// alignment but never correctness, and a width table is a dependency Q5's
-    /// reasoning declines for the same reason it declined a framework.
+    /// Cut in characters rather than display columns: a width table is a
+    /// dependency Q5's reasoning declines for the same reason it declined a
+    /// framework, and with wrapping off it would buy alignment rather than
+    /// correctness.
     fn truncated(&self, text: &str) -> String {
         text.chars()
             .map(|character| {

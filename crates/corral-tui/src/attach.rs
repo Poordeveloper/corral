@@ -172,8 +172,12 @@ impl LocalKeys {
 #[derive(Debug)]
 pub enum OpenFailed {
     /// The daemon would not grant this session's terminal, or could not be
-    /// asked for it.
+    /// asked for it. A fact about the connection the grant was asked on.
     Refused(RequestError),
+    /// The grant was made and its channel could not be opened. A second
+    /// connection to the same rendezvous, so this says nothing about the one
+    /// that granted it, and a caller must not treat it as if it did.
+    Unopened(RequestError),
     /// The channel itself failed while the person was attached.
     Channel(std::io::Error),
 }
@@ -324,15 +328,25 @@ pub async fn open(
     session_id: &str,
     keys: &mut LocalKeys,
 ) -> Result<(), OpenFailed> {
-    let grant = connection
-        .terminal_attach(session_id)
-        .await
-        .map_err(OpenFailed::Refused)?;
+    // Bounded for the same reason every wait in this crate is: raw mode is on
+    // by now and the person is looking at a screen nobody is drawing, so a
+    // daemon that never answers must not be waited on forever (`crate::ANSWER`).
+    let grant =
+        match tokio::time::timeout(crate::ANSWER, connection.terminal_attach(session_id)).await {
+            Ok(grant) => grant.map_err(OpenFailed::Refused)?,
+            Err(_) => return Err(OpenFailed::Refused(no_answer())),
+        };
 
     let endpoint = connection.endpoint().to_path_buf();
-    let channel = Connection::open_terminal_channel(&endpoint, &grant.attach_token)
-        .await
-        .map_err(OpenFailed::Refused)?;
+    let opened = tokio::time::timeout(
+        crate::ANSWER,
+        Connection::open_terminal_channel(&endpoint, &grant.attach_token),
+    )
+    .await;
+    let channel = match opened {
+        Ok(channel) => channel.map_err(OpenFailed::Unopened)?,
+        Err(_) => return Err(OpenFailed::Unopened(no_answer())),
+    };
 
     // The session's size is what the daemon reports; this terminal's is what
     // the person has. Told to `run` so it can reconcile them at once —
@@ -464,10 +478,18 @@ pub async fn run(
     Ok(())
 }
 
+/// What ran out of patience, said the way a request failure is said.
+fn no_answer() -> RequestError {
+    RequestError::Protocol {
+        detail: format!("nothing within {} seconds", crate::ANSWER.as_secs()),
+    }
+}
+
 impl std::fmt::Display for OpenFailed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Refused(error) => write!(f, "{error}"),
+            Self::Unopened(error) => write!(f, "the terminal channel did not open: {error}"),
             Self::Channel(error) => write!(f, "the terminal channel ended: {error}"),
         }
     }

@@ -31,13 +31,21 @@ pub async fn start_session(
     // protection against a client that does (ADR 0002, Q13).
     let command_id = uuid::Uuid::new_v4().as_hyphenated().to_string();
 
-    connection
-        .session_new(SessionNewParams {
-            command_id,
-            argv,
-            cwd,
-            rows: geometry.map(|geometry| geometry.rows),
-            cols: geometry.map(|geometry| geometry.cols),
-        })
-        .await
+    let asked = connection.session_new(SessionNewParams {
+        command_id,
+        argv,
+        cwd,
+        rows: geometry.map(|geometry| geometry.rows),
+        cols: geometry.map(|geometry| geometry.cols),
+    });
+
+    match tokio::time::timeout(crate::ANSWER, asked).await {
+        Ok(started) => started,
+        // Bounded like every wait in this crate: the surface that asked is
+        // holding a terminal in raw mode, and a daemon that never answers must
+        // not leave a person there.
+        Err(_) => Err(RequestError::Protocol {
+            detail: format!("nothing within {} seconds", crate::ANSWER.as_secs()),
+        }),
+    }
 }

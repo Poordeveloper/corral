@@ -52,7 +52,16 @@ async fn main() -> ExitCode {
 
     let mut connection = match activate(&policy).await {
         Ok(connection) => connection,
-        Err(error) => return report_activation_failure(&error),
+        // The list is the one surface with something to do without a daemon:
+        // it says it could not reach one, keeps asking, and picks up when one
+        // answers. Exiting here would mean that recovery existed for every
+        // minute but the first.
+        Err(error) => {
+            return match cli.command {
+                Command::Tui => session_list(&policy, None).await,
+                _ => report_activation_failure(&error),
+            };
+        }
     };
 
     match cli.command {
@@ -60,7 +69,7 @@ async fn main() -> ExitCode {
         Command::List => list(&mut connection).await,
         Command::New { argv } => new_session(&mut connection, argv).await,
         Command::Attach { session } => attach(&mut connection, &session).await,
-        Command::Tui => session_list(&policy, connection).await,
+        Command::Tui => session_list(&policy, Some(connection)).await,
     }
 }
 
@@ -69,7 +78,7 @@ async fn main() -> ExitCode {
 /// The list needs the activation policy as well as the connection: a daemon
 /// that goes away while a person is watching the list is something it asks for
 /// again, on exactly the terms every other surface activates under (ADR 0001).
-async fn session_list(policy: &ClientActivationPolicy, connection: Connection) -> ExitCode {
+async fn session_list(policy: &ClientActivationPolicy, connection: Option<Connection>) -> ExitCode {
     match corral_tui::run(policy, connection).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

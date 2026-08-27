@@ -338,7 +338,7 @@ fn a_row_says_what_the_projection_says() {
     let item: SessionListItem =
         serde_json::from_value(session("s0-rest", "running", Some("unavailable"))).expect("decode");
 
-    let lines = row_text(&item);
+    let lines = Row::of(&item).lines;
 
     assert_eq!(
         lines,
@@ -411,13 +411,6 @@ fn the_frame_shows_the_lines_the_row_says_it_has() {
     for line in &row.lines {
         assert!(drawn.contains(line), "{line:?} was not drawn:\n{drawn:?}");
     }
-    let item: SessionListItem =
-        serde_json::from_value(session("s0-rest", "running", Some("unavailable"))).expect("decode");
-    assert_eq!(
-        row_text(&item),
-        row.lines.clone(),
-        "the CLI reads a different row"
-    );
 }
 
 /// A session that goes away does not send the cursor to the top of the list —
@@ -459,5 +452,39 @@ fn activation_waits_longer_each_time_it_fails_and_stops_at_a_ceiling() {
             .waiting()
             .is_some_and(|waiting| waiting <= Backoff::CEILING),
         "the wait grew past its ceiling"
+    );
+}
+
+/// Room left over above the window is spent. A window that only ever moved
+/// down leaves the rows before it unreachable on a screen with space for them
+/// — after the terminal grew, or after the rows below the cursor went away.
+#[test]
+fn a_window_with_room_to_spare_shows_what_is_above_it() {
+    let mut list = SessionList::default();
+    list.take(answered(running(10)));
+
+    // Six lines holds three two-line rows, and the cursor at the bottom pushes
+    // the window down to them.
+    list.selected = 9;
+    assert_eq!(list.window(6), 7..10);
+
+    // The same list on a screen with room for all of it.
+    assert_eq!(list.window(20), 0..10);
+}
+
+/// The same, when the rows below the cursor are the ones that went away.
+#[test]
+fn a_window_left_past_the_end_comes_back_to_what_is_there() {
+    let mut list = SessionList::default();
+    list.take(answered(running(10)));
+    list.selected = 9;
+    list.window(6);
+
+    list.take(answered(running(2)));
+
+    assert_eq!(
+        list.window(6),
+        0..2,
+        "the window stayed where the rows were"
     );
 }

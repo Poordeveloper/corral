@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use corral_client::{ClientActivationPolicy, Connection, RequestError, activate};
 use corral_protocol::method::{SessionListItem, SessionListResult};
 
+use crate::ANSWER;
 use crate::attach::{Geometry, LocalKeys, OpenFailed, RawMode};
 use crate::keys::{Key, Keyboard};
 use crate::presentation::{SessionPresentation, present};
@@ -29,21 +30,28 @@ use crate::screen::{Emphasis, Frame, FullScreen};
 /// live list does not justify defining the semantic event stream (grill Q4).
 const POLL: Duration = Duration::from_secs(1);
 
-/// How long one answer may take before the daemon counts as unreadable.
-///
-/// A client's own patience, not a wire contract. `session.list` is answered
-/// from published state on the daemon's reactor thread, so an answer this late
-/// means something is wrong rather than busy. The connection it would have
-/// arrived on is dropped rather than reused: its next read would be the answer
-/// to a question nobody is holding any more.
-const ANSWER: Duration = Duration::from_secs(5);
-
 /// The whole key map, which is also the footer: a person can see everything
 /// this surface does without being told about it anywhere else.
 const FOOTER: &str = "↑/↓ move · enter open · n new · q quit";
 
+/// How long an Escape waits to find out whether it was a key or the start of
+/// a sequence.
+///
+/// Long enough that the rest of a cursor key split across two reads has
+/// arrived, short enough that pressing Escape feels like pressing Escape
+/// (`Keyboard::undecided`).
+const ESCAPE_GRACE: Duration = Duration::from_millis(30);
+
 /// Run the session list until the person leaves it.
-pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std::io::Result<()> {
+///
+/// Takes whatever connection the caller already has, and `None` when it could
+/// not get one: this is the surface that survives a daemon it cannot reach, so
+/// failing to start one is something to report and keep asking about rather
+/// than a reason not to open at all.
+pub async fn run(
+    policy: &ClientActivationPolicy,
+    connection: Option<Connection>,
+) -> std::io::Result<()> {
     if Geometry::of(&std::io::stdin()).is_none() {
         return Err(std::io::Error::other(
             "the session list needs a terminal on standard input",
@@ -72,7 +80,7 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
 
     let mut daemon = Daemon {
         policy,
-        connection: Some(connection),
+        connection,
         retry: None,
     };
     let mut list = SessionList::default();
@@ -121,10 +129,10 @@ struct Row {
     /// What this row says, in order: the session, its state, and the
     /// capability line when there is one.
     ///
-    /// Built once per answer rather than per frame, and the one place a row's
-    /// text is decided: `draw_row` puts these on a screen and `row_text` hands
-    /// them to the CLI, so neither can start saying something the other does
-    /// not.
+    /// This surface's layout of it, built once per answer rather than per
+    /// frame. The CLI lays the same session out in columns instead — what the
+    /// two must agree on is `presentation`, which is where every word of both
+    /// comes from (grill Q2).
     lines: Vec<String>,
 }
 
@@ -195,6 +203,14 @@ async fn show(
                 }
                 draw(screen, list)?;
             }
+            // Nothing followed the Escape, so it was the Escape key.
+            () = tokio::time::sleep(ESCAPE_GRACE), if keyboard.undecided() => {
+                if let Some(key) = keyboard.settle()
+                    && let Some(chosen) = list.act(key) {
+                    return Ok(chosen);
+                }
+                draw(screen, list)?;
+            }
         }
     }
 }
@@ -243,6 +259,9 @@ async fn open(daemon: &mut Daemon<'_>, session_id: &str, keys: &mut LocalKeys) -
     match outcome {
         Ok(()) => None,
         Err(error) => {
+            // Only the grant was asked on this connection. The channel is a
+            // second socket to the same rendezvous, so its failures say
+            // nothing about whether this one can be asked again.
             if let OpenFailed::Refused(refused) = &error {
                 daemon.forget_if_unusable(refused);
             }
@@ -422,6 +441,8 @@ impl Daemon<'_> {
     async fn sessions(&mut self) -> Result<Listed, Unanswered> {
         let mut connection = self.borrow_for_one_question().await?;
 
+        // The connection is not put back when this runs out: its next read
+        // would be the answer to a question nobody is holding any more.
         let Ok(answered) = tokio::time::timeout(ANSWER, connection.session_list()).await else {
             return Err(Unanswered::Silent(format!(
                 "nothing within {} seconds",
@@ -598,23 +619,32 @@ impl SessionList {
             return 0..0;
         }
 
+        let budget = u32::from(budget);
         self.selected = self.selected.min(self.rows.len() - 1);
         self.first = self.first.min(self.selected);
         // Scrolled by as little as it takes to bring the selection into view,
-        // so a list does not jump under someone moving one row at a time.
-        while self.first < self.selected
-            && self.lines(self.first..=self.selected) > u32::from(budget)
-        {
+        // so a list does not jump under someone moving one row at a time. The
+        // total is carried rather than re-summed, because this runs on every
+        // frame and every keystroke.
+        let mut used = self.lines(self.first..=self.selected);
+        while self.first < self.selected && used > budget {
+            used -= u32::from(self.rows[self.first].height());
             self.first += 1;
         }
 
-        let mut used = self.lines(self.first..=self.selected);
         let mut end = self.selected + 1;
-        while end < self.rows.len()
-            && used + u32::from(self.rows[end].height()) <= u32::from(budget)
-        {
+        while end < self.rows.len() && used + u32::from(self.rows[end].height()) <= budget {
             used += u32::from(self.rows[end].height());
             end += 1;
+        }
+
+        // Room left over above. A window that only ever moved down would leave
+        // the rows before it unreachable on a screen with space for them —
+        // after the terminal grew, or after the rows below the cursor went
+        // away.
+        while self.first > 0 && used + u32::from(self.rows[self.first - 1].height()) <= budget {
+            self.first -= 1;
+            used += u32::from(self.rows[self.first].height());
         }
 
         self.first..end
@@ -711,9 +741,12 @@ fn draw(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> 
     frame.reserve(0);
     match &list.typing {
         Some(typed) => {
+            // The footer is the whole key map, and this line replaces it: a
+            // person who pressed `n` by accident has no other way to find out
+            // that the surface is in a mode, or how to leave it.
             frame.line(
                 Emphasis::Secondary,
-                "The program and its arguments. Quoting is not interpreted.",
+                "The program and its arguments. Quoting is not interpreted. esc cancels.",
             );
             // "new session", not "run": Run is an internal noun, and the one
             // domain noun this surface exposes is Session (`PRODUCT.md` §8).
@@ -779,14 +812,6 @@ pub fn short_id(session_id: &str) -> &str {
     session_id
         .split_once('-')
         .map_or(session_id, |(head, _)| head)
-}
-
-/// The lines a row shows, without the styling that puts them on a screen.
-///
-/// Exists so the CLI's own list can be held to saying exactly what this one
-/// says about the same session (grill Q2).
-pub fn row_text(item: &SessionListItem) -> Vec<String> {
-    Row::of(item).lines
 }
 
 #[cfg(test)]

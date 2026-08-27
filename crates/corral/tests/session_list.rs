@@ -294,6 +294,28 @@ fn what_was_typed_after_open_reaches_the_session() {
     assert!(terminal.wait_for_exit().success());
 }
 
+/// The list opens against a daemon that never started, and says so.
+///
+/// It is the one surface with something to do without a daemon: recovery that
+/// only worked from minute two would be recovery a person never reaches, since
+/// the way they find out corrald is unreachable is by trying to open this.
+#[test]
+fn the_list_opens_even_when_no_daemon_could_be_started() {
+    // A peer that is reachable and never becomes protocol-ready is what an
+    // activation budget exists for, and running out of it is what a corrald
+    // that cannot start looks like from here.
+    let account =
+        TestAccount::new("tui-no-daemon").with_activation_deadline(Duration::from_secs(1));
+    let _daemon = spawn_fake_daemon(&account.socket(), FakeBehaviour::StaySilent);
+
+    let mut terminal = Terminal::spawn(account.corral_on_pty(&["tui"]), ROWS, COLS);
+
+    terminal.wait_for("corrald did not answer");
+
+    terminal.typed(b"q");
+    assert!(terminal.wait_for_exit().success());
+}
+
 /// The keyboard keeps working while a daemon does not answer.
 ///
 /// Raw mode holds `Ctrl-C` and `Ctrl-\`, so a surface that stops reading keys

@@ -46,9 +46,34 @@ impl Keyboard {
 
     /// The next key, or `None` while what is held is not a key yet.
     pub fn next(&mut self) -> Option<Key> {
+        if self.undecided() {
+            return None;
+        }
         let (key, consumed) = decode_one(&self.held)?;
         self.held.drain(..consumed);
         Some(key)
+    }
+
+    /// Whether all that is held is an Escape that could still become a
+    /// sequence.
+    ///
+    /// The one ambiguity a decoder cannot settle from bytes alone: `ESC` is
+    /// both the Escape key and the first byte of every cursor key. A local
+    /// terminal writes a cursor key in one go, but one behind ssh or tmux can
+    /// hand over the `ESC` and the rest in two reads — and deciding early
+    /// makes Down cancel the prompt and then type `[` and `B` into it. So it
+    /// waits, and the caller decides when nothing has followed.
+    pub fn undecided(&self) -> bool {
+        self.held == [ESCAPE]
+    }
+
+    /// Nothing followed the Escape, so it was the key.
+    pub fn settle(&mut self) -> Option<Key> {
+        if !self.undecided() {
+            return None;
+        }
+        self.held.clear();
+        Some(Key::Escape)
     }
 
     /// Everything read but not turned into a key.
@@ -60,6 +85,9 @@ impl Keyboard {
         std::mem::take(&mut self.held)
     }
 }
+
+/// The byte that begins every sequence, and is also a key.
+const ESCAPE: u8 = 0x1b;
 
 /// The escape-sequence introducers a cursor key arrives under.
 ///
@@ -82,7 +110,10 @@ const FINAL: std::ops::RangeInclusive<u8> = 0x40..=0x7e;
 pub(crate) fn decode(bytes: &[u8]) -> Vec<Key> {
     let mut keyboard = Keyboard::default();
     keyboard.add(bytes);
-    std::iter::from_fn(|| keyboard.next()).collect()
+    let mut keys: Vec<Key> = std::iter::from_fn(|| keyboard.next()).collect();
+    // Nothing follows a burst a test hands over whole.
+    keys.extend(keyboard.settle());
+    keys
 }
 
 /// The next key, and how many bytes it took.
@@ -96,7 +127,7 @@ pub fn decode_one(bytes: &[u8]) -> Option<(Key, usize)> {
     let byte = *bytes.first()?;
 
     match byte {
-        0x1b => escape_sequence(bytes),
+        ESCAPE => escape_sequence(bytes),
         b'\r' | b'\n' => Some((Key::Enter, 1)),
         // Both, because which one a terminal sends for its backspace key is a
         // local setting rather than a fact about the key.

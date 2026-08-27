@@ -18,6 +18,15 @@
 //! This crate is a client. It renders what `corrald` reports and derives no
 //! state of its own (`AGENTS.md` §Runtime truth).
 
+/// How long this crate waits for `corrald` to answer one question.
+///
+/// A client's own patience, not a wire contract, and the same for every
+/// question because the reason is the same for all of them: raw mode holds
+/// `Ctrl-C` and `Ctrl-\`, so a surface waiting on a daemon that will never
+/// answer is one a person cannot leave from the terminal they are at. Every
+/// wait this crate takes is bounded by it.
+pub(crate) const ANSWER: std::time::Duration = std::time::Duration::from_secs(5);
+
 mod attach;
 mod keys;
 mod launch;
@@ -25,7 +34,7 @@ mod list;
 mod presentation;
 mod screen;
 
-pub use attach::{Geometry, LocalKeys, OpenFailed, RawMode, open};
+pub use attach::{LocalKeys, OpenFailed, RawMode, open};
 pub use launch::start_session;
-pub use list::{row_text, run, short_id};
+pub use list::{run, short_id};
 pub use presentation::{MainState, SessionPresentation, present};

@@ -11,11 +11,15 @@ fn listed(execution_state: &str, terminal_access: Option<TerminalAccess>) -> Ses
     }
 }
 
-/// One projection, asserted from both of its callers. Two surfaces describing
-/// the same session differently would be worse than either being wrong alone
-/// (grill Q2), and nothing but a test keeps them from drifting.
+/// One projection, and this surface says what it says. The two surfaces lay a
+/// row out differently on purpose; what they must not do is describe the same
+/// session differently, which would be worse than either being wrong alone
+/// (grill Q2).
+///
+/// Asserted against the projection rather than against the list's own layout,
+/// because the projection is what both of them read.
 #[test]
-fn the_cli_says_what_the_session_list_says_about_the_same_session() {
+fn the_cli_says_what_the_projection_says_about_a_session() {
     for execution_state in ["running", "exited", "unknown", "from-a-later-build"] {
         for access in [
             Some(TerminalAccess::Available),
@@ -23,16 +27,16 @@ fn the_cli_says_what_the_session_list_says_about_the_same_session() {
             None,
         ] {
             let item = listed(execution_state, access);
+            let presented = corral_tui::present(&item);
             let printed = session_rows(&item).join("\n");
 
-            // The first line of a row is the identity and the title, which the
-            // two surfaces lay out differently on purpose. Everything after it
-            // is the state text, and that must be identical.
-            for said in corral_tui::row_text(&item).into_iter().skip(1) {
+            let mut said = vec![presented.state_line()];
+            said.extend(presented.screen.map(str::to_owned));
+            for line in said {
                 assert!(
-                    printed.contains(&said),
-                    "{execution_state}/{access:?}: the list says {said:?}, the CLI printed \
-                     {printed:?}"
+                    printed.contains(&line),
+                    "{execution_state}/{access:?}: the projection says {line:?}, the CLI \
+                     printed {printed:?}"
                 );
             }
         }
