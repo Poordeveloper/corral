@@ -22,7 +22,11 @@ fn offering_to_a_closed_queue_is_quiet() {
     let (deliveries, receiver) = queue();
     drop(receiver);
     deliveries.offer(delivered());
-    deliveries.run_ended(corral_core::RunId::mint());
+    // From a thread, because that is where its one caller lives.
+    let announcing = deliveries.clone();
+    std::thread::spawn(move || announcing.run_ended(corral_core::RunId::mint()))
+        .join()
+        .expect("the announcement returned");
 }
 
 /// A Run's ending rides the same queue as that Run's events, so it lands
@@ -35,7 +39,12 @@ async fn a_run_ending_arrives_behind_the_events_that_run_delivered() {
     let run = corral_core::RunId::mint();
 
     deliveries.offer(delivered());
-    deliveries.run_ended(run);
+    // Announced the way the run lifecycle recorder announces it: from a thread
+    // of its own, never from the reactor.
+    let announcing = deliveries.clone();
+    std::thread::spawn(move || announcing.run_ended(run))
+        .join()
+        .expect("the announcement returned");
     deliveries.offer(delivered());
 
     assert!(matches!(incoming.recv().await, Some(Ingest::Delivered(_))));

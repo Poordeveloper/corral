@@ -87,6 +87,21 @@ impl Serialize for TerminalAccess {
     }
 }
 
+/// Whatever a secondary field carried, or nothing.
+///
+/// The row's promises are its identity, its label, and its execution state. A
+/// provider fact is decoration beside them, so a shape this build cannot read
+/// — a number where a string was, an object that gained a required-looking
+/// field — degrades that fact to unknown rather than taking the whole session
+/// out of the list. An older peer must keep reading a list a newer daemon
+/// extended (`AGENTS.md` §Protocol).
+fn secondary_or_unknown<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    let carried = Option::<Value>::deserialize(deserializer)?;
+    Ok(carried.and_then(|value| serde_json::from_value(value).ok()))
+}
+
 /// Whatever the field carried, reduced to what this build can act on.
 ///
 /// Absent, null, a spelling this build does not know, and a value that is not
@@ -234,10 +249,18 @@ pub struct SessionListItem {
     /// carried: every provider fact in this phase rides the Attested launch
     /// channel, and a field for it would be one a later phase has to make
     /// mean something.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "secondary_or_unknown",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub provider: Option<ProviderFacts>,
     /// The latest still-relevant fact the agent reported. Absent means none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "secondary_or_unknown",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub agent_event: Option<AgentEvent>,
 }
 

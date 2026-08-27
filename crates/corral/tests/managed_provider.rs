@@ -371,6 +371,72 @@ fn a_contradicting_identity_report_refuses_the_continuation() {
     drop(daemon);
 }
 
+/// Contested is monotonic, and the report that tests it is the one that looks
+/// harmless: the original id, arriving again.
+///
+/// A person clears a conversation (a second identity, so a contest), then
+/// reopens the first one from the in-session picker. Corral must not take that
+/// as permission to stand behind the first id again — ADR 0004 D8 says later
+/// reports of the original id do not restore it, and clearing a contest needs
+/// a correction mechanism this phase does not have.
+#[test]
+fn the_original_identity_reported_again_does_not_undo_a_contest() {
+    let account = account("contested-restored");
+    let script = Script::new(&account, "contested-restored")
+        .holding()
+        .fires(&session_start(FIRST, "startup"))
+        .fires(&session_start(SECOND, "clear"))
+        .fires(&session_start(FIRST, "resume"))
+        .fires(&provider::stop(FIRST));
+    let daemon = daemon_running(&account, &script);
+    let session = new_claude(&account);
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    // Waited for through the last scripted event, so what follows reads a
+    // settled session rather than one still being told things.
+    wait_until(provider::DELIVERED, || {
+        listed(&sessions(&mut client, 1), &session).and_then(agent_event_kind) == Some("turn_ended")
+    });
+
+    let all = sessions(&mut client, 2);
+    let row = listed(&all, &session).expect("the contested session");
+    assert_eq!(
+        external_id(row),
+        None,
+        "the withdrawn claim came back: {row}",
+    );
+    assert_eq!(provider_name(row), Some("claude"));
+
+    let kinds = recorded_kinds(&account.registry());
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| *kind == "binding-contested")
+            .count(),
+        1,
+        "{kinds:?}",
+    );
+    assert!(
+        !kinds.iter().any(|kind| kind == "binding-confirmed"),
+        "a contested binding was confirmed again: {kinds:?}",
+    );
+
+    let refusal = client
+        .request(
+            3,
+            "session.resume",
+            Some(json!({"command_id": "resume-1", "session_id": session})),
+        )
+        .expect("session.resume answered");
+    assert!(
+        refused_with(&refusal).contains("contradicts the one Corral accepted"),
+        "{refusal}",
+    );
+
+    drop(daemon);
+}
+
 /// The regression that names the ruling. A contest is durable, so a restart
 /// does not hand the next continuation an identity Corral already knows is
 /// disputed (grill Q3).

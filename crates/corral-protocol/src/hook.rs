@@ -35,29 +35,6 @@ pub const MAX_HOOK_PAYLOAD_BYTES: usize = 256 * 1024;
 /// Why a delivery carries no payload. The only reason this version defines.
 pub const PAYLOAD_OMITTED_OVERSIZE: &str = "oversize";
 
-/// The same delivery with its payload dropped and marked.
-///
-/// The cap above bounds the payload; this bounds the *message*, which is what
-/// the channel actually has to carry. JSON escaping expands a control
-/// character six-fold, so a payload comfortably under the cap — pasted
-/// terminal output, say — can encode past the framing limit. Dropping it there
-/// would lose the event with no record; marking it keeps the rule that a
-/// systematic oversize is visible rather than silently missing
-/// (ADR 0004 D3).
-impl HookDelivery {
-    #[must_use]
-    pub fn without_payload(&self) -> Self {
-        Self {
-            hook_protocol_version: self.hook_protocol_version,
-            launch_token: self.launch_token.clone(),
-            provider: self.provider.clone(),
-            shim_version: self.shim_version.clone(),
-            payload: None,
-            payload_omitted: Some(PAYLOAD_OMITTED_OVERSIZE.to_owned()),
-        }
-    }
-}
-
 /// One hook event, as the provider produced it.
 ///
 /// The payload travels as the provider wrote it, because the relay is
@@ -152,6 +129,27 @@ impl HookDelivery {
             payload,
             payload_omitted,
         })
+    }
+
+    /// The same delivery with its payload dropped and marked.
+    ///
+    /// The cap bounds the payload; this is for what bounds the *message*,
+    /// which is what the channel actually has to carry. JSON escaping expands
+    /// a control character six-fold, so a payload comfortably under the cap —
+    /// pasted terminal output, say — can encode past the framing limit.
+    /// Dropping it there would lose the event with no record; marking it keeps
+    /// the rule that a systematic oversize is visible rather than silently
+    /// missing (ADR 0004 D3).
+    #[must_use]
+    pub fn without_payload(&self) -> Self {
+        Self {
+            hook_protocol_version: self.hook_protocol_version,
+            launch_token: self.launch_token.clone(),
+            provider: self.provider.clone(),
+            shim_version: self.shim_version.clone(),
+            payload: None,
+            payload_omitted: Some(PAYLOAD_OMITTED_OVERSIZE.to_owned()),
+        }
     }
 }
 

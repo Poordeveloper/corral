@@ -39,6 +39,13 @@ pub enum ErrorCode {
     /// do about it is the opposite: retrying is what `busy` invites and what
     /// this forbids — the same id will never mean this command.
     CommandIdConflict,
+    /// The agent a client asked to start is not one this daemon integrates.
+    ///
+    /// Its own code because what a surface does about it is its own: the
+    /// daemon names the agents it knows, and only the surface knows how a
+    /// person asks it for a plain command instead. Matching the daemon's
+    /// sentence would make that hint drift with the wording.
+    UnknownProvider,
     Unknown(String),
 }
 
@@ -60,6 +67,7 @@ impl ErrorCode {
             Self::ProtocolViolation => "protocol_violation",
             Self::Busy => "busy",
             Self::CommandIdConflict => "command_id_conflict",
+            Self::UnknownProvider => "unknown_provider",
             Self::Unknown(raw) => raw,
         }
     }
@@ -74,6 +82,7 @@ impl From<String> for ErrorCode {
             "protocol_violation" => Self::ProtocolViolation,
             "busy" => Self::Busy,
             "command_id_conflict" => Self::CommandIdConflict,
+            "unknown_provider" => Self::UnknownProvider,
             _ => Self::Unknown(raw),
         }
     }

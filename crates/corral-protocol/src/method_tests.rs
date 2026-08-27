@@ -1,4 +1,5 @@
 use super::*;
+use crate::ErrorCode;
 use serde_json::json;
 
 #[test]
@@ -291,4 +292,61 @@ fn session_resume_names_only_a_command_and_a_session() {
     let encoded = serde_json::to_value(&params).expect("encode");
 
     assert_eq!(encoded, json!({"command_id": "c1", "session_id": "s1"}),);
+}
+
+/// A secondary fact may not take the row down. The row's promises are its
+/// identity, its label, and its execution state; a provider fact is decoration
+/// beside them, so a shape this build cannot read degrades that fact to
+/// unknown rather than dropping the session out of the list
+/// (`AGENTS.md` §Protocol).
+#[test]
+fn a_secondary_fact_this_build_cannot_read_does_not_lose_the_row() {
+    let unreadable = [
+        json!({"kind": "turn_ended", "at_ms": 1.5}),
+        json!({"kind": 7, "at_ms": 1}),
+        json!("turn_ended"),
+        json!([]),
+    ];
+    for carried in unreadable {
+        let item = json!({
+            "session_id": "s1",
+            "title": "claude",
+            "execution_state": "running",
+            "agent_event": carried,
+        });
+
+        let decoded: SessionListItem =
+            serde_json::from_value(item).unwrap_or_else(|error| panic!("{carried}: {error}"));
+
+        assert_eq!(decoded.session_id, "s1", "{carried}");
+        assert_eq!(decoded.execution_state, "running", "{carried}");
+        assert!(decoded.agent_event.is_none(), "{carried}");
+    }
+}
+
+#[test]
+fn a_provider_block_this_build_cannot_read_does_not_lose_the_row() {
+    let item = json!({
+        "session_id": "s1",
+        "title": "claude",
+        "execution_state": "running",
+        "provider": {"name": ["claude"]},
+    });
+
+    let decoded: SessionListItem = serde_json::from_value(item).expect("decode");
+
+    assert_eq!(decoded.session_id, "s1");
+    assert!(decoded.provider.is_none());
+}
+
+/// A code this build does not know keeps its spelling rather than failing the
+/// response, and a code it does know is what behaviour hangs off.
+#[test]
+fn the_unknown_provider_code_survives_the_wire() {
+    let encoded = serde_json::to_value(ErrorCode::UnknownProvider).expect("encode");
+    assert_eq!(encoded, json!("unknown_provider"));
+    assert_eq!(
+        serde_json::from_value::<ErrorCode>(encoded).expect("decode"),
+        ErrorCode::UnknownProvider,
+    );
 }

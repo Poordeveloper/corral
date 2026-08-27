@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use corral_core::{
-    Assurance, Binding, BindingKey, BindingKind, Evidence, EvidenceSource, ExternalId, Provenance,
-    ProviderId, RunId,
+    Assurance, Binding, BindingKey, BindingKind, Evidence, EvidenceSource, ExternalId,
+    IdentityStatus, Provenance, ProviderId, RunId,
 };
 use corral_state::{BindingResolution, Contested, StateError};
 use tracing::{debug, info, warn};
@@ -84,14 +84,26 @@ impl Deliveries {
 
     /// Announce that a Run is over, behind everything it already delivered.
     ///
-    /// Never waits either: the caller is the thread that records run lifecycle
-    /// facts, and making it wait on this queue would put database work behind
-    /// hook interpretation.
+    /// This one waits, where a delivery does not, and the difference is what
+    /// each thing is. A dropped delivery costs one observation, which the
+    /// evidence model already tolerates. A dropped retirement leaves a token
+    /// resolving to a Run that is over for the daemon's whole life — the exact
+    /// state `LaunchTokens::forget_run` exists to prevent — so at-most-once is
+    /// the contract for evidence and not for this.
+    ///
+    /// Waiting is free of the deadlock it looks like: the caller is the run
+    /// lifecycle recorder, which already waits on the store, and it announces
+    /// an ending *before* it takes the store lock to record one. So a consumer
+    /// blocked on that lock cannot be blocked behind this send.
+    ///
+    /// **Called from outside the async runtime, and only from there.** That is
+    /// where its one caller lives — `run_lifecycle` is a thread of its own
+    /// precisely so nothing on a reaper's path touches the reactor — and
+    /// blocking a reactor thread is what tokio refuses outright.
     pub fn run_ended(&self, run: RunId) {
-        self.send(
-            Ingest::RunEnded(run),
-            "a run's launch token was not retired",
-        );
+        if self.sender.blocking_send(Ingest::RunEnded(run)).is_err() {
+            warn!("a run's launch token was not retired: the daemon is shutting down");
+        }
     }
 
     fn send(&self, ingest: Ingest, lost: &str) {
@@ -201,6 +213,21 @@ async fn apply(
 
     match state.provider_session_binding(scope.session).await? {
         None => establish(state, scope, report, reported_id, observed_at).await,
+        // Contested is monotonic, and this is where that is enforced rather
+        // than described. Later reports of the original id do not restore it,
+        // later reports of the conflicting id do not replace it, and a third
+        // creates nothing — every one of them is diagnostics from here on
+        // (ADR 0004 D8). Without this arm a report of the original id would
+        // land in `reobserved`, republish the claim the contest withdrew, and
+        // write a fresh confirmation for a binding Corral has said it no
+        // longer stands behind.
+        Some(existing) if existing.identity_status() == IdentityStatus::Contested => {
+            debug!(
+                session = %scope.session,
+                "a provider identity report on an already contested session changes nothing",
+            );
+            Ok(())
+        }
         Some(existing) if existing.key().external_id() == &reported_id => {
             reobserved(state, scope, &existing, report, observed_at).await
         }
@@ -366,9 +393,11 @@ async fn contest(
                  accepted; continuing this provider session is refused",
             );
         }
-        // Already contested. Diagnostics only: contested is monotonic, later
-        // reports of either id change nothing, and a second transition event
-        // would record a change that did not happen.
+        // Already contested. `apply` turns those away before they reach here,
+        // so this is the store answering about a race rather than an ordinary
+        // path — and the answer is the same either way: contested is
+        // monotonic, and a second transition event would record a change that
+        // did not happen.
         Ok(Contested::Already(_)) => {
             debug!(
                 session = %scope.session,

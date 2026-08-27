@@ -75,15 +75,23 @@ enum Command {
     },
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> ExitCode {
+/// Synchronous, and that is for the relay's sake.
+///
+/// `#[tokio::main]` would build a reactor before this body ran and tear one
+/// down after it returned — on every hook invocation, several per agent turn,
+/// for a program that is entirely synchronous and uses none of it. Worse, the
+/// construction would sit *outside* the interference budget below while the
+/// user's agent waited for it, so the number would understate what a hook
+/// actually costs (ADR 0004 D4). Everything that does need a reactor gets one
+/// after the relay has been answered.
+fn main() -> ExitCode {
     // Before the command line is even read: the relay's budget is the
     // interference one hook invocation costs the user's agent, and the parse
     // is part of the invocation (ADR 0004 D4).
     let started = std::time::Instant::now();
     let cli = Cli::parse();
 
-    // Before activation, and that is the whole point: the relay never starts
+    // Before activation, and before a reactor exists: the relay never starts
     // `corrald` and never takes the rendezvous lock. A shim that could
     // activate the daemon would be a shim that can delay the user's agent by
     // however long a cold start takes (ADR 0004 D1).
@@ -91,6 +99,20 @@ async fn main() -> ExitCode {
         return relay::deliver(token, provider, started);
     }
 
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(source) => {
+            eprintln!("corral: this surface could not start: {source}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(serve(cli))
+}
+
+async fn serve(cli: Cli) -> ExitCode {
     let policy = ClientActivationPolicy::resolve();
 
     let mut connection = match activate(&policy).await {
@@ -157,8 +179,10 @@ async fn new_session(
             let code = report_request_failure(&error);
             // The daemon names the agents it knows; the form for a plain
             // command is this surface's own syntax, so this surface is what
-            // states it.
-            if let Some(named) = named {
+            // states it — and only for the refusal it answers. Printed after
+            // any other failure it would send a person to start an *unmanaged*
+            // session, which is the opposite of what they asked for.
+            if let (Some(named), true) = (named, unknown_agent(&error)) {
                 eprintln!("For a plain command, use: corral new -- {named}");
             }
             return code;
@@ -169,6 +193,18 @@ async fn new_session(
     // moment the terminal opens.
     eprintln!("session {}", started.session_id);
     attach(connection, &started.session_id).await
+}
+
+/// Whether the daemon refused because it does not integrate that agent.
+///
+/// Read off the code rather than the sentence: behaviour hangs off the code
+/// alone, and a hint matched against prose would drift the first time the
+/// prose did.
+fn unknown_agent(error: &RequestError) -> bool {
+    matches!(
+        error,
+        RequestError::Refused(refusal) if refusal.code == corral_protocol::ErrorCode::UnknownProvider
+    )
 }
 
 /// Continue a session as a new run, and attach to it.

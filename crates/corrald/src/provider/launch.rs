@@ -134,8 +134,18 @@ impl LaunchToken {
         self.0.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
+    /// Read a token back, or refuse it.
+    ///
+    /// Canonical, deliberately: exactly the form `to_wire` emits, and no other.
+    /// `from_str_radix` accepts a leading sign and either case, so `"+f"`,
+    /// `"0F"` and `"0f"` would all decode to one byte and three distinct wire
+    /// strings would name one token. The value is not authorization, so nothing
+    /// escalates — but a decode that is not injective makes `to_wire` and
+    /// `from_wire` stop being each other's inverse, and anything that later
+    /// logs or compares the raw form would disagree with what resolution did.
     pub fn from_wire(raw: &str) -> Option<Self> {
-        if raw.len() != 32 {
+        let lowercase_hex = |byte: u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte);
+        if raw.len() != 32 || !raw.bytes().all(lowercase_hex) {
             return None;
         }
         let mut bytes = [0_u8; 16];

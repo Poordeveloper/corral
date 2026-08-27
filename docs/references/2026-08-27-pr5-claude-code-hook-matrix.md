@@ -179,6 +179,38 @@ correction / re-identification mechanism ADR 0004 D8 already names as future
 work. Corral records the normalized origin (`replaced`) in its diagnostics so
 the cause is findable; nothing decides on it.
 
+### 10. A caller's `--` swallows Corral's own flags — **pass, and it changed the code**
+
+Expected: unknown. Scenario 8 fixed *where* Corral's `--settings` goes; this
+asks whether position is enough.
+
+Command: `claude -p "…" -- --settings <file>`.
+
+Observed: the run completed normally and **not one hook fired**. Everything
+after the end-of-options marker is a positional argument, so `--settings` was
+read as prompt text.
+
+Consequence: position protects against a repeated flag and not against `--`.
+Corral appends its own flags after a caller's, so an end-of-options marker
+among them is refused alongside `--settings` itself. Both reach the same
+outcome — a session that looks managed and can never report — and both are
+refused before a token is minted or a file is written.
+
+### 11. `--setting-sources` does not suppress the injected file — **pass**
+
+Expected: unknown. `--setting-sources` restricts which of the user's own
+settings files load, and the help text claims `--settings` still applies.
+
+Command: `claude -p "…" --setting-sources user --settings <file>`.
+
+Observed: both hooks fired. The CLI-supplied file is not one of the sources
+that flag governs.
+
+Consequence: it stays a pass-through argument. It is recorded because the test
+that allows it should rest on a driven scenario rather than on a help string —
+an allow-list resting on an assumption would bless the same silent-unmanaged
+failure scenarios 8 and 10 exist to prevent.
+
 ## Relay interference, measured
 
 Not a provider behaviour, but the number ADR 0004 D4 asks for evidence on. One
@@ -187,11 +219,15 @@ read, connect, framed delivery, and the acknowledgement — against a live
 `corrald` on this machine:
 
 ```text
-n=100   min 2.8 ms   p50 3.0 ms   p90 3.1 ms   p99 3.7 ms   max 3.7 ms
+n=100   min 2.7 ms   p50 2.8 ms   p90 3.0 ms   p99 3.3 ms   max 3.3 ms
 ```
 
 Against no daemon at all (the fail-open path, which is the common case when
 Corral is not running): p50 2.9 ms, max 3.2 ms over 60 runs.
+
+Measured after the relay stopped building an async runtime it never used. The
+earlier figures — p50 3.0 ms, p99 3.7 ms — are what that construction cost,
+and it sat outside the budget rather than inside it.
 
 The 50 ms budget holds with an order of magnitude to spare. It is not asserted
 per run: a deadline that tight on a loaded machine is a flake generator, and
@@ -209,8 +245,10 @@ the flake law owns that trade (`AGENTS.md` §Tests).
 - Scenario 9 drove `/clear`. `/compact` was not driven; it is treated as the
   same normalized origin on the documented `source` value alone, and nothing
   decides on that value.
-- Scenario 8 exercised two `--settings`. Three or more, and the interaction
-  with `--setting-sources`, were not driven.
+- Scenario 8 exercised two `--settings`. Three or more were not driven.
+- Scenario 10 drove one `--` before Corral's flags. Whether a provider ever
+  treats a later `--` differently was not driven; the refusal does not depend
+  on the answer.
 - Every scenario used a project-local scratch directory. Behaviour with a
   project that has its own `.claude/settings.json` declaring the same hooks was
   not driven — ADR 0004 D6's additive claim rests on the flag's documented

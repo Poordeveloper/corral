@@ -643,8 +643,9 @@ fn read_session_new(request: &Request) -> Result<NewSession, ProtocolError> {
             ));
         }
         (Some(name), None) => {
-            let provider =
-                KnownProvider::from_name(name).ok_or_else(|| invalid(unknown_provider(name)))?;
+            let provider = KnownProvider::from_name(name).ok_or_else(|| {
+                ProtocolError::new(ErrorCode::UnknownProvider, unknown_provider(name))
+            })?;
             // Before anything is minted or written: an argument that would
             // compete with Corral's own injection is refused rather than
             // dropped, because either silence would be a lie — one about the
@@ -808,10 +809,12 @@ async fn execute_session_new(
                 session,
                 run,
                 provider,
-                SessionOrigin::Minted,
+                SessionOwnership::CreatedHere,
                 &working_directory,
                 |settings| provider::launch_argv(provider, settings, &args),
-            ) {
+            )
+            .await
+            {
                 Ok(composed) => composed,
                 // Nothing has been spawned, so nothing is left running. A managed
                 // session that could not be given its hook injection is refused
@@ -1001,6 +1004,9 @@ fn read_session_resume(request: &Request) -> Result<ResumeSession, ProtocolError
 /// executions driving one conversation (grill Q7).
 enum ResumeRefused {
     NotThisDaemon,
+    /// The live runtime could not be consulted at all. Not a fact about this
+    /// Session — the same request may simply be sent again.
+    RuntimeUnavailable,
     IdentityUnknown,
     Eligibility(NativeResumeEligibility),
     UnknownProvider(String),
@@ -1050,15 +1056,19 @@ async fn resume_plan(
     // launch this Session does not know where it ran, and a provider resolves
     // which of its own sessions an id names by the directory it was started
     // in. Substituting one would ask for a conversation that is not there.
-    let Some(working_directory) = state.with_runtime(|runtime| {
+    // The two `None`s here are different answers and are kept apart. A runtime
+    // that could not be consulted is a lock a holder panicked under, which says
+    // nothing about this Session; a Session the runtime does not hold is the
+    // factual claim below.
+    let Some(known) = state.with_runtime(|runtime| {
         runtime
             .sessions
             .get(session)
             .map(|handle| handle.working_directory().to_path_buf())
     }) else {
-        return Ok(Err(ResumeRefused::NotThisDaemon));
+        return Ok(Err(ResumeRefused::RuntimeUnavailable));
     };
-    let Some(working_directory) = working_directory else {
+    let Some(working_directory) = known else {
         return Ok(Err(ResumeRefused::NotThisDaemon));
     };
 
@@ -1110,7 +1120,12 @@ async fn execute_session_resume(
         Ok(Ok(plan)) => plan,
         Ok(Err(refused)) => {
             return Ok(Concluded::Refused {
-                code: ErrorCode::InvalidParams,
+                // A refusal a caller may simply send again is `busy`; every
+                // other one is a state this request cannot change by repeating.
+                code: match refused {
+                    ResumeRefused::RuntimeUnavailable => ErrorCode::Busy,
+                    _ => ErrorCode::InvalidParams,
+                },
                 message: refused.to_string(),
             });
         }
@@ -1123,10 +1138,12 @@ async fn execute_session_resume(
         session,
         run,
         plan.provider,
-        SessionOrigin::Existing,
+        SessionOwnership::Preexisting,
         &plan.working_directory,
         |settings| provider::resume_argv(plan.provider, &plan.external_id, settings),
-    ) {
+    )
+    .await
+    {
         Ok(composed) => composed,
         Err(message) => {
             return Ok(Concluded::Refused {
@@ -1209,6 +1226,9 @@ impl std::fmt::Display for ResumeRefused {
                 "this session was not started by the running Corral daemon, so Corral does not \
                  know where it ran and will not continue it somewhere else",
             ),
+            Self::RuntimeUnavailable => {
+                f.write_str("Corral could not check this session just now; try again")
+            }
             Self::IdentityUnknown => f.write_str(
                 "Corral has not learned which provider session this is, so there is nothing to \
                  continue",
@@ -1225,7 +1245,7 @@ impl std::fmt::Display for ResumeRefused {
             }
             Self::UnknownProvider(name) => write!(
                 f,
-                "this session runs {name}, which this build does not know how to continue"
+                "this session belongs to {name}, which this build does not know how to continue"
             ),
             Self::RunStillLive => {
                 f.write_str("this session is still running, so there is nothing to continue")
@@ -1234,7 +1254,9 @@ impl std::fmt::Display for ResumeRefused {
                 "Corral cannot verify that the previous run has exited, so it will not resume \
                  this provider session automatically",
             ),
-            Self::NoPreviousRun => f.write_str("this session has no recorded run to continue from"),
+            Self::NoPreviousRun => {
+                f.write_str("Corral has no record of this session ever having started")
+            }
         }
     }
 }
@@ -1251,12 +1273,20 @@ impl std::fmt::Display for ResumeRefused {
 /// differ in exactly one thing — the arguments — and everything the order
 /// above protects is the same for both. `argv` receives the injected file's
 /// path and returns the provider's command line.
-fn compose_provider_launch(
+///
+/// The file is written on the blocking pool. Locating the relay stats a path
+/// and publishing the settings ends in an `fsync`, which on a loaded or
+/// network-backed filesystem is tens to hundreds of milliseconds — and this
+/// daemon has one reactor thread. Spending it here would stop every other
+/// request, stop the hook endpoint accepting, and push relays past their
+/// interference budget, which is the same reason the spawn and every store
+/// call are already moved off it.
+async fn compose_provider_launch(
     state: &Arc<DaemonState>,
     session: CorralSessionId,
     run: RunId,
     provider: KnownProvider,
-    minted: SessionOrigin,
+    ownership: SessionOwnership,
     working_directory: &std::path::Path,
     argv: impl FnOnce(&std::path::Path) -> Vec<std::ffi::OsString>,
 ) -> Result<(LaunchRequest, Option<Injected>), String> {
@@ -1280,18 +1310,24 @@ fn compose_provider_launch(
     // and forgetting that would blank a live row over a launch that failed.
     let forget = move |state: &Arc<DaemonState>| {
         state.forget_launch_token(token);
-        if minted == SessionOrigin::Minted {
+        if ownership == SessionOwnership::CreatedHere {
             state.with_runtime(|runtime| runtime.reported.forget(session));
         }
     };
 
-    let settings = match provider::launch::relay_command(provider, token)
-        .and_then(|relay| InjectedSettings::write(state.launch_dir(), run, provider, &relay))
-    {
+    let launch_dir = state.launch_dir().to_path_buf();
+    let written = tokio::task::spawn_blocking(move || {
+        provider::launch::relay_command(provider, token)
+            .and_then(|relay| InjectedSettings::write(&launch_dir, run, provider, &relay))
+            .map_err(|failed| failed.to_string())
+    })
+    .await
+    .unwrap_or_else(|_| Err("the launch could not be prepared".to_owned()));
+    let settings = match written {
         Ok(settings) => settings,
         Err(failed) => {
             forget(state);
-            return Err(failed.to_string());
+            return Err(failed);
         }
     };
 
@@ -1305,7 +1341,7 @@ fn compose_provider_launch(
             Some(Injected {
                 token,
                 session,
-                minted,
+                ownership,
             }),
         )),
         Err(refusal) => {
@@ -1321,20 +1357,24 @@ fn compose_provider_launch(
 /// The two paths differ in exactly one consequence — what may be undone when
 /// the launch fails — and a boolean at the call site would not have said which
 /// way round it read.
+///
+/// Deliberately not called an origin: `provider::SessionOrigin` is the
+/// normalized answer to how a *provider* session started, and one crate may
+/// not spell two unrelated concepts the same way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SessionOrigin {
+enum SessionOwnership {
     /// `session.new`: the Session id was minted for this launch and names
     /// nothing yet.
-    Minted,
+    CreatedHere,
     /// `session.resume`: the Session already exists and already has evidence.
-    Existing,
+    Preexisting,
 }
 
 /// What a launch that may still be abandoned left behind.
 struct Injected {
     token: LaunchToken,
     session: CorralSessionId,
-    minted: SessionOrigin,
+    ownership: SessionOwnership,
 }
 
 /// Undo a launch that never became one.
@@ -1348,7 +1388,7 @@ fn abandon_injection(state: &Arc<DaemonState>, injected: Option<Injected>, run: 
     };
     InjectedSettings::remove_for(state.launch_dir(), run);
     state.forget_launch_token(injected.token);
-    if injected.minted == SessionOrigin::Minted {
+    if injected.ownership == SessionOwnership::CreatedHere {
         state.with_runtime(|runtime| runtime.reported.forget(injected.session));
     }
 }

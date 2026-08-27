@@ -120,13 +120,12 @@ async fn the_session_list_is_empty_and_says_so() {
 /// person reads names facts and actions, never Corral's machinery
 /// (`PRODUCT.md` §8).
 ///
-/// Session is the one domain noun a person is shown. `run` survives in exactly
-/// one sentence — the one the founder fixed verbatim for an unverifiable end
-/// (grill Q7) — and nowhere else.
+/// Session is the one domain noun a person is shown.
 #[test]
 fn no_continuation_refusal_exposes_corral_machinery() {
     let refusals = [
         ResumeRefused::NotThisDaemon,
+        ResumeRefused::RuntimeUnavailable,
         ResumeRefused::IdentityUnknown,
         ResumeRefused::Eligibility(NativeResumeEligibility::IdentityContested),
         ResumeRefused::Eligibility(NativeResumeEligibility::AssuranceTooWeak),
@@ -155,15 +154,43 @@ fn no_continuation_refusal_exposes_corral_machinery() {
     }
 }
 
-/// The one sanctioned exception, kept where a change to it is visible: the
-/// founder fixed this sentence, and a reworded version would be a different
-/// promise about what Corral checked (grill Q7).
+/// `Run` is internal vocabulary, and it survives in exactly one sentence: the
+/// one the founder fixed verbatim (grill Q7), where rewording it would be a
+/// different promise about what Corral checked. Asserted rather than claimed
+/// in a comment, so the next refusal that reaches for the word has to argue
+/// with a test.
 #[test]
-fn the_unverifiable_refusal_states_the_ruling_verbatim() {
+fn the_word_run_reaches_a_person_in_one_refusal_only() {
+    let verbatim = "Corral cannot verify that the previous run has exited, so it will not \
+                    resume this provider session automatically";
+    assert_eq!(ResumeRefused::EndUnverifiable.to_string(), verbatim);
+
+    let says_run = |refusal: &ResumeRefused| {
+        refusal
+            .to_string()
+            .split(|character: char| !character.is_alphanumeric())
+            .any(|word| word.eq_ignore_ascii_case("run") || word.eq_ignore_ascii_case("runs"))
+    };
+    let refusals = [
+        ResumeRefused::NotThisDaemon,
+        ResumeRefused::RuntimeUnavailable,
+        ResumeRefused::IdentityUnknown,
+        ResumeRefused::Eligibility(NativeResumeEligibility::IdentityContested),
+        ResumeRefused::Eligibility(NativeResumeEligibility::AssuranceTooWeak),
+        ResumeRefused::Eligibility(NativeResumeEligibility::Eligible),
+        ResumeRefused::UnknownProvider("codex".to_owned()),
+        ResumeRefused::RunStillLive,
+        ResumeRefused::EndUnverifiable,
+        ResumeRefused::NoPreviousRun,
+    ];
     assert_eq!(
-        ResumeRefused::EndUnverifiable.to_string(),
-        "Corral cannot verify that the previous run has exited, so it will not resume this \
-         provider session automatically",
+        refusals.iter().filter(|refusal| says_run(refusal)).count(),
+        1,
+        "{:?}",
+        refusals
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>(),
     );
 }
 

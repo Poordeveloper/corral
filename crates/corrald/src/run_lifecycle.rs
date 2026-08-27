@@ -77,7 +77,9 @@ pub fn record_observed_runs(
                 // this Run is now, it is not one whose hooks may still speak
                 // for the Session (ADR 0004 D5). Announced rather than done
                 // here, so it lands behind the events that Run already
-                // delivered instead of racing them.
+                // delivered instead of racing them — and announced *before*
+                // the store lock is taken below, so a consumer waiting on that
+                // lock can never be what this waits behind.
                 //
                 // The file goes only on an established exit — destroying it
                 // needs ownership evidence as strong as the destruction, and an

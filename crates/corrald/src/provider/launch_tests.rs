@@ -89,6 +89,26 @@ fn a_token_survives_its_own_wire_form() {
     }
 }
 
+/// Future input: the decode is canonical, so two wire strings never name one
+/// token. Integer parsing accepts a leading sign and either case, so `"+f"`,
+/// `"0F"` and `"0f"` would otherwise all decode to 15 — and `to_wire` /
+/// `from_wire` would stop being each other's inverse, which anything that logs
+/// or compares the raw form would then disagree with.
+#[test]
+fn a_token_whose_wire_form_is_not_canonical_is_refused() {
+    for spelling in [
+        "+f".repeat(16),
+        "-1".repeat(16),
+        // A different spelling of the same bytes is still a different
+        // spelling: `to_wire` emits lowercase, so lowercase is the form.
+        "0F".repeat(16),
+        " ".repeat(32),
+    ] {
+        assert_eq!(spelling.len(), 32, "{spelling:?}");
+        assert_eq!(LaunchToken::from_wire(&spelling), None, "{spelling:?}");
+    }
+}
+
 /// A capability in a log outlives the launch it names.
 #[test]
 fn a_token_never_prints_itself() {

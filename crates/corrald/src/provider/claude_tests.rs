@@ -190,7 +190,30 @@ fn a_caller_supplied_settings_flag_is_refused_rather_than_dropped() {
     }
 }
 
+/// Corral appends its own flags after a caller's, so an end-of-options marker
+/// in the middle would turn them into prompt text. Verified first-party: with
+/// a `--` before it, `--settings` is consumed as a positional argument and not
+/// one hook fires (matrix scenario 10) — the same silent-unmanaged outcome as
+/// a displaced flag, reached without naming the flag at all.
+#[test]
+fn an_end_of_options_marker_is_refused() {
+    for spelling in [
+        vec!["--".to_owned()],
+        vec!["a".to_owned(), "--".to_owned(), "b".to_owned()],
+    ] {
+        let refusal = refuse_arguments(&spelling).expect_err("refused");
+        assert_eq!(refusal.argument, "--", "{spelling:?}");
+    }
+}
+
 /// Everything else a person may want to pass to their own agent is theirs.
+///
+/// `--setting-sources` earns its place here rather than being assumed: it
+/// restricts which of the user's own settings files load, and it was driven
+/// first-party alongside `--settings` to confirm the injected file still
+/// applies (matrix scenario 11). An allow-list resting on an undriven
+/// assumption would bless the same silent-unmanaged failure the two refusals
+/// above exist to prevent.
 #[test]
 fn ordinary_provider_arguments_pass_through() {
     for allowed in [
@@ -198,6 +221,10 @@ fn ordinary_provider_arguments_pass_through() {
         vec!["--model".to_owned(), "opus".to_owned()],
         vec!["--setting-sources".to_owned(), "user".to_owned()],
         vec!["--add-dir".to_owned(), "/work".to_owned()],
+        // Not the flag, and not the marker: a value that merely starts the
+        // same way is the caller's.
+        vec!["--settings-are-fine".to_owned()],
+        vec!["---".to_owned()],
     ] {
         assert_eq!(refuse_arguments(&allowed), Ok(()), "{allowed:?}");
     }

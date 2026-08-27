@@ -43,6 +43,14 @@ const SETTINGS_FLAG: &str = "--settings";
 /// The flag that continues a named conversation.
 const RESUME_FLAG: &str = "--resume";
 
+/// The end-of-options marker.
+///
+/// Corral appends its own flags after a caller's arguments, so one of these in
+/// the middle would turn them into prompt text — verified first-party: with a
+/// `--` before it, `--settings` is consumed as a positional argument and not
+/// one hook fires (matrix scenario 10).
+const END_OF_OPTIONS: &str = "--";
+
 /// The hook events Corral injects, and what each one means in Corral's
 /// vocabulary.
 ///
@@ -86,17 +94,19 @@ pub struct ArgumentRefused {
 
 /// Refuse provider arguments Corral cannot honour.
 ///
-/// A caller may pass anything to their own agent except the one flag Corral
-/// needs for itself. Refused rather than dropped: silently discarding a
-/// settings file a person asked for would be Corral deciding their
-/// configuration, and silently honouring it would be a session Corral believes
-/// it is watching and is not.
+/// Two, and they are the same objection twice: an argument that would take the
+/// place of Corral's own injection, and one that would stop it being read as an
+/// option at all. Everything else a person may want to pass is theirs.
+///
+/// Refused rather than dropped. Silently discarding a settings file a person
+/// asked for would be Corral deciding their configuration; silently accepting
+/// either would be a session Corral believes it is watching and is not.
 pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
     let equals = format!("{SETTINGS_FLAG}=");
-    match args
-        .iter()
-        .find(|argument| *argument == SETTINGS_FLAG || argument.starts_with(&equals))
-    {
+    let competing = |argument: &&String| {
+        *argument == SETTINGS_FLAG || argument.starts_with(&equals) || *argument == END_OF_OPTIONS
+    };
+    match args.iter().find(competing) {
         Some(argument) => Err(ArgumentRefused {
             argument: argument.clone(),
         }),
