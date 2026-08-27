@@ -6,9 +6,19 @@
 //! control surface is reachable from here, because this dispatcher serves one
 //! method and knows no others (ADR 0004 D2).
 //!
-//! The daemon alone creates and removes the socket, mode 0600. The relay never
-//! creates it: an absent socket means `corrald` is not running, which means
-//! fail open now.
+//! The daemon alone creates and removes the socket. The relay never creates
+//! it: an absent socket means `corrald` is not running, which means fail open
+//! now.
+//!
+//! The fence around it is the run directory, which is `0700` and checked on
+//! every start. The socket's own `0600` is set after the bind and is belt and
+//! braces: `bind` creates the node under the process umask, so there is a
+//! window, and closing it would mean tightening a process-wide umask around a
+//! call other threads share. The canonical socket is bound the same way for
+//! the same reason (ADR 0001: the modes are a transport fence, not a security
+//! boundary). A Corral-owned *file* is a different case and is created `0600`
+//! outright, because a file is opened rather than bound and the mode is free
+//! at creation.
 //!
 //! Receipt is acknowledged before the event is interpreted. The ack carries
 //! receipt and never a decision, so there is nothing for a shim to wait on

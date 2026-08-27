@@ -60,19 +60,6 @@ enum Command {
     },
     /// Open the session list.
     Tui,
-    /// Deliver one provider hook event to corrald. Internal.
-    ///
-    /// Hidden because nobody invokes it: an injected provider configuration
-    /// does, once per hook. It is a subcommand of this binary rather than a
-    /// second artifact so that installation, versioning, and the path a
-    /// settings file names stay one thing (ADR 0004 D1).
-    #[command(hide = true)]
-    HookRelay {
-        #[arg(long)]
-        provider: String,
-        #[arg(long)]
-        token: String,
-    },
 }
 
 /// Synchronous, and that is for the relay's sake.
@@ -86,19 +73,28 @@ enum Command {
 /// after the relay has been answered.
 fn main() -> ExitCode {
     // Before the command line is even read: the relay's budget is the
-    // interference one hook invocation costs the user's agent, and the parse
-    // is part of the invocation (ADR 0004 D4).
+    // interference one hook invocation costs the user's agent, and reading the
+    // arguments is part of the invocation (ADR 0004 D4).
     let started = std::time::Instant::now();
-    let cli = Cli::parse();
 
-    // Before activation, and before a reactor exists: the relay never starts
-    // `corrald` and never takes the rendezvous lock. A shim that could
-    // activate the daemon would be a shim that can delay the user's agent by
-    // however long a cold start takes (ADR 0004 D1).
-    if let Command::HookRelay { provider, token } = &cli.command {
-        return relay::deliver(token, provider, started);
+    // Before the parser, before activation, and before a reactor exists.
+    //
+    // Before the parser because a parser answers a command line it does not
+    // understand by writing usage to standard error and exiting non-zero,
+    // which Claude Code reads as a blocking hook decision — so an injected
+    // settings file naming a flag this build does not know would let the shim
+    // steer the agent by failing to recognise itself. Skew is normal: that
+    // file is written at launch and invokes whatever is installed when an
+    // event fires (ADR 0004 D3).
+    //
+    // Before activation because shims never start `corrald`: one that could
+    // would delay the user's agent by however long a cold start takes
+    // (ADR 0004 D1).
+    if let Some(relay) = relay::invocation(std::env::args_os()) {
+        return relay::deliver(&relay.token, &relay.provider, started);
     }
 
+    let cli = Cli::parse();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -126,8 +122,6 @@ async fn serve(cli: Cli) -> ExitCode {
         Command::New { provider, rest } => new_session(&mut connection, provider, rest).await,
         Command::Continue { session } => continue_session(&mut connection, &session).await,
         Command::Attach { session } => attach(&mut connection, &session).await,
-        // Answered above, before anything activated a daemon.
-        Command::HookRelay { .. } => ExitCode::SUCCESS,
         Command::Tui => session_list(&policy, connection).await,
     }
 }

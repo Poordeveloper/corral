@@ -43,14 +43,6 @@ const SETTINGS_FLAG: &str = "--settings";
 /// The flag that continues a named conversation.
 const RESUME_FLAG: &str = "--resume";
 
-/// The end-of-options marker.
-///
-/// Corral appends its own flags after a caller's arguments, so one of these in
-/// the middle would turn them into prompt text — verified first-party: with a
-/// `--` before it, `--settings` is consumed as a positional argument and not
-/// one hook fires (matrix scenario 10).
-const END_OF_OPTIONS: &str = "--";
-
 /// The hook events Corral injects, and what each one means in Corral's
 /// vocabulary.
 ///
@@ -67,19 +59,24 @@ const INJECTED: [(&str, AgentFactKind); 5] = [
 
 /// The argv of a fresh managed Claude session.
 ///
-/// The injected settings file goes **last**, after everything the caller
-/// passed. Verified first-party: given two `--settings`, Claude Code loads the
-/// last one and ignores the first (matrix scenario 8). A caller's flag placed
-/// after Corral's would therefore launch a session that looks managed and can
-/// never report — attested in the row and silent in fact.
+/// The injected settings file goes **first**, before anything the caller
+/// passed, and the two halves of that choice are both first-party evidence.
+/// Placed last it survives nothing: a caller's `--` turns it into prompt text,
+/// and a caller's trailing value-taking flag eats it as a value — both
+/// launching a session that looks managed and can never report (matrix
+/// scenario 10). Placed first, neither can reach it: a `--` after it is
+/// harmless (scenario 12), and a caller's flag with a missing value fails the
+/// launch loudly instead of degrading it silently.
 ///
-/// Position is the mechanism that holds for any spelling; `refuse_arguments`
-/// is what turns the one spelling Corral can recognise into an error a person
-/// can act on rather than a file of theirs quietly not loading.
+/// The one thing position cannot answer is a caller repeating the flag, since
+/// the last `--settings` is the one loaded (scenario 8) — which is what
+/// `refuse_arguments` is for.
 pub fn launch_argv(settings: &Path, args: &[String]) -> Vec<OsString> {
-    let mut argv: Vec<OsString> = args.iter().map(OsString::from).collect();
-    argv.push(OsString::from(SETTINGS_FLAG));
-    argv.push(OsString::from(settings.as_os_str()));
+    let mut argv = vec![
+        OsString::from(SETTINGS_FLAG),
+        OsString::from(settings.as_os_str()),
+    ];
+    argv.extend(args.iter().map(OsString::from));
     argv
 }
 
@@ -92,20 +89,20 @@ pub struct ArgumentRefused {
     pub argument: String,
 }
 
-/// Refuse provider arguments Corral cannot honour.
+/// Refuse the one provider argument Corral cannot honour.
 ///
-/// Two, and they are the same objection twice: an argument that would take the
-/// place of Corral's own injection, and one that would stop it being read as an
-/// option at all. Everything else a person may want to pass is theirs.
+/// One, because position answers everything else: a caller repeating
+/// `--settings` would displace Corral's own, since the last one is the one
+/// loaded. Everything else a person may want to pass to their own agent is
+/// theirs, including the separator.
 ///
 /// Refused rather than dropped. Silently discarding a settings file a person
-/// asked for would be Corral deciding their configuration; silently accepting
-/// either would be a session Corral believes it is watching and is not.
+/// asked for would be Corral deciding their configuration, and silently
+/// honouring it would be a session Corral believes it is watching and is not.
 pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
     let equals = format!("{SETTINGS_FLAG}=");
-    let competing = |argument: &&String| {
-        *argument == SETTINGS_FLAG || argument.starts_with(&equals) || *argument == END_OF_OPTIONS
-    };
+    let competing =
+        |argument: &&String| *argument == SETTINGS_FLAG || argument.starts_with(&equals);
     match args.iter().find(competing) {
         Some(argument) => Err(ArgumentRefused {
             argument: argument.clone(),

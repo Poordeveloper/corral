@@ -65,8 +65,14 @@ impl ReportedSessions {
     /// Record that a Session runs this provider, before it has reported
     /// anything.
     ///
-    /// Called at launch, so a managed session says which agent it is from the
-    /// first list that includes it rather than only once a hook has arrived.
+    /// Called at launch so the *first* fact to arrive is attributed to the
+    /// agent Corral started rather than to whatever a payload claims, and so
+    /// `session.list` carries the provider from the moment the Session exists.
+    /// The terminal surfaces draw nothing from it on its own — a row already
+    /// names the program it launched — but the field is a fact and the title
+    /// is a label, and a surface that wants the fact should not have to wait
+    /// for a hook to get it.
+    ///
     /// Idempotent across a resume: the same Session keeps whatever it has
     /// already learned.
     pub fn launched(&mut self, session: CorralSessionId, provider: KnownProvider) {

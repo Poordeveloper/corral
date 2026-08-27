@@ -190,11 +190,9 @@ Observed: the run completed normally and **not one hook fired**. Everything
 after the end-of-options marker is a positional argument, so `--settings` was
 read as prompt text.
 
-Consequence: position protects against a repeated flag and not against `--`.
-Corral appends its own flags after a caller's, so an end-of-options marker
-among them is refused alongside `--settings` itself. Both reach the same
-outcome — a session that looks managed and can never report — and both are
-refused before a token is minted or a file is written.
+Consequence: an injection placed *after* a caller's arguments is reachable by
+anything the caller writes — a separator, or a value-taking flag with its value
+missing. Scenario 12 settles where it goes instead.
 
 ### 11. `--setting-sources` does not suppress the injected file — **pass**
 
@@ -210,6 +208,26 @@ Consequence: it stays a pass-through argument. It is recorded because the test
 that allows it should rest on a driven scenario rather than on a help string —
 an allow-list resting on an assumption would bless the same silent-unmanaged
 failure scenarios 8 and 10 exist to prevent.
+
+### 12. The injection placed first survives everything after it — **pass, and it settled where it goes**
+
+Expected: unknown. Scenarios 8 and 10 ruled out placing it last; this asks
+whether placing it first is reachable from the other side.
+
+Commands: `claude --settings <file> -p -- "…"`, and
+`claude --settings <file> -p "…" --add-dir` (a value-taking flag with no
+value).
+
+Observed: with the injection first, a caller's `--` is harmless — both hooks
+fired. A caller's trailing value-taking flag with no value fails the launch
+outright (`error: option '--add-dir <directories...>' argument missing`) rather
+than degrading it.
+
+Consequence: Corral's `--settings` goes first, before anything the caller
+passed. Nothing written after it can reach it, and the one thing position
+cannot answer — a caller repeating the flag, where the last wins (scenario 8) —
+is answered by refusing that flag. A caller mistake now fails loudly instead of
+producing a session that looks managed and reports nothing.
 
 ## Relay interference, measured
 
@@ -246,9 +264,10 @@ the flake law owns that trade (`AGENTS.md` §Tests).
   same normalized origin on the documented `source` value alone, and nothing
   decides on that value.
 - Scenario 8 exercised two `--settings`. Three or more were not driven.
-- Scenario 10 drove one `--` before Corral's flags. Whether a provider ever
-  treats a later `--` differently was not driven; the refusal does not depend
-  on the answer.
+- Scenarios 10 and 12 drove one `--` on either side of Corral's flags, and one
+  value-taking flag with its value missing. The space of caller mistakes is not
+  enumerable; what was established is that the injection placed first is not
+  reachable from after it.
 - Every scenario used a project-local scratch directory. Behaviour with a
   project that has its own `.claude/settings.json` declaring the same hooks was
   not driven — ADR 0004 D6's additive claim rests on the flag's documented

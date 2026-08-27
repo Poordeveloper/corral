@@ -14,7 +14,7 @@
 //! evidence model already tolerates missed transitions.
 
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use corral_core::{
     Assurance, Binding, BindingKey, BindingKind, Evidence, EvidenceSource, ExternalId,
@@ -35,6 +35,23 @@ use crate::state::DaemonState;
 /// the daemon is already failing to keep up, and the honest answer is a
 /// dropped event rather than a growing backlog of stale ones.
 const QUEUE: usize = 256;
+
+/// The longest announcing a Run's ending may wait for room in that queue.
+///
+/// Derived from the recorder's own budget rather than chosen beside it: the
+/// thread that announces is the one whose every other wait is bounded by
+/// `LONGEST_RECORD`, and the shutdown grace is derived from that bound alone.
+/// An unaccounted wait here would quietly falsify that derivation.
+///
+/// Reaching it costs a token that resolves to a finished Run until the daemon
+/// exits, which is why it is said out loud rather than shrugged off — but a
+/// recorder parked forever behind hook interpretation would stop run endings
+/// reaching the log at all, and that is worse.
+const RETIREMENT_WAIT: Duration = crate::run_lifecycle::LONGEST_RECORD;
+
+/// How long to leave the queue alone between attempts. Short next to the wait
+/// above, which is what actually does the waiting.
+const BETWEEN_ATTEMPTS: Duration = Duration::from_millis(20);
 
 /// One delivery that passed the endpoint's checks, waiting to be interpreted.
 pub struct Delivered {
@@ -98,11 +115,27 @@ impl Deliveries {
     ///
     /// **Called from outside the async runtime, and only from there.** That is
     /// where its one caller lives — `run_lifecycle` is a thread of its own
-    /// precisely so nothing on a reaper's path touches the reactor — and
-    /// blocking a reactor thread is what tokio refuses outright.
+    /// precisely so nothing on a reaper's path touches the reactor.
     pub fn run_ended(&self, run: RunId) {
-        if self.sender.blocking_send(Ingest::RunEnded(run)).is_err() {
-            warn!("a run's launch token was not retired: the daemon is shutting down");
+        let deadline = Instant::now() + RETIREMENT_WAIT;
+        let mut waiting = Ingest::RunEnded(run);
+        loop {
+            match self.sender.try_send(waiting) {
+                Ok(()) => return,
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    // The daemon is on its way out; there is nothing left to
+                    // retire a token for.
+                    return;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
+                    if Instant::now() >= deadline {
+                        warn!(%run, "a run's launch token was not retired: the queue stayed full");
+                        return;
+                    }
+                    waiting = returned;
+                    std::thread::sleep(BETWEEN_ATTEMPTS);
+                }
+            }
         }
     }
 
@@ -200,10 +233,10 @@ async fn apply(
     report: &ProviderReport,
     observed_at: SystemTime,
 ) -> Result<(), StateError> {
+    let session = scope.session;
+    let provider = scope.provider;
     if let Some(kind) = report.fact {
         let fact = AgentFact { kind, observed_at };
-        let session = scope.session;
-        let provider = scope.provider;
         state.with_runtime(|runtime| runtime.reported.reported(session, provider, fact));
     }
 
@@ -211,7 +244,30 @@ async fn apply(
         return Ok(());
     };
 
-    match state.provider_session_binding(scope.session).await? {
+    // Most events say nothing new about identity: a turn started, a turn
+    // ended, the agent is waiting — each naming the same conversation Corral
+    // is already standing behind. Those write nothing durable, so asking the
+    // store would be a blocking-pool hop and a lock acquisition per prompt,
+    // serialized behind this one task, to be told what live state already
+    // knew. Live state cannot disagree with the log here: every value in it
+    // was published by this same step.
+    //
+    // The store is still the authority for everything that *does* write —
+    // establishing an identity, confirming one, and contesting one — and every
+    // one of those falls through.
+    let unchanged = state
+        .with_runtime(|runtime| {
+            runtime
+                .reported
+                .get(session)
+                .is_some_and(|held| held.external_id.as_ref() == Some(&reported_id))
+        })
+        .unwrap_or(false);
+    if unchanged && report.fact != Some(AgentFactKind::SessionStarted) {
+        return Ok(());
+    }
+
+    match state.provider_session_binding(session).await? {
         None => establish(state, scope, report, reported_id, observed_at).await,
         // Contested is monotonic, and this is where that is enforced rather
         // than described. Later reports of the original id do not restore it,

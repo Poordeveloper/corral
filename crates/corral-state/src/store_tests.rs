@@ -2238,9 +2238,9 @@ fn contesting_twice_records_one_fact() {
         contest(&mut store, "sess-y"),
         Contested::Recorded(_)
     ));
-    // The conflicting id again, the original id, and a third: none of them is
-    // a transition, and none of them clears anything.
-    for reported in ["sess-y", "sess-x", "sess-z"] {
+    // The conflicting id again, and a third: neither is a transition, and
+    // neither clears anything.
+    for reported in ["sess-y", "sess-z"] {
         let repeat = contest(&mut store, reported);
         assert!(matches!(repeat, Contested::Already(_)), "{reported}");
         assert_eq!(
@@ -2248,6 +2248,20 @@ fn contesting_twice_records_one_fact() {
             IdentityStatus::Contested
         );
     }
+    // The original id contradicts nothing, contested or not, so it is refused
+    // rather than absorbed: the store asks whether there is a conflict before
+    // it asks whether one is already recorded.
+    let agrees = store
+        .contest_binding(
+            binding,
+            ExternalId::new("sess-x").expect("usable"),
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+        )
+        .expect_err("refused");
+    assert!(matches!(
+        agrees,
+        StateError::Refused(Refusal::IdentityDoesNotConflict { .. })
+    ));
 
     let contests = kinds(&store.events_of(session).expect("readable"))
         .into_iter()
@@ -2572,4 +2586,112 @@ fn a_continuation_needs_a_runtime_binding_to_belong_to() {
         refusal,
         StateError::Refused(Refusal::NoManagedRuntimeBinding(named)) if named == session.id()
     ));
+}
+
+/// A contest needs something to contest. Recorded against the identity a
+/// binding already holds it would take a Session's continuation away for good
+/// over an agreement — and contested is monotonic, so there is no way back.
+#[test]
+fn contesting_a_binding_with_its_own_identity_is_refused() {
+    let mut store = TestStore::new("contest-agrees");
+    let (session, binding) = attested_provider_session(&mut store, "sess-x");
+
+    let refusal = store
+        .contest_binding(
+            binding,
+            ExternalId::new("sess-x").expect("usable"),
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+        )
+        .expect_err("refused");
+
+    assert!(matches!(
+        refusal,
+        StateError::Refused(Refusal::IdentityDoesNotConflict { binding: named })
+            if named == binding
+    ));
+    assert!(!kinds(&store.events_of(session).expect("readable")).contains(&"binding-contested"));
+    assert_eq!(
+        store
+            .binding(binding)
+            .expect("readable")
+            .expect("held")
+            .identity_status(),
+        IdentityStatus::Confirmed,
+    );
+}
+
+/// Deliveries arrive on their own connections and are stamped at their own
+/// arrival, so an order that disagrees with the stamps is ordinary scheduling.
+/// A stale re-observation tells the log nothing, and letting it land would
+/// move the binding's freshness backwards — which is what later phases judge
+/// what a fact may still claim by.
+#[test]
+fn a_stale_re_observation_does_not_move_a_binding_backwards() {
+    let mut store = TestStore::new("confirm-stale");
+    let (session, binding) = attested_provider_session(&mut store, "sess-x");
+    let fresh = Evidence::new(
+        EvidenceSource::ProviderHook,
+        Assurance::Attested,
+        instant(500),
+    );
+    store.confirm_binding(binding, fresh).expect("confirmed");
+
+    let confirmed = store
+        .confirm_binding(
+            binding,
+            Evidence::new(
+                EvidenceSource::ProviderHook,
+                Assurance::Attested,
+                instant(300),
+            ),
+        )
+        .expect("answered");
+
+    assert_eq!(confirmed.evidence().observed_at(), instant(500));
+    assert_eq!(
+        kinds(&store.events_of(session).expect("readable"))
+            .into_iter()
+            .filter(|kind| *kind == "binding-confirmed")
+            .count(),
+        1,
+        "a stale observation was written",
+    );
+}
+
+/// A promotion is not a re-observation: evidence that changes what the binding
+/// may do lands however it is stamped.
+#[test]
+fn a_stronger_assurance_lands_even_when_it_is_older() {
+    let mut store = TestStore::new("confirm-promote");
+    let node = store.node();
+    let (session, _) = managed_session(&mut store, "run-a");
+    let BindingResolution::Created(weak) = store
+        .bind(
+            session,
+            key(node, BindingKind::History, "hist-1"),
+            Provenance::Discovered,
+            Evidence::new(
+                EvidenceSource::Correlation,
+                Assurance::Heuristic,
+                instant(500),
+            ),
+            instant(20),
+        )
+        .expect("bound")
+    else {
+        panic!("a new identity is a new binding");
+    };
+
+    let promoted = store
+        .confirm_binding(
+            weak.id(),
+            Evidence::new(
+                EvidenceSource::ProviderHook,
+                Assurance::Attested,
+                instant(300),
+            ),
+        )
+        .expect("confirmed");
+
+    assert_eq!(promoted.assurance(), Assurance::Attested);
 }

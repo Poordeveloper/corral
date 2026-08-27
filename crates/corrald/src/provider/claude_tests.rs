@@ -139,15 +139,14 @@ fn tool_use_hooks_are_not_injected() {
     assert!(!document.contains("PostToolUse"), "{document}");
 }
 
-/// The injection has to survive a caller repeating the flag. Verified
-/// first-party: the **last** `--settings` is the one Claude Code loads (matrix
-/// scenario 8), so Corral's has to come after everything the caller passed —
-/// otherwise a session launches unattested while looking launched.
+/// The injection goes first, ahead of anything the caller passed, and nothing
+/// a caller writes after it can reach it — not a separator, not a flag looking
+/// for a value (matrix scenarios 10 and 12).
 #[test]
-fn the_injected_settings_are_the_last_word_in_the_argv() {
+fn the_injected_settings_are_the_first_word_in_the_argv() {
     let argv = launch_argv(
         std::path::Path::new("/state/launch/corral-launch-x.json"),
-        &["--model".to_owned(), "opus".to_owned()],
+        &["--".to_owned(), "--model".to_owned(), "opus".to_owned()],
     );
     let argv: Vec<String> = argv
         .iter()
@@ -157,10 +156,11 @@ fn the_injected_settings_are_the_last_word_in_the_argv() {
     assert_eq!(
         argv,
         vec![
-            "--model",
-            "opus",
             "--settings",
             "/state/launch/corral-launch-x.json",
+            "--",
+            "--model",
+            "opus",
         ],
     );
 }
@@ -190,22 +190,6 @@ fn a_caller_supplied_settings_flag_is_refused_rather_than_dropped() {
     }
 }
 
-/// Corral appends its own flags after a caller's, so an end-of-options marker
-/// in the middle would turn them into prompt text. Verified first-party: with
-/// a `--` before it, `--settings` is consumed as a positional argument and not
-/// one hook fires (matrix scenario 10) — the same silent-unmanaged outcome as
-/// a displaced flag, reached without naming the flag at all.
-#[test]
-fn an_end_of_options_marker_is_refused() {
-    for spelling in [
-        vec!["--".to_owned()],
-        vec!["a".to_owned(), "--".to_owned(), "b".to_owned()],
-    ] {
-        let refusal = refuse_arguments(&spelling).expect_err("refused");
-        assert_eq!(refusal.argument, "--", "{spelling:?}");
-    }
-}
-
 /// Everything else a person may want to pass to their own agent is theirs.
 ///
 /// `--setting-sources` earns its place here rather than being assumed: it
@@ -221,10 +205,12 @@ fn ordinary_provider_arguments_pass_through() {
         vec!["--model".to_owned(), "opus".to_owned()],
         vec!["--setting-sources".to_owned(), "user".to_owned()],
         vec!["--add-dir".to_owned(), "/work".to_owned()],
-        // Not the flag, and not the marker: a value that merely starts the
-        // same way is the caller's.
+        // The separator is the caller's too: with Corral's pair already ahead
+        // of it, everything after it is the caller's own prompt text and none
+        // of Corral's business (matrix scenario 12).
+        vec!["--".to_owned(), "a prompt".to_owned()],
+        // A value that merely starts the same way is not the flag.
         vec!["--settings-are-fine".to_owned()],
-        vec!["---".to_owned()],
     ] {
         assert_eq!(refuse_arguments(&allowed), Ok(()), "{allowed:?}");
     }

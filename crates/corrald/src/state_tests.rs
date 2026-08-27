@@ -67,3 +67,32 @@ async fn a_healthy_registry_keeps_vouching() {
 
     assert!(!registry.state.stopped_vouching());
 }
+
+/// One continuation of a Session at a time, and the claim is what makes that
+/// true across the whole read-spawn-commit window — which the store cannot
+/// close on its own, because the Run that would make it refuse does not exist
+/// until the spawn already happened (grill Q7).
+#[tokio::test]
+async fn one_continuation_of_a_session_is_claimed_at_a_time() {
+    let account = registry("continuation-claim");
+    let session = corral_core::CorralSessionId::mint();
+    let other = corral_core::CorralSessionId::mint();
+
+    let held = account
+        .state
+        .claim_continuation(session)
+        .expect("the first claim is granted");
+    assert!(
+        account.state.claim_continuation(session).is_none(),
+        "a second continuation of one session was let through",
+    );
+    // A different Session is a different claim: continuations are serialized
+    // per Session, not globally.
+    assert!(account.state.claim_continuation(other).is_some());
+
+    // Released by the destructor, so every path a continuation can fail on
+    // gives the claim back — a leaked one would make the Session
+    // uncontinuable for the daemon's life.
+    drop(held);
+    assert!(account.state.claim_continuation(session).is_some());
+}

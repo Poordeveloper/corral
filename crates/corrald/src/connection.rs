@@ -1298,8 +1298,8 @@ async fn compose_provider_launch(
     let token = state
         .mint_launch_token(scope)
         .map_err(|_| InjectionFailed::NoRandomness.to_string())?;
-    // Recorded with the token, so a row says which agent it runs from the
-    // first list that includes it rather than only once a hook has arrived.
+    // Recorded with the token, so the first fact to arrive is attributed to
+    // the agent Corral started rather than to whatever a payload claims.
     state.with_runtime(|runtime| runtime.reported.launched(session, provider));
     // Nothing below leaves a half-made launch behind: a token that named a
     // process nobody started would keep resolving for the daemon's whole life.

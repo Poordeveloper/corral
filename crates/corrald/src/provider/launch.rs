@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use corral_core::{CorralSessionId, RunId};
@@ -37,6 +37,10 @@ const FILE_SUFFIX: &str = ".json";
 /// The name a file carries while it is being written. A leftover one is a
 /// write that never completed and never reached any provider.
 const PARTIAL_SUFFIX: &str = ".partial";
+/// The two together, spelled once. The sweep asks about it per directory
+/// entry, and building the answer there allocated a constant on every file.
+/// A test holds it to the pair it stands for.
+const PARTIAL_FILE_SUFFIX: &str = concat!(".json", ".partial");
 
 /// The opaque single-launch token a hook event carries back.
 ///
@@ -277,13 +281,26 @@ fn sibling_relay() -> Result<PathBuf, String> {
     let directory = real
         .parent()
         .ok_or_else(|| "this daemon has no directory".to_owned())?;
-    let relay = directory.join(CLIENT_BINARY);
-    let metadata = std::fs::metadata(&relay)
+    usable_relay(&directory.join(CLIENT_BINARY))
+}
+
+/// Whether this path is something a provider's shell could actually run.
+///
+/// Asked here, where the refusal is actionable. A truncated or non-executable
+/// `corral` — an interrupted install, a partial upgrade — would otherwise
+/// compose a hook command that can only fail inside the provider's shell,
+/// which is a session that looks managed and can never report. The client side
+/// already asks the same question of the daemon binary for the same reason.
+fn usable_relay(relay: &Path) -> Result<PathBuf, String> {
+    let metadata = std::fs::metadata(relay)
         .map_err(|source| format!("{} is unusable: {source}", relay.display()))?;
     if !metadata.is_file() {
         return Err(format!("{} is not a regular file", relay.display()));
     }
-    Ok(relay)
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return Err(format!("{} is not executable", relay.display()));
+    }
+    Ok(relay.to_path_buf())
 }
 
 /// What a startup sweep concluded about one Corral-owned file.
@@ -357,7 +374,7 @@ fn classify(name: &str, owner_exited: &impl Fn(RunId) -> Option<bool>) -> SweepV
     let Some(rest) = name.strip_prefix(FILE_PREFIX) else {
         return SweepVerdict::NotOurs;
     };
-    if let Some(run) = rest.strip_suffix(&format!("{FILE_SUFFIX}{PARTIAL_SUFFIX}")) {
+    if let Some(run) = rest.strip_suffix(PARTIAL_FILE_SUFFIX) {
         return if run.parse::<RunId>().is_ok() {
             SweepVerdict::NeverPublished
         } else {

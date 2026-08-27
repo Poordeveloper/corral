@@ -332,3 +332,29 @@ fn retiring_a_run_with_no_token_is_quiet() {
 
     assert_eq!(tokens.outstanding(), 1);
 }
+
+/// The concatenated suffix is spelled out so the sweep does not build it per
+/// directory entry, which leaves it able to drift from the pair it stands for.
+#[test]
+fn the_partial_suffix_is_the_two_constants_it_stands_for() {
+    assert_eq!(
+        PARTIAL_FILE_SUFFIX,
+        format!("{FILE_SUFFIX}{PARTIAL_SUFFIX}"),
+    );
+}
+
+/// A relay that cannot be run is not a relay, and the launch is refused where
+/// the refusal is actionable rather than inside a provider's shell.
+#[test]
+fn a_relay_that_is_not_executable_is_refused() {
+    let scratch = Scratch::new("relay-mode");
+    let relay = scratch.path().join("corral");
+    std::fs::write(&relay, "#!/bin/sh\n").expect("a file");
+    std::fs::set_permissions(&relay, PermissionsExt::from_mode(0o644)).expect("mode");
+
+    let refusal = usable_relay(&relay).expect_err("refused");
+
+    assert!(refusal.contains("not executable"), "{refusal}");
+    std::fs::set_permissions(&relay, PermissionsExt::from_mode(0o755)).expect("mode");
+    assert_eq!(usable_relay(&relay), Ok(relay));
+}

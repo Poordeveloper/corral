@@ -976,13 +976,18 @@ fn two_continuations_of_one_session_start_one_runtime() {
         "one launch and one continuation: {:?}",
         script.launches(),
     );
-    // The loser is told to send it again rather than that its request was
-    // wrong: nothing about it was.
-    let refused = answers
-        .iter()
-        .find(|answer| answer["outcome"]["error"].is_object())
-        .expect("one was refused");
-    assert_eq!(error_code(refused), Some("busy"), "{refused}");
+    // Deliberately not asserting *which* refusal. Whether the loser is turned
+    // away by the claim or, having arrived after it was released, by the Run
+    // the winner started, is an interleaving — and a test that pinned one
+    // would fail on scheduling rather than on behaviour. What must hold either
+    // way is that it was refused and started nothing; the claim's own refusal
+    // is proven where it is deterministic, in `state_tests`.
+    assert!(
+        answers
+            .iter()
+            .any(|answer| answer["outcome"]["error"].is_object()),
+        "{answers:#?}",
+    );
 
     drop(daemon);
 }

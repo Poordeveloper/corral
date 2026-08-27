@@ -677,6 +677,20 @@ impl Store {
                 }
                 .into());
             }
+            // An observation older than the one already recorded, at the same
+            // assurance, tells the log nothing and would move the binding's
+            // freshness backwards — and freshness is what later phases judge
+            // what a fact may still claim by (`AGENTS.md` §Runtime truth).
+            // Deliveries arrive on their own connections and are stamped at
+            // their own arrival, so an order that disagrees with the stamps is
+            // ordinary scheduling rather than a fault. A *stronger* assurance
+            // still lands, however it is stamped: that is a promotion, not a
+            // re-observation.
+            let stale = evidence.observed_at() < existing.evidence().observed_at()
+                && evidence.assurance() == existing.assurance();
+            if stale {
+                return Ok(Written::nothing_to_record(existing));
+            }
             let confirmed = existing.with_evidence(evidence);
             refuse_second_control_capable_runtime_binding(transaction, &confirmed)?;
             Ok(Written::recording(
@@ -729,6 +743,14 @@ impl Store {
                     assurance: evidence.assurance(),
                 }
                 .into());
+            }
+            // Contested is monotonic and nothing in this phase clears it, so the
+            // store checks for itself that there is a conflict at all rather
+            // than trusting a caller's match arm. Recorded against the identity
+            // the binding already holds, it would take a Session's continuation
+            // away for good over evidence that contradicted nothing.
+            if existing.key().external_id() == &conflicting_external_id {
+                return Err(Refusal::IdentityDoesNotConflict { binding }.into());
             }
             if existing.identity_status() == IdentityStatus::Contested {
                 return Ok(Written::nothing_to_record(Contested::Already(existing)));

@@ -23,6 +23,8 @@ use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use std::ffi::OsString;
+
 use corral_protocol::hook::{HOOK_DELIVER, HookDelivery, MAX_HOOK_PAYLOAD_BYTES};
 use corral_protocol::{Frame, MAX_FRAME_BYTES, RequestId, encode_frame};
 use corral_rendezvous::RendezvousPaths;
@@ -37,11 +39,64 @@ use corral_rendezvous::RendezvousPaths;
 /// (ADR 0004 D4).
 pub const INTERFERENCE_BUDGET: Duration = Duration::from_millis(50);
 
+/// The subcommand an injected hook configuration names.
+const SUBCOMMAND: &str = "hook-relay";
+const PROVIDER_FLAG: &str = "--provider";
+const TOKEN_FLAG: &str = "--token";
+
+/// What this invocation is, if it is a hook delivery at all.
+///
+/// Recognised without a parser, and that is the whole point. A command line
+/// argument parser answers a command line it does not understand by writing
+/// usage to standard error and exiting non-zero — and Claude Code reads a
+/// non-zero hook exit as a blocking decision and hands the standard error to
+/// the model. A relay that reached one could steer the agent by failing to
+/// recognise itself.
+///
+/// Skew is the case this exists for, and ADR 0004 D3 says skew is normal: an
+/// injected settings file names an absolute path and invokes whatever is
+/// installed by the time an event fires, so a flag this build has no word for
+/// is an ordinary thing to meet. Unknown arguments are ignored, a missing
+/// value reads as absent, and the daemon is left to refuse what it cannot
+/// place — which it does silently, as everything on this path does.
+pub struct Invocation {
+    pub provider: String,
+    pub token: String,
+}
+
+/// Read a hook delivery out of this process's own arguments, or `None` when
+/// this invocation is something else entirely.
+pub fn invocation(arguments: impl IntoIterator<Item = OsString>) -> Option<Invocation> {
+    let mut arguments = arguments.into_iter().skip(1);
+    if arguments.next()? != *SUBCOMMAND {
+        return None;
+    }
+    let mut provider = String::new();
+    let mut token = String::new();
+    let mut arguments = arguments;
+    while let Some(argument) = arguments.next() {
+        // A flag whose value is missing leaves the field empty. The daemon
+        // refuses what it cannot place, and silence is this program's whole
+        // way of failing.
+        let mut named = |value: &mut String| {
+            if let Some(next) = arguments.next() {
+                *value = next.to_string_lossy().into_owned();
+            }
+        };
+        match argument.to_string_lossy().as_ref() {
+            PROVIDER_FLAG => named(&mut provider),
+            TOKEN_FLAG => named(&mut token),
+            _ => {}
+        }
+    }
+    Some(Invocation { provider, token })
+}
+
 /// Deliver one hook event, and never do anything else.
 ///
-/// `started` is taken by the caller, before the command line was even parsed,
-/// so the budget covers the invocation rather than the part of it this
-/// function can see.
+/// `started` is taken by the caller, before the command line was even read, so
+/// the budget covers the invocation rather than the part of it this function
+/// can see.
 pub fn deliver(token: &str, provider: &str, started: Instant) -> ExitCode {
     // Every path below returns success. The value is built once, here, so that
     // a later edit cannot introduce a branch that reports failure to a
@@ -125,13 +180,16 @@ fn send_and_settle(mut stream: UnixStream, frame: &[u8], started: Instant) -> st
 /// reintroduce the wait that was just avoided.
 ///
 /// One byte past the cap is kept on purpose, so that oversize is *observed*
-/// rather than inferred from a payload that happens to end at the limit. The
-/// rest is read and discarded rather than left unread: a relay that stops
-/// reading while the provider is still writing hands it a broken pipe, which
-/// is a way a shim that never writes and always exits 0 could still perturb
-/// the agent. Discarding is bounded by the budget like everything else — a
-/// write that cannot finish inside the interference ceiling is the one case
-/// where returning control wins over reading politely (ADR 0004 D4).
+/// rather than inferred from a payload that happens to end at the limit.
+///
+/// What the cap is read is handed back **before** the rest is drained, and the
+/// order matters both ways. Draining first would let a payload far past the
+/// cap run out the budget and lose the oversize marker with it — a systematic
+/// oversize has to be visible rather than silently missing (ADR 0004 D3).
+/// Draining at all is what stops a relay that has read enough from handing the
+/// provider a broken pipe while it is still writing, which is one of the few
+/// ways a shim that never writes and always exits 0 could still perturb the
+/// agent. So: answer, then keep reading for as long as this process lives.
 fn read_payload(budget: Duration) -> Option<Vec<u8>> {
     if budget.is_zero() {
         return None;
@@ -143,10 +201,13 @@ fn read_payload(budget: Duration) -> Option<Vec<u8>> {
         let read = (&mut stdin)
             .take(MAX_HOOK_PAYLOAD_BYTES as u64 + 1)
             .read_to_end(&mut payload);
-        if read.is_ok() && payload.len() > MAX_HOOK_PAYLOAD_BYTES {
+        let oversize = read.is_ok() && payload.len() > MAX_HOOK_PAYLOAD_BYTES;
+        // The answer goes back first: everything after this is politeness to
+        // the writer, and politeness may not cost the fact.
+        let _ = sender.send(read.map(|_| payload));
+        if oversize {
             let _ = std::io::copy(&mut stdin, &mut std::io::sink());
         }
-        let _ = sender.send(read.map(|_| payload));
     });
     receiver.recv_timeout(budget).ok()?.ok()
 }
@@ -155,3 +216,7 @@ fn read_payload(budget: Duration) -> Option<Vec<u8>> {
 fn remaining(started: Instant) -> Duration {
     INTERFERENCE_BUDGET.saturating_sub(started.elapsed())
 }
+
+#[cfg(test)]
+#[path = "relay_tests.rs"]
+mod tests;

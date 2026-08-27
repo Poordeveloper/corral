@@ -69,6 +69,12 @@ pub enum Refusal {
         binding: BindingId,
         assurance: Assurance,
     },
+    /// The identity offered as conflicting is the one the binding already
+    /// holds, so nothing was contradicted. A contest recorded here would
+    /// revoke a Session's continuation permanently over an agreement.
+    IdentityDoesNotConflict {
+        binding: BindingId,
+    },
     /// The log already holds this Run, so its start is not a fact still
     /// waiting to be appended.
     RunAlreadyRecorded(RunId),
@@ -255,6 +261,10 @@ impl fmt::Display for Refusal {
             Self::UnsupportedContest { binding, assurance } => write!(
                 f,
                 "{assurance:?} evidence does not contest binding {binding}"
+            ),
+            Self::IdentityDoesNotConflict { binding } => write!(
+                f,
+                "binding {binding} already names that identity, so nothing contradicts it"
             ),
             Self::RunAlreadyRecorded(run) => write!(f, "run {run} is already recorded"),
             Self::RunClaimsAnotherSession {
