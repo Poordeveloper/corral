@@ -37,10 +37,6 @@ const RELEASE: &str = "\x1b[?1049l";
 /// clearing — the person's own.
 const TAKE: &str = "\x1b[?1049h";
 
-/// Turning mouse reporting off, which the list does wherever it claims the
-/// terminal.
-const NO_MOUSE: &str = "\x1b[?1000l";
-
 /// Autowrap, as a terminal normally has it. The list turns it off so a frame
 /// draws one row per line; the session it hands over to assumes it on, and
 /// nothing in a session's own bytes would ever turn it back on.
@@ -129,11 +125,7 @@ fn the_list_opens_a_session_and_comes_back_to_a_current_one() {
     start_session(&mut client, 2, &["/bin/sleep", "30"]);
     let detached = terminal.typed(b"\x1c");
 
-    terminal.wait_for_after(detached, TAKE);
-    // A session may have turned mouse reporting on and died with it on. A
-    // terminal still reporting sends three coordinate bytes for every click,
-    // and a click in the eighty-first column sends `q`.
-    let claimed = terminal.wait_for_after(detached, NO_MOUSE);
+    let claimed = terminal.wait_for_after(detached, TAKE);
     // The first frame back is the list as it was left, drawn at once so the
     // person is not looking at the session they just detached from. The one
     // after it is the answer, which the poll asks for on the way in.

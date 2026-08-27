@@ -20,6 +20,7 @@ use crate::lifecycle::{EstablishedGuard, Lifecycle, ShutdownReason};
 use crate::policy::DaemonPolicy;
 use crate::runtime::{
     AttachGrant, AttachToken, LaunchRequest, ManagedSession, PendingSession, PtyGeometry,
+    TerminalAccess,
 };
 use crate::state::{DaemonState, Vouched};
 
@@ -841,6 +842,15 @@ fn terminal_attach(request: &Request, state: &Arc<DaemonState>) -> Frame {
         // its Runs, and a token that survived a resume must not open the
         // terminal of the process that replaced it (grill Q2).
         let handle = runtime.sessions.get(session)?;
+        // What this daemon publishes it also enforces. `session.list` says
+        // whether a session's terminal can be served, and granting one it has
+        // just called unavailable would leave a client — including every one
+        // that cannot read the field, which the wire contract tells to try and
+        // report whatever comes back — holding a channel whose only possible
+        // content is an error, instead of a refusal that names the reason.
+        if handle.terminal_access() == TerminalAccess::Unavailable {
+            return None;
+        }
         let run = handle.run();
         // The last size the screen thread published, not a question asked of
         // it: this runs on the daemon's one reactor thread while holding the

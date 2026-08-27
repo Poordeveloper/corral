@@ -12,13 +12,14 @@
 //! and what a row is allowed to say, which is `presentation`'s.
 
 use std::ops::RangeInclusive;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use corral_client::{ClientActivationPolicy, Connection, RequestError, activate};
+use corral_client::{ClientActivationPolicy, Connection};
 use corral_protocol::method::{SessionListItem, SessionListResult};
 
 use crate::ANSWER;
 use crate::attach::{Geometry, LocalKeys, OpenFailed, RawMode};
+use crate::daemon::{Daemon, Unanswered};
 use crate::keys::{Key, Keyboard};
 use crate::presentation::{SessionPresentation, present};
 use crate::screen::{Emphasis, Frame, FullScreen};
@@ -160,16 +161,13 @@ async fn show(
     // key, and the half that arrived is not a key until the rest does.
     let mut keyboard = Keyboard::default();
     // Bytes the takeover handed back were typed before this pass began, and
-    // they are ready the moment the loop starts. Acted on first, because a key
-    // that wins the race against the first question cancels it — and a
-    // cancelled question costs the connection it was asked on.
+    // are ready the moment the loop starts. Acted on first, so the pass begins
+    // showing what they did rather than what the list looked like before them.
     if let Some(waiting) = keys.pending() {
-        keyboard.add(&waiting);
-        while let Some(key) = keyboard.next() {
-            if let Some(chosen) = list.act(key) {
-                keys.put_back(keyboard.unread());
-                return Ok(chosen);
-            }
+        match arriving(Some(waiting), &mut keyboard, keys, list) {
+            Typed::Chose(chosen) => return Ok(chosen),
+            Typed::Closed => return Ok(Chosen::Quit),
+            Typed::Handled => draw(screen, list)?,
         }
     }
 
@@ -180,38 +178,100 @@ async fn show(
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        tokio::select! {
-            answered = next_answer(&mut poll, daemon) => {
-                list.take(answered);
-                draw(screen, list)?;
-            }
-            typed = keys.next() => {
-                // The person's terminal closed. Nothing is left to read and
-                // nothing is left to draw on.
-                let Some(bytes) = typed else { return Ok(Chosen::Quit) };
-                keyboard.add(&bytes);
-                while let Some(key) = keyboard.next() {
-                    if let Some(chosen) = list.act(key) {
-                        // The rest of the burst was typed for whatever this
-                        // opens, not for the list that is leaving the screen.
-                        keys.put_back(keyboard.unread());
-                        return Ok(chosen);
-                    }
+        // Waiting for the next poll to come due, which is most of the time.
+        loop {
+            tokio::select! {
+                _ = poll.tick() => break,
+                typed = keys.next() => match arriving(typed, &mut keyboard, keys, list) {
+                    Typed::Chose(chosen) => return Ok(chosen),
+                    Typed::Closed => return Ok(Chosen::Quit),
+                    Typed::Handled => draw(screen, list)?,
+                },
+                () = tokio::time::sleep(ESCAPE_GRACE), if keyboard.undecided() => {
+                    settle(&mut keyboard, list);
+                    draw(screen, list)?;
                 }
-                draw(screen, list)?;
-            }
-            // Nothing followed, so what was held is as much as it will be.
-            () = tokio::time::sleep(ESCAPE_GRACE), if keyboard.undecided() => {
-                if let Some(key) = keyboard.settle() {
-                    // Escape cancels a prompt and Unknown does nothing:
-                    // neither is a key that leaves the list, which is what
-                    // makes this branch a redraw rather than a choice.
-                    let leaving = list.act(key);
-                    debug_assert!(leaving.is_none(), "{key:?} left the list from a settle");
-                }
-                draw(screen, list)?;
             }
         }
+
+        // The question, which a keystroke does not cancel. Abandoning one
+        // leaves the socket where its next read is the answer to a question
+        // nobody is holding, and the connection has to be thrown away with it
+        // — so the keys are answered while it is out, and it is waited for
+        // even by someone on their way to a session.
+        let mut question = std::pin::pin!(daemon.sessions());
+        let answered = loop {
+            tokio::select! {
+                answered = &mut question => break answered,
+                typed = keys.next() => match arriving(typed, &mut keyboard, keys, list) {
+                    Typed::Chose(chosen) => {
+                        // Waited out only when what comes next needs this
+                        // connection. Somebody leaving the surface does not,
+                        // and making them wait for an answer nobody will read
+                        // is the opposite of the point.
+                        if !matches!(chosen, Chosen::Quit) {
+                            let _ = question.await;
+                        }
+                        return Ok(chosen);
+                    }
+                    Typed::Closed => return Ok(Chosen::Quit),
+                    Typed::Handled => draw(screen, list)?,
+                },
+                () = tokio::time::sleep(ESCAPE_GRACE), if keyboard.undecided() => {
+                    settle(&mut keyboard, list);
+                    draw(screen, list)?;
+                }
+            }
+        };
+
+        list.take(answered.map(decode));
+        draw(screen, list)?;
+    }
+}
+
+/// What one burst of typing did.
+enum Typed {
+    /// Nothing that leaves the list.
+    Handled,
+    /// The person chose something, and whatever they typed after it has been
+    /// handed back for what they chose.
+    Chose(Chosen),
+    /// Their terminal closed. Nothing is left to read and nothing is left to
+    /// draw on.
+    Closed,
+}
+
+fn arriving(
+    typed: Option<Vec<u8>>,
+    keyboard: &mut Keyboard,
+    keys: &mut LocalKeys,
+    list: &mut SessionList,
+) -> Typed {
+    let Some(bytes) = typed else {
+        return Typed::Closed;
+    };
+
+    keyboard.add(&bytes);
+    while let Some(key) = keyboard.next() {
+        if let Some(chosen) = list.act(key) {
+            // The rest of the burst was typed for whatever this opens, not for
+            // the list that is leaving the screen.
+            keys.put_back(keyboard.unread());
+            return Typed::Chose(chosen);
+        }
+    }
+
+    Typed::Handled
+}
+
+/// Nothing followed, so what was held is as much as it will be.
+fn settle(keyboard: &mut Keyboard, list: &mut SessionList) {
+    if let Some(key) = keyboard.settle() {
+        // Escape cancels a prompt and Unknown does nothing: neither is a key
+        // that leaves the list, which is what makes settling a redraw rather
+        // than a choice.
+        let leaving = list.act(key);
+        debug_assert!(leaving.is_none(), "{key:?} left the list from a settle");
     }
 }
 
@@ -225,22 +285,6 @@ async fn show(
 fn returned(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> {
     screen.take_back()?;
     draw(screen, list)
-}
-
-/// The next answer, once the next poll is due.
-///
-/// One future over both the wait and the question, so exactly one question is
-/// ever in flight and a slow answer delays the next rather than queueing one
-/// behind it (grill Q4). It is also droppable whole, which is what lets the
-/// surface keep answering the keyboard while a daemon answers nothing — and
-/// with raw mode holding `Ctrl-C`, a surface that stops reading keys is one a
-/// person cannot leave.
-async fn next_answer(
-    poll: &mut tokio::time::Interval,
-    daemon: &mut Daemon<'_>,
-) -> Result<Listed, Unanswered> {
-    poll.tick().await;
-    daemon.sessions().await
 }
 
 /// Take over the terminal for one session, and report anything that stopped
@@ -306,210 +350,12 @@ async fn start(daemon: &mut Daemon<'_>, argv: Vec<String>, keys: &mut LocalKeys)
     }
 }
 
-/// The connection to `corrald`, and the ability to get another one.
-///
-/// A lost daemon is not a dead list: the list says it cannot be read, keeps
-/// asking, and picks up again when one answers — a person who restarted
-/// `corrald` should not have to restart this too. Activation is the client
-/// library's, exactly as the CLI does it, so this surface can never start a
-/// daemon on terms of its own (ADR 0001).
-struct Daemon<'a> {
-    policy: &'a ClientActivationPolicy,
-    connection: Option<Connection>,
-    /// When activation may be attempted again, and how many have failed in a
-    /// row.
-    ///
-    /// Activation may start a daemon. A `corrald` that dies on startup leaves
-    /// no owner behind, so a poll that activated every second would start one
-    /// every second forever — a retry loop that is indistinguishable, from the
-    /// outside, from a fork bomb with a one-second fuse. The poll keeps its
-    /// cadence; only starting one backs off.
-    retry: Option<Backoff>,
-}
-
-/// How long to wait before trying to activate again.
-struct Backoff {
-    failures: u32,
-    until: Instant,
-}
-
-impl Backoff {
-    /// Doubling, to a ceiling: long enough that a daemon which cannot start is
-    /// not started repeatedly, short enough that a person who fixes whatever
-    /// stopped it does not wait long to see the list come back.
-    const CEILING: Duration = Duration::from_secs(30);
-
-    fn after(failures: u32) -> Self {
-        let seconds = 1_u64 << failures.min(5);
-        Self {
-            failures: failures.saturating_add(1),
-            until: Instant::now() + Duration::from_secs(seconds).min(Self::CEILING),
-        }
-    }
-
-    fn waiting(&self) -> Option<Duration> {
-        self.until.checked_duration_since(Instant::now())
-    }
-}
-
-/// Why there is no list to show.
-///
-/// Two different claims about the daemon, and the surface must not make the
-/// wrong one: a daemon that refused answered, and is on the other end of a
-/// connection that is fine; one that could not be read may not be there at all
-/// (`AGENTS.md` §Runtime truth).
-enum Unanswered {
-    /// It answered, and the answer was a refusal.
-    Refused(String),
-    /// It answered, and the answer was not one this build can read.
-    Unreadable(String),
-    /// Nothing answered.
-    Silent(String),
-}
-
-impl Unanswered {
-    fn line(&self) -> String {
-        match self {
-            Self::Refused(detail) => format!("corrald would not list its sessions: {detail}"),
-            Self::Unreadable(detail) => {
-                format!("corrald answered with something this build cannot read: {detail}")
-            }
-            Self::Silent(detail) => format!("corrald did not answer: {detail}"),
-        }
-    }
-}
-
-/// What one failed request says about the daemon behind it.
-///
-/// The claim and the disposal are two decisions, and only one of them is the
-/// same for both: a protocol fault and a lost daemon both leave a connection
-/// this client cannot ask again, but only one of them means nothing is there
-/// (`AGENTS.md` §Runtime truth).
-fn about(error: &RequestError) -> Unanswered {
-    match error {
-        RequestError::Refused(_) => Unanswered::Refused(error.to_string()),
-        RequestError::Protocol { .. } => Unanswered::Unreadable(error.to_string()),
-        RequestError::DaemonConnectionLost { .. } => Unanswered::Silent(error.to_string()),
-    }
-}
-
 /// What one answer to `session.list` produced.
 struct Listed {
     rows: Vec<Row>,
     /// Sessions a newer daemon described in a shape this build cannot read.
     /// Counted rather than dropped silently or guessed at.
     unrenderable: usize,
-}
-
-impl Daemon<'_> {
-    /// The connection this daemon already has, for something the person just
-    /// did.
-    ///
-    /// Never activates. Activation may spawn a daemon and wait out an
-    /// activation deadline that is not this crate's to bound, and this runs
-    /// with the terminal handed over and nothing reading the keyboard. The
-    /// poll owns starting a daemon, because the poll is the wait a person can
-    /// interrupt.
-    fn connection(&mut self) -> Result<&mut Connection, String> {
-        self.connection
-            .as_mut()
-            .ok_or_else(|| "corrald has not answered yet; the list is still asking".to_owned())
-    }
-
-    /// The connection, taken out of this daemon for exactly one question.
-    ///
-    /// Taken rather than borrowed, because waiting for the answer is
-    /// interruptible: a question this surface stopped waiting for — a
-    /// keystroke arrived, or `ANSWER` ran out — leaves a socket whose next
-    /// read is an answer nobody is holding any more. Putting it back only once
-    /// one arrived means an abandoned question costs a reconnect and never a
-    /// mismatched answer.
-    async fn borrow_for_one_question(&mut self) -> Result<Connection, Unanswered> {
-        match self.connection.take() {
-            Some(connection) => Ok(connection),
-            None => self.activated().await,
-        }
-    }
-
-    /// A connection to a running daemon, starting one if there is none and the
-    /// last attempt is far enough behind.
-    ///
-    /// The one place this surface activates. Both the poll and the person's
-    /// own actions come through here, so a daemon that cannot start is not
-    /// started once per second by one and once per keystroke by the other.
-    async fn activated(&mut self) -> Result<Connection, Unanswered> {
-        if let Some(waiting) = self.retry.as_ref().and_then(Backoff::waiting) {
-            return Err(Unanswered::Silent(format!(
-                "no corrald is running; trying again in {} seconds",
-                waiting.as_secs().max(1)
-            )));
-        }
-
-        // Armed before the wait, not after it. This future is dropped whole
-        // when a key arrives, and an attempt recorded only on the way out
-        // would not be recorded at all — leaving a person who types once a
-        // second starting a daemon once a second, which is the loop the
-        // backoff exists to stop.
-        let failures = self.retry.as_ref().map_or(0, |backoff| backoff.failures);
-        self.retry = Some(Backoff::after(failures));
-
-        match activate(self.policy).await {
-            Ok(connection) => {
-                self.retry = None;
-                Ok(connection)
-            }
-            Err(error) => Err(Unanswered::Silent(error.to_string())),
-        }
-    }
-
-    /// What the daemon holds, or why it did not say.
-    async fn sessions(&mut self) -> Result<Listed, Unanswered> {
-        let mut connection = self.borrow_for_one_question().await?;
-
-        // The connection is not put back when this runs out: its next read
-        // would be the answer to a question nobody is holding any more.
-        let Ok(answered) = tokio::time::timeout(ANSWER, connection.session_list()).await else {
-            return Err(Unanswered::Silent(format!(
-                "nothing within {} seconds",
-                ANSWER.as_secs()
-            )));
-        };
-
-        match answered {
-            Ok(listed) => {
-                self.connection = Some(connection);
-                Ok(decode(listed))
-            }
-            Err(error) => {
-                // Put back only what can be asked again. A refusal came on a
-                // connection that is fine; the others left one with nobody on
-                // it, or at a place in the stream this client cannot find.
-                if matches!(error, RequestError::Refused(_)) {
-                    self.connection = Some(connection);
-                }
-                Err(about(&error))
-            }
-        }
-    }
-
-    /// Drop a connection that cannot be asked another question.
-    ///
-    /// A daemon that went away has nobody on the other end, and one that broke
-    /// the protocol may have left the stream at a place this client cannot
-    /// find — asking again on either would answer the wrong question. A
-    /// refusal is neither: the daemon answered, on a connection that is fine.
-    ///
-    /// The same rule `sessions` applies, because it is the same connection.
-    fn forget_if_unusable(&mut self, error: &RequestError) {
-        if !matches!(error, RequestError::Refused(_)) {
-            self.forget();
-        }
-    }
-
-    /// Drop the connection, whatever it was.
-    fn forget(&mut self) {
-        self.connection = None;
-    }
 }
 
 fn decode(listed: SessionListResult) -> Listed {
@@ -776,11 +622,15 @@ fn draw(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> 
         Some(typed) => {
             // The footer is the whole key map, and this line replaces it: a
             // person who pressed `n` by accident has no other way to find out
-            // that the surface is in a mode, or how to leave it.
-            frame.line(
-                Emphasis::Secondary,
-                "The program and its arguments. Quoting is not interpreted. esc cancels.",
-            );
+            // that the surface is in a mode, or how to leave it. It gets a row
+            // only when there is one to spare, because the prompt below it is
+            // the line that shows the cursor.
+            if frame.remaining() > 1 {
+                frame.line(
+                    Emphasis::Secondary,
+                    "The program and its arguments. Quoting is not interpreted. esc cancels.",
+                );
+            }
             // "new session", not "run": Run is an internal noun, and the one
             // domain noun this surface exposes is Session (`PRODUCT.md` §8).
             frame.prompt(&format!("new session: {typed}"));

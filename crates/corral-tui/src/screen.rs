@@ -18,27 +18,16 @@ use crate::attach::Geometry;
 /// Corral hands the terminal back — theirs from before they ran this, and not
 /// Corral's to consume.
 const TAKE: &[u8] = b"\x1b[?1049h";
-/// Remember the modes `claim` is about to change, so they can be given back.
+/// Give it back: wrapping, the cursor, the screen.
 ///
-/// They are terminal-global rather than per-screen-buffer, so a shell that had
-/// bracketed paste on and does not re-enable it every prompt would otherwise
-/// have it off for good after this surface exits. Unconditionally setting them
-/// back on would be its own guess; this asks the terminal to remember.
-const REMEMBER_MODES: &[u8] = b"\x1b[?7;1000;1002;1003;1006;2004s";
-/// Give it back: the modes as they were, the cursor, the screen.
-const RELEASE: &[u8] = b"\x1b[?7;1000;1002;1003;1006;2004r\x1b[?25h\x1b[?1049l";
+/// Wrapping is the only mode this surface turns off that a terminal has on by
+/// default, so it is the only one there is anything to restore. Asking the
+/// terminal to remember the rest (`CSI ? Pm s` / `r`) was tried and taken out:
+/// tmux, screen and several others do not implement it, so on exactly the
+/// terminals people run this in it restored nothing at all.
+const RELEASE: &[u8] = b"\x1b[?7h\x1b[?25h\x1b[?1049l";
 /// Scrolling covers the whole screen again, whatever a session left set.
 const WHOLE_SCREEN: &[u8] = b"\x1b[r";
-/// No mouse reporting, in any of the ways a program turns it on.
-///
-/// A terminal still reporting sends `ESC [ M` and three coordinate bytes for
-/// every click, and those bytes are indistinguishable from someone typing: a
-/// click in the eighty-first column sends `q`. Nothing here reads a mouse, so
-/// this is not a mode this surface can be left in.
-const NO_MOUSE: &[u8] = b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l";
-/// Paste arrives as itself, not wrapped in markers this decoder has no meaning
-/// for.
-const NO_BRACKETED_PASTE: &[u8] = b"\x1b[?2004l";
 /// The plain character set in G0. A program killed with the line-drawing set
 /// selected leaves the whole list rendered as box glyphs, with nothing on
 /// screen to say why.
@@ -104,7 +93,6 @@ impl FullScreen {
             out: std::io::stdout(),
             last: Geometry::of(&std::io::stdin()),
         };
-        screen.out.write_all(REMEMBER_MODES)?;
         screen.claim()?;
         Ok(screen)
     }
@@ -114,11 +102,16 @@ impl FullScreen {
     /// Asserted rather than assumed, and in one place, because there are two
     /// moments it has to be true: taking the terminal, and taking it back from
     /// a session that drew whatever it liked on it.
+    ///
+    /// Only what this surface draws with. Mouse reporting and bracketed paste
+    /// were turned off here once and are not any more: they are input modes, a
+    /// terminal is left in them by whatever last set them, and turning them
+    /// off globally left the session this list hands over to without them —
+    /// unbracketed paste in a shell runs each pasted line as it arrives. What
+    /// those modes produce is a decoding problem, and `keys` owns it.
     fn claim(&mut self) -> std::io::Result<()> {
         self.out.write_all(TAKE)?;
         self.out.write_all(WHOLE_SCREEN)?;
-        self.out.write_all(NO_MOUSE)?;
-        self.out.write_all(NO_BRACKETED_PASTE)?;
         self.out.write_all(ASCII_CHARSET)?;
         self.out.write_all(NO_WRAP)?;
         self.out.flush()
@@ -152,11 +145,11 @@ impl FullScreen {
     pub fn hand_over(&mut self) -> std::io::Result<()> {
         self.out.write_all(SHOW_CURSOR.as_bytes())?;
         // And wrapping, which `claim` turned off for a frame that counts its
-        // own rows. It is the one mode here a program assumes rather than
-        // sets: the daemon's snapshot carries only what differs from the
-        // emulator's defaults, and wrapping is on by default, so nothing in
-        // the session would ever turn it back on. Left off, every line of `ls`
-        // longer than the window is clipped for the whole takeover.
+        // own rows. A program assumes it rather than setting it: the daemon's
+        // snapshot carries only what differs from the emulator's defaults, and
+        // wrapping is on by default, so nothing in the session would ever turn
+        // it back on. Left off, every line of `ls` longer than the window is
+        // clipped for the whole takeover.
         self.out.write_all(WRAP)?;
         self.out.flush()
     }

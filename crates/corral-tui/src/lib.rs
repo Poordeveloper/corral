@@ -28,6 +28,7 @@
 pub(crate) const ANSWER: std::time::Duration = std::time::Duration::from_secs(5);
 
 mod attach;
+mod daemon;
 mod keys;
 mod launch;
 mod list;

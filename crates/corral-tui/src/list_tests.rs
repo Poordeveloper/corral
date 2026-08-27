@@ -46,52 +46,6 @@ fn a_daemon_that_cannot_be_read_empties_the_list_rather_than_freezing_it() {
     );
 }
 
-/// Three claims, and only one of them says nothing is there. A daemon that
-/// refused and one whose answer this build could not read have both
-/// demonstrably answered — reporting either as silence asserts something about
-/// a daemon that is running (`AGENTS.md` §Runtime truth).
-#[test]
-fn what_a_failed_request_says_about_the_daemon_behind_it() {
-    let endpoint = std::path::PathBuf::from("/nowhere");
-    let cases = [
-        (
-            about(&RequestError::Protocol {
-                detail: "a response for request 2 arrived while 3 was outstanding".to_owned(),
-            }),
-            "cannot read",
-        ),
-        (
-            about(&RequestError::DaemonConnectionLost { endpoint }),
-            "did not answer",
-        ),
-    ];
-
-    for (unanswered, expected) in cases {
-        let said = unanswered.line();
-
-        assert!(said.contains(expected), "{said}");
-    }
-}
-
-/// A daemon that refused answered. Saying it could not be read would claim
-/// something about a daemon that is demonstrably there — an older one that
-/// does not implement `session.list` is exactly this, and the list must not
-/// report it as unreachable (`AGENTS.md` §Protocol, §Runtime truth).
-#[test]
-fn a_refusal_is_not_reported_as_a_daemon_that_could_not_be_read() {
-    let mut list = SessionList::default();
-
-    list.take(Err(Unanswered::Refused("no such method".to_owned())));
-
-    let said = list
-        .unanswered
-        .as_ref()
-        .map(Unanswered::line)
-        .expect("the refusal is on screen");
-    assert!(said.contains("would not list"), "{said}");
-    assert!(!said.contains("did not answer"), "{said}");
-}
-
 /// And it comes back on its own. The poll is the retry: a person who restarted
 /// `corrald` does not restart this too.
 #[test]
@@ -431,28 +385,6 @@ fn a_vanished_selection_leaves_the_cursor_where_it_was() {
     ]));
 
     assert_eq!(list.rows[list.selected].session_id, "s1-rest");
-}
-
-/// A corrald that dies on startup leaves no owner behind, so a poll that
-/// activated every second would start one every second. The wait between
-/// attempts grows, and stops growing.
-#[test]
-fn activation_waits_longer_each_time_it_fails_and_stops_at_a_ceiling() {
-    let first = Backoff::after(0);
-    assert_eq!(first.failures, 1);
-    assert!(
-        first
-            .waiting()
-            .is_some_and(|waiting| waiting <= Duration::from_secs(1))
-    );
-
-    let later = Backoff::after(20);
-    assert!(
-        later
-            .waiting()
-            .is_some_and(|waiting| waiting <= Backoff::CEILING),
-        "the wait grew past its ceiling"
-    );
 }
 
 /// Room left over above the window is spent. A window that only ever moved

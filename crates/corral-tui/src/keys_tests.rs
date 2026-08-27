@@ -226,3 +226,45 @@ fn a_decodable_burst_never_waits() {
     assert_eq!(keyboard.next(), Some(Key::Escape));
     assert_eq!(keyboard.next(), Some(Key::Typed('q')));
 }
+
+/// A mouse report is not typing. Its three coordinate bytes follow the final
+/// byte instead of preceding it, so a decoder that stopped at `M` would read
+/// them as characters — and a click in the eighty-first column sends `q`,
+/// which is the key that quits.
+#[test]
+fn a_mouse_report_is_one_thing_the_list_does_not_understand() {
+    // Button 0 pressed at column 81, row 1: 32 + 81 = 0x71, which is `q`.
+    let click = b"\x1b[M\x20\x71\x21";
+
+    assert_eq!(decode(click), vec![Key::Unknown]);
+
+    let mut keyboard = Keyboard::default();
+    keyboard.add(b"\x1b[M\x20");
+    assert_eq!(keyboard.next(), None, "half a report decoded early");
+    keyboard.add(b"\x71\x21");
+    assert_eq!(keyboard.next(), Some(Key::Unknown));
+    assert_eq!(keyboard.next(), None);
+}
+
+/// The newer encodings put their coordinates in the parameters, where the
+/// ordinary rule already covers them.
+#[test]
+fn a_reported_click_in_any_encoding_types_nothing() {
+    for report in [
+        &b"\x1b[<0;81;1M"[..],
+        &b"\x1b[<0;81;1m"[..],
+        &b"\x1b[32;81;1M"[..],
+    ] {
+        assert_eq!(decode(report), vec![Key::Unknown], "{report:?}");
+    }
+}
+
+/// Paste markers are sequences like any other, and what a person pasted is
+/// what they typed.
+#[test]
+fn bracketed_paste_markers_are_not_typed() {
+    assert_eq!(
+        decode(b"\x1b[200~ab\x1b[201~"),
+        vec![Key::Unknown, Key::Typed('a'), Key::Typed('b'), Key::Unknown,]
+    );
+}

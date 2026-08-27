@@ -907,6 +907,22 @@ fn a_screen_corral_cannot_read_is_a_capability_fact_not_a_death() {
         Some("running"),
         "a screen Corral cannot read was turned into a claim about the process: {described}"
     );
+
+    // And the daemon enforces what it just said. A client that cannot read the
+    // field is told to try and report whatever comes back; this is what comes
+    // back, rather than a channel whose only possible content is an error.
+    let refused = client
+        .request(
+            9,
+            "terminal.attach",
+            Some(json!({ "session_id": described["session_id"] })),
+        )
+        .expect("terminal.attach answered");
+
+    assert!(
+        error_code(&refused).is_some(),
+        "a terminal the daemon calls unavailable was granted anyway: {refused}"
+    );
 }
 
 /// The daemon decides the order once, so CLI, TUI and Desktop do not each

@@ -33,7 +33,8 @@ pub use occurrence::{
 };
 pub use session::{
     Attachment, ExecutionState, InputRefused, ManagedSession, ManagedSessions, PendingSession,
-    ResizeRefused, ScreenUnreadable, SessionGone, SessionHandle, StartError, spawn_session,
+    ResizeRefused, ScreenUnreadable, SessionGone, SessionHandle, StartError, TerminalAccess,
+    spawn_session,
 };
 pub use snapshot::{
     SNAPSHOT_CEILING_BYTES, SNAPSHOT_SCROLLBACK_ROWS, SNAPSHOT_TARGET_BYTES, Snapshot,

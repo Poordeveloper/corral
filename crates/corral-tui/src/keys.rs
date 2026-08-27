@@ -120,6 +120,12 @@ const PARAMETERS: std::ops::RangeInclusive<u8> = 0x20..=0x3f;
 /// The byte that ends a sequence and says which one it was.
 const FINAL: std::ops::RangeInclusive<u8> = 0x40..=0x7e;
 
+/// The byte that ends the oldest mouse report, whose three coordinates follow
+/// it instead of preceding it.
+const MOUSE: u8 = b'M';
+/// How many bytes follow that one.
+const MOUSE_COORDINATES: usize = 3;
+
 /// Every key in one burst, for tests with no read boundary to model.
 ///
 /// Through `Keyboard`, so what these assert is what the surface runs.
@@ -175,6 +181,17 @@ fn escape_sequence(bytes: &[u8]) -> Option<(Key, usize)> {
                     continue;
                 }
                 if FINAL.contains(byte) {
+                    // `ESC [ M` with nothing before it is a mouse report, and
+                    // it is the one sequence whose payload comes *after* its
+                    // final byte: three bytes of button and coordinates. Read
+                    // as keys they are somebody typing — a click in the
+                    // eighty-first column sends `q`, and the list quits. This
+                    // surface reads no mouse, so the whole report is one thing
+                    // it does not understand.
+                    if *byte == MOUSE && offset == 0 {
+                        let whole = 3 + MOUSE_COORDINATES;
+                        return (bytes.len() >= whole).then_some((Key::Unknown, whole));
+                    }
                     let key = match byte {
                         b'A' => Key::Up,
                         b'B' => Key::Down,
