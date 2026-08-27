@@ -496,9 +496,13 @@ crates/
 │                      facing representations
 ├── corral-rendezvous  canonical rendezvous paths, OS-account home
 │                      resolution, singleton lock/socket artifact rules
+├── corral-state       the registry store: the durable semantic event log,
+│                      its encoding, and the projections over it
 ├── corral-client      shared client/core logic
+├── corral-tui         terminal surfaces: the session list, and the
+│                      attachment it hands the terminal over to
 ├── corrald            daemon: registry, runtime, attention, protocol server
-└── corral             CLI / TUI
+└── corral             CLI, and the binary those surfaces launch from
 ```
 
 Later crates (identity, crypto, history, runtime) graduate out of `corrald`
@@ -561,6 +565,7 @@ terms: `PRODUCT.md` §8.
 | **Terminal data channel** | the connection carrying a session's terminal frames. A second connection to the canonical rendezvous, claimed by redeeming a one-time attach token, after which it never carries semantic RPC again |
 | **Attach token** | the single-use, short-lived capability that opens one terminal data channel. Bound to a Session *and* its concrete Run, because a Session outlives the process a token was minted for |
 | **Final screen** | the snapshot a Run's screen thread publishes as its last act. A finished Run's screen is a value, not an actor: the emulator, its scrollback, and the thread that owned them are released when the runtime ends, and this is what a session answers from afterwards |
+| **Terminal access** | whether Corral can serve a Session's terminal right now. A capability fact about Corral, not a claim about the process: a session whose screen cannot be served may still be reliably Running, so it is a secondary line and a refusal of Open, never a main state and never evidence of death. Absence means unknown, never a known negative |
 | **Snapshot budget / ceiling** | the encoded size a normal snapshot aims at versus the absolute bound no successful snapshot may pass. Trimming sacrifices oldest scrollback first; a viewport alone past the ceiling is a typed failure, never a partial screen |
 | **Attachment seam** | the advisory record that a Corral attachment to a Run became active and later ended. It carries no holder, no client identity, and no ownership: it says a surface was watching, never who, and never that anyone had a claim. Detaching is not an end — `RunEnded` is terminal for a Run's attachment state, and a projection reads still-open attachments as inactive after it rather than inventing detaches |
 | **Managed runtime binding** | the `RuntimeBinding` Corral holds for a runtime it launched itself: provider `corral`, provenance `CorralCreated`, assurance `Deterministic`, and a Corral-minted opaque external id. It names the binding, never a process — not a pid, not a `RunId`, not a runtime occurrence, and not a provider session (ADR 0008) |

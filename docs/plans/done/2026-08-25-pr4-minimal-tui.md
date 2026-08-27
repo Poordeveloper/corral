@@ -1,5 +1,5 @@
 ---
-status: ready
+status: done
 class: C
 writes: [corral-tui, corral, corral-protocol, corrald, scripts-ci]
 reads: [docs/decisions/2026-08-25-pr4-tui-grill.md, docs/decisions/2026-08-22-surface-sequencing.md, docs/adr/0003-terminal-snapshot-format.md, docs/adr/0007-managed-session-lifetime.md, PRODUCT.md, ROADMAP.md]

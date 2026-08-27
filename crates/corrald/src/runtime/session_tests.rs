@@ -496,3 +496,135 @@ fn a_run_corral_shut_down_reports_a_terminated_ending() {
         "{reported:?}"
     );
 }
+
+/// The reproducer the pre-merge fuzz campaign distilled: an OSC title
+/// truncated mid-character, which panics the emulator's parser
+/// (`docs/evidence/pr3-terminal-fuzz-2026-08-24.md`). Read from the corpus
+/// rather than restated here, so the containment's regression floor and the
+/// surface that reports it cannot drift onto different bytes.
+fn poisoning_input() -> std::path::PathBuf {
+    let reproducer = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("corpus")
+        .join("terminal")
+        .join("osc-title-truncation-splits-a-character.bin");
+
+    // The tests that use it feed the path to a child. A corpus entry that
+    // moved would leave the screen unpoisoned and the failure would arrive as
+    // an assertion about a screen that served itself — the daemon blamed for a
+    // missing fixture.
+    assert!(
+        reproducer.is_file(),
+        "{} is missing; the tests that need it cannot say so for themselves",
+        reproducer.display()
+    );
+
+    reproducer
+}
+
+#[test]
+fn a_live_session_can_have_its_terminal_served() {
+    let handle = started("sleep 30");
+
+    assert_eq!(handle.terminal_access(), TerminalAccess::Available);
+}
+
+/// A run that ended still has a screen worth opening (ADR 0007 L2), so the
+/// capability outlives the process it belonged to.
+#[test]
+fn a_finished_session_whose_screen_survives_can_still_be_served() {
+    let handle = started(r"printf 'left-behind\r\n'");
+
+    let exited = wait_for(|| (handle.execution_state() == ExecutionState::Exited).then_some(()));
+
+    assert!(exited.is_some(), "the daemon never observed the exit");
+    assert_eq!(handle.terminal_access(), TerminalAccess::Available);
+}
+
+/// The two dimensions, held apart. A screen Corral may no longer read says
+/// nothing about the child, which in this test is still running — and the
+/// list must say so before a person presses Open rather than after
+/// (grill Q7).
+#[test]
+fn a_poisoned_screen_cannot_be_served_and_is_not_evidence_about_the_process() {
+    let mut sessions = ManagedSessions::new();
+    let handle = started(&format!("cat '{}'; sleep 30", poisoning_input().display()));
+
+    let refused =
+        wait_for(|| (handle.terminal_access() == TerminalAccess::Unavailable).then_some(()));
+
+    assert!(
+        refused.is_some(),
+        "a screen nobody may read still offered itself for attaching"
+    );
+    assert_eq!(
+        handle.execution_state(),
+        ExecutionState::Running,
+        "a screen Corral cannot read was turned into a claim about the process"
+    );
+
+    sessions.insert(handle.into_handle());
+    assert_eq!(
+        sessions.describe()[0].terminal_access,
+        TerminalAccess::Unavailable
+    );
+}
+
+/// A screen thread gone without leaving a record is a loss, and there is
+/// nothing left to serve a snapshot from (ADR 0007 L3).
+#[test]
+fn a_lost_screen_thread_leaves_no_terminal_to_serve() {
+    let mut handle = started("sleep 30").into_handle();
+
+    handle.sever_for_test();
+
+    assert_eq!(handle.terminal_access(), TerminalAccess::Unavailable);
+}
+
+/// Newest first, so the session a person just started is the one under the
+/// cursor. This orders the current daemon-visible list and nothing else: not
+/// history, not resumable ranking, not attention (grill Q3).
+#[test]
+fn sessions_are_listed_newest_first() {
+    let mut sessions = ManagedSessions::new();
+    let older = started("sleep 30").into_handle();
+    let newer = started("sleep 30").into_handle();
+    let (older_id, newer_id) = (older.session(), newer.session());
+    // Inserted oldest first, so the answer cannot come from insertion order.
+    sessions.insert(older);
+    sessions.insert(newer);
+
+    let described = sessions.describe();
+
+    assert_eq!(
+        described
+            .iter()
+            .map(|session| session.session)
+            .collect::<Vec<_>>(),
+        vec![newer_id, older_id],
+    );
+}
+
+#[test]
+fn sessions_started_in_the_same_instant_fall_back_to_a_deterministic_order() {
+    let mut sessions = ManagedSessions::new();
+    let together = Instant::now();
+    let mut first = started("sleep 30").into_handle();
+    let mut second = started("sleep 30").into_handle();
+    first.started_at_for_test(together);
+    second.started_at_for_test(together);
+    let mut expected = vec![first.session().to_string(), second.session().to_string()];
+    expected.sort();
+    sessions.insert(first);
+    sessions.insert(second);
+
+    let described = sessions.describe();
+
+    assert_eq!(
+        described
+            .iter()
+            .map(|session| session.session.to_string())
+            .collect::<Vec<_>>(),
+        expected,
+    );
+}

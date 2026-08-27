@@ -163,11 +163,12 @@ dependencies = [
  "clap",
  "corral-client",
  "corral-protocol",
+ "corral-tui",
+ "portable-pty",
  "rusqlite",
  "rustix",
  "serde_json",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -211,6 +212,18 @@ dependencies = [
  "corral-core",
  "rusqlite",
  "serde_json",
+]
+
+[[package]]
+name = "corral-tui"
+version = "0.0.0"
+dependencies = [
+ "corral-client",
+ "corral-protocol",
+ "rustix",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -6,6 +6,7 @@ members = [
     "crates/corral-protocol",
     "crates/corral-rendezvous",
     "crates/corral-client",
+    "crates/corral-tui",
     "crates/corrald",
     "crates/corral",
 ]
@@ -34,6 +35,7 @@ corral-core = { path = "crates/corral-core" }
 corral-protocol = { path = "crates/corral-protocol" }
 corral-rendezvous = { path = "crates/corral-rendezvous" }
 corral-state = { path = "crates/corral-state" }
+corral-tui = { path = "crates/corral-tui" }
 
 clap = { version = "4.5", features = ["derive"] }
 # Vendored with one patch so a failed exec is reported as a spawn error

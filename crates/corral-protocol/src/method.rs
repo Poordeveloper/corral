@@ -34,11 +34,73 @@ impl PingResult {
     }
 }
 
+/// Whether Corral can currently present or control a session's terminal.
+///
+/// A different dimension from execution: it says what Corral can do with this
+/// screen, not what the process is doing. A session whose screen cannot be
+/// served may still be reliably running, so this never becomes a main status
+/// and is never read as evidence that a process died
+/// (`docs/decisions/2026-08-25-pr4-tui-grill.md` Q7).
+///
+/// Two values and no reason. The only thing a client acts on is whether
+/// opening this session can work; telling attach failures apart waits until
+/// there are several a person actually needs to distinguish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalAccess {
+    Available,
+    Unavailable,
+}
+
+impl TerminalAccess {
+    /// The wire spelling, and the only one. Serialization goes through here so
+    /// the encoded value and `from_wire` cannot drift apart.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    /// A wire value read back, or `None` for one this build does not know.
+    ///
+    /// Unknown, never `Unavailable`: a spelling nobody here understands says
+    /// nothing about whether the terminal can be served.
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "available" => Some(Self::Available),
+            "unavailable" => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for TerminalAccess {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// Whatever the field carried, reduced to what this build can act on.
+///
+/// Absent, null, a spelling this build does not know, and a value that is not
+/// a string at all all decode to unknown rather than failing the item: an
+/// older peer must keep reading a list a newer daemon extended
+/// (`AGENTS.md` §Protocol).
+fn terminal_access_or_unknown<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<TerminalAccess>, D::Error> {
+    let carried = Option::<Value>::deserialize(deserializer)?;
+    Ok(carried
+        .as_ref()
+        .and_then(Value::as_str)
+        .and_then(TerminalAccess::from_wire))
+}
+
 /// One session in a listing.
 ///
-/// The first concrete shape the wire commits to. Three fields, because every
-/// field is a promise somebody has to keep: an identity, a label, and what the
-/// daemon can currently claim about execution.
+/// The first concrete shape the wire commits to. Every field is a promise
+/// somebody has to keep: an identity, a label, what the daemon can currently
+/// claim about execution, and whether Corral can serve the terminal behind it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionListItem {
     /// The Corral-owned identity. The only field a client may key on.
@@ -57,6 +119,18 @@ pub struct SessionListItem {
     /// fate the daemon has not established. A value a peer does not recognise
     /// is treated as `unknown` rather than guessed at.
     pub execution_state: String,
+    /// Whether this session's terminal can be served right now.
+    ///
+    /// `None` is unknown, and unknown is not a refusal: a client that could
+    /// not read this still offers Open and reports whatever answer comes back,
+    /// rather than disabling the one action a row has on a value it did not
+    /// understand.
+    #[serde(
+        default,
+        deserialize_with = "terminal_access_or_unknown",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub terminal_access: Option<TerminalAccess>,
 }
 
 /// `session.list`'s result.

@@ -169,6 +169,13 @@ pub enum FakeBehaviour {
     /// produce it: closing looks like a daemon on its way out, which is
     /// legitimately retried.
     StaySilent,
+    /// Answer the hello at once, then take `delay` over every request after
+    /// it, watching for a second one arriving before the first is answered.
+    ///
+    /// A daemon this slow is not what a person meets; it is the only way to
+    /// observe whether a polling surface waits for its answer or queues
+    /// another question behind it.
+    AnswerSlowly { delay: Duration },
 }
 
 /// A stand-in daemon that answers however a test needs.
@@ -179,6 +186,8 @@ pub enum FakeBehaviour {
 /// Everything else about the connection is real.
 pub struct FakeDaemon {
     connections: Arc<AtomicUsize>,
+    requests: Arc<AtomicUsize>,
+    overlapped: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
 }
 
@@ -187,6 +196,17 @@ impl FakeDaemon {
     /// as terminal connects exactly once.
     pub fn connections(&self) -> usize {
         self.connections.load(Ordering::SeqCst)
+    }
+
+    /// How many requests after the hello this daemon has been sent.
+    pub fn requests(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
+    }
+
+    /// Whether a request ever arrived while an earlier one was still being
+    /// answered.
+    pub fn overlapped(&self) -> bool {
+        self.overlapped.load(Ordering::SeqCst)
     }
 }
 
@@ -205,8 +225,12 @@ pub fn spawn_fake_daemon(socket: &Path, behaviour: FakeBehaviour) -> FakeDaemon 
         .expect("poll for connections");
 
     let connections = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(AtomicUsize::new(0));
+    let overlapped = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
     let counter = Arc::clone(&connections);
+    let asked = Arc::clone(&requests);
+    let queued = Arc::clone(&overlapped);
     let stopped = Arc::clone(&stop);
 
     std::thread::spawn(move || {
@@ -226,6 +250,9 @@ pub fn spawn_fake_daemon(socket: &Path, behaviour: FakeBehaviour) -> FakeDaemon 
                             let _ = stream.flush();
                         }
                         FakeBehaviour::StaySilent => held.push(stream),
+                        FakeBehaviour::AnswerSlowly { delay } => {
+                            answer_slowly(stream, *delay, &asked, &queued);
+                        }
                     }
                 }
                 Err(source) if source.kind() == std::io::ErrorKind::WouldBlock => {
@@ -236,7 +263,81 @@ pub fn spawn_fake_daemon(socket: &Path, behaviour: FakeBehaviour) -> FakeDaemon 
         }
     });
 
-    FakeDaemon { connections, stop }
+    FakeDaemon {
+        connections,
+        requests,
+        overlapped,
+        stop,
+    }
+}
+
+/// Serve one connection slowly, and notice anything sent before an answer.
+fn answer_slowly(
+    mut stream: UnixStream,
+    delay: Duration,
+    requests: &Arc<AtomicUsize>,
+    overlapped: &Arc<AtomicBool>,
+) {
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        let Ok(request) = serde_json::from_str::<Value>(&line) else {
+            return;
+        };
+        let id = request.get("id").cloned().unwrap_or_else(|| json!(0));
+
+        let reply = if request.get("method").and_then(Value::as_str) == Some("hello") {
+            hello_reply(
+                corral_protocol::PROTOCOL_VERSION,
+                corral_protocol::MIN_COMPATIBLE_PEER_VERSION,
+                "compatible",
+            )
+        } else {
+            requests.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(delay);
+            // Anything already here was sent before this request was answered,
+            // which is the queue a polling client must not build.
+            if already_waiting(&mut reader) {
+                overlapped.store(true, Ordering::SeqCst);
+            }
+            let mut line = serde_json::to_vec(&json!({
+                "type": "response",
+                "id": id,
+                "outcome": {"result": {"sessions": []}},
+            }))
+            .expect("encode");
+            line.push(b'\n');
+            line
+        };
+
+        if stream.write_all(&reply).is_err() || stream.flush().is_err() {
+            return;
+        }
+    }
+}
+
+/// Whether the peer has sent anything this connection has not read yet.
+///
+/// Buffered without being consumed, so the request this notices is still the
+/// next one the loop reads.
+fn already_waiting(reader: &mut BufReader<UnixStream>) -> bool {
+    if !reader.buffer().is_empty() {
+        return true;
+    }
+    if reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(20)))
+        .is_err()
+    {
+        return false;
+    }
+    let waiting = reader.fill_buf().is_ok_and(|bytes| !bytes.is_empty());
+    let _ = reader.get_ref().set_read_timeout(None);
+    waiting
 }
 
 /// A hello reply line built from raw parts, so a test can state exactly what

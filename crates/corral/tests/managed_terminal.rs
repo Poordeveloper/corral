@@ -16,6 +16,7 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use support::corpus;
 use support::wire::{RawClient, error_code};
 use support::{SETTLE, TestAccount, run, stderr, stdout};
 
@@ -590,8 +591,8 @@ fn the_cli_lists_a_session_it_started() {
         "the title is missing: {rendered:?}"
     );
     assert!(
-        rendered.contains("running"),
-        "the execution state is missing: {rendered:?}"
+        rendered.contains("Running · Status unknown"),
+        "the state is not the one every surface projects: {rendered:?}"
     );
     let prefix = session.split('-').next().expect("an id has a first group");
     assert!(
@@ -845,4 +846,121 @@ fn resync_frame() -> Vec<u8> {
     frame.extend_from_slice(&0_u64.to_be_bytes());
     frame.extend_from_slice(&0_u32.to_be_bytes());
     frame
+}
+
+/// The capability a list needs before it offers Open, carried by the same
+/// answer that carries the session (grill Q7).
+#[test]
+fn a_listed_session_says_whether_its_terminal_can_be_served() {
+    let account = TestAccount::new("listed-access");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    start_session(&mut client, 1, &["/bin/sh", "-c", "sleep 30"]);
+
+    let listed = client
+        .request(2, "session.list", None)
+        .expect("session.list answered");
+
+    assert_eq!(
+        sessions(&listed)[0]
+            .get("terminal_access")
+            .and_then(Value::as_str),
+        Some("available")
+    );
+}
+
+/// The two dimensions, end to end. A screen Corral may no longer read is
+/// reported as a terminal it cannot serve — and says nothing about the child,
+/// which is still running (grill Q7).
+#[test]
+fn a_screen_corral_cannot_read_is_a_capability_fact_not_a_death() {
+    let account = TestAccount::new("screen-unreadable");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    let script = format!("cat '{}'; sleep 30", corpus::poisoning_input().display());
+    start_session(&mut client, 1, &["/bin/sh", "-c", &script]);
+
+    let mut described = Value::Null;
+    let mut id = 2;
+    let deadline = Instant::now() + SETTLE;
+    while Instant::now() < deadline {
+        let listed = client
+            .request(id, "session.list", None)
+            .expect("session.list answered");
+        id += 1;
+        described = sessions(&listed)[0].clone();
+        if described.get("terminal_access").and_then(Value::as_str) == Some("unavailable") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert_eq!(
+        described.get("terminal_access").and_then(Value::as_str),
+        Some("unavailable"),
+        "a screen nobody may read still offered itself for attaching: {described}"
+    );
+    assert_eq!(
+        described.get("execution_state").and_then(Value::as_str),
+        Some("running"),
+        "a screen Corral cannot read was turned into a claim about the process: {described}"
+    );
+
+    // And the daemon enforces what it just said. A client that cannot read the
+    // field is told to try and report whatever comes back; this is what comes
+    // back, rather than a channel whose only possible content is an error.
+    let refused = client
+        .request(
+            9,
+            "terminal.attach",
+            Some(json!({ "session_id": described["session_id"] })),
+        )
+        .expect("terminal.attach answered");
+
+    assert!(
+        error_code(&refused).is_some(),
+        "a terminal the daemon calls unavailable was granted anyway: {refused}"
+    );
+}
+
+/// The daemon decides the order once, so CLI, TUI and Desktop do not each
+/// invent a default. Newest first: the session a person just started is the
+/// one under the cursor (grill Q3).
+#[test]
+fn the_newest_session_is_listed_first() {
+    let account = TestAccount::new("newest-first");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    let older = session_id(&start_session(
+        &mut client,
+        1,
+        &["/bin/sh", "-c", "sleep 30"],
+    ));
+    let newer = session_id(&start_session(
+        &mut client,
+        2,
+        &["/bin/sh", "-c", "sleep 30"],
+    ));
+
+    let listed = client
+        .request(3, "session.list", None)
+        .expect("session.list answered");
+
+    let order: Vec<String> = sessions(&listed)
+        .iter()
+        .filter_map(|session| session.get("session_id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(order, vec![newer, older]);
+}
+
+fn sessions(listed: &Value) -> Vec<Value> {
+    result(listed)
+        .get("sessions")
+        .and_then(Value::as_array)
+        .expect("a session array")
+        .clone()
 }
