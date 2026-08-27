@@ -24,8 +24,41 @@ fn a_sequence_this_build_has_no_meaning_for_is_consumed_whole() {
 /// first would put escape bytes in the prompt.
 #[test]
 fn an_unterminated_sequence_is_not_read_as_characters() {
-    assert!(decode(b"\x1b[1;").is_empty());
+    // Given up on rather than read as `1` and `;`, and never as characters.
+    assert_eq!(decode(b"\x1b[1;"), vec![Key::Unknown]);
     assert_eq!(decode(b"\x1b[1;5C"), vec![Key::Unknown]);
+}
+
+/// A sequence the terminal never finishes must not eat the next key.
+///
+/// Every byte in 0x40..=0x7e ends a sequence, and `q` is one of them. Held
+/// bytes with no way out turn the key that quits into the final byte of
+/// something the person abandoned, and the list neither quits nor says why.
+#[test]
+fn a_sequence_that_never_finishes_is_given_up_on() {
+    let mut keyboard = Keyboard::default();
+    keyboard.add(b"\x1b[");
+
+    assert_eq!(keyboard.next(), None);
+    assert!(
+        keyboard.undecided(),
+        "nothing would ever settle these bytes"
+    );
+
+    assert_eq!(keyboard.settle(), Some(Key::Unknown));
+    keyboard.add(b"q");
+    assert_eq!(keyboard.next(), Some(Key::Typed('q')));
+}
+
+/// The same for a character whose remaining bytes never arrive.
+#[test]
+fn a_character_that_never_finishes_is_given_up_on() {
+    let mut keyboard = Keyboard::default();
+    keyboard.add(&"é".as_bytes()[..1]);
+
+    assert!(keyboard.undecided());
+    assert_eq!(keyboard.settle(), Some(Key::Unknown));
+    assert_eq!(keyboard.next(), None);
 }
 
 /// A read boundary can fall anywhere, including inside a cursor key. Decoding
@@ -176,7 +209,7 @@ fn an_escape_nothing_follows_is_the_escape_key() {
 /// Only a bare Escape is undecided. One with anything after it is already
 /// decidable, and settling would throw the rest away.
 #[test]
-fn only_an_escape_on_its_own_waits() {
+fn a_decodable_burst_never_waits() {
     let mut keyboard = Keyboard::default();
     keyboard.add(b"\x1bq");
 

@@ -52,16 +52,7 @@ async fn main() -> ExitCode {
 
     let mut connection = match activate(&policy).await {
         Ok(connection) => connection,
-        // The list is the one surface with something to do without a daemon:
-        // it says it could not reach one, keeps asking, and picks up when one
-        // answers. Exiting here would mean that recovery existed for every
-        // minute but the first.
-        Err(error) => {
-            return match cli.command {
-                Command::Tui => session_list(&policy, None).await,
-                _ => report_activation_failure(&error),
-            };
-        }
+        Err(error) => return report_activation_failure(&error),
     };
 
     match cli.command {
@@ -69,7 +60,7 @@ async fn main() -> ExitCode {
         Command::List => list(&mut connection).await,
         Command::New { argv } => new_session(&mut connection, argv).await,
         Command::Attach { session } => attach(&mut connection, &session).await,
-        Command::Tui => session_list(&policy, Some(connection)).await,
+        Command::Tui => session_list(&policy, connection).await,
     }
 }
 
@@ -78,7 +69,7 @@ async fn main() -> ExitCode {
 /// The list needs the activation policy as well as the connection: a daemon
 /// that goes away while a person is watching the list is something it asks for
 /// again, on exactly the terms every other surface activates under (ADR 0001).
-async fn session_list(policy: &ClientActivationPolicy, connection: Option<Connection>) -> ExitCode {
+async fn session_list(policy: &ClientActivationPolicy, connection: Connection) -> ExitCode {
     match corral_tui::run(policy, connection).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -112,7 +103,9 @@ async fn attach(connection: &mut Connection, session: &str) -> ExitCode {
     // channel handshake are a wide enough window to type into, and a reader
     // parked on a terminal still in line discipline gets what the person typed
     // echoed over the session about to be painted — and not until they press
-    // Enter.
+    // Enter. `Ok(None)` is a pipe on standard input, which `corral new` from a
+    // script legitimately has: nothing to put in raw mode and nobody typing
+    // into it.
     let raw = match corral_tui::RawMode::enter() {
         Ok(raw) => raw,
         Err(error) => {

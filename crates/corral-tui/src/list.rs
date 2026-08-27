@@ -43,15 +43,7 @@ const FOOTER: &str = "↑/↓ move · enter open · n new · q quit";
 const ESCAPE_GRACE: Duration = Duration::from_millis(30);
 
 /// Run the session list until the person leaves it.
-///
-/// Takes whatever connection the caller already has, and `None` when it could
-/// not get one: this is the surface that survives a daemon it cannot reach, so
-/// failing to start one is something to report and keep asking about rather
-/// than a reason not to open at all.
-pub async fn run(
-    policy: &ClientActivationPolicy,
-    connection: Option<Connection>,
-) -> std::io::Result<()> {
+pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std::io::Result<()> {
     if Geometry::of(&std::io::stdin()).is_none() {
         return Err(std::io::Error::other(
             "the session list needs a terminal on standard input",
@@ -65,9 +57,9 @@ pub async fn run(
     // attachment enters raw mode of its own and restores what it found, which
     // is this.
     let Some(_raw) = RawMode::enter()? else {
-        // Not a condition to carry on through. Everything above says why: a
-        // terminal in line discipline echoes over the frame, holds what was
-        // typed until Enter, and turns the detach byte into SIGQUIT.
+        // The guard above says standard input is a terminal, so this is one
+        // whose mode could not be set — and everything the comment below says
+        // about line discipline would be true of it.
         return Err(std::io::Error::other(
             "the session list needs a terminal it can put in raw mode",
         ));
@@ -80,7 +72,7 @@ pub async fn run(
 
     let mut daemon = Daemon {
         policy,
-        connection,
+        connection: Some(connection),
         retry: None,
     };
     let mut list = SessionList::default();
@@ -688,19 +680,22 @@ fn draw(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> 
     };
     let mut frame = Frame::new(geometry);
 
-    frame.line(Emphasis::Plain, &heading(list));
-    frame.line(Emphasis::Plain, "");
-
     // The last line is the footer or the prompt, with a line above it for
     // whatever the surface has to say.
     let tail = 1 + u16::from(list.notice.is_some() || list.typing.is_some());
     // The count of what could not be rendered sits under the rows, so its row
     // is spoken for too, and one blank row keeps the tail off the last of
     // them. Reserved rather than subtracted: `line` then stops at the
-    // reservation, so a row taller than what is left cannot take the footer's
-    // place — or the prompt's, which is the only line that shows the cursor.
+    // reservation, so nothing drawn above can take the footer's place — or the
+    // prompt's, which is the only line that shows the cursor. Reserved before
+    // the heading rather than after it, because on a screen too short for both
+    // the prompt is the one a person cannot do without.
     let counted = u16::from(list.unrenderable > 0);
     frame.reserve(tail + counted + 1);
+
+    frame.line(Emphasis::Plain, &heading(list));
+    frame.line(Emphasis::Plain, "");
+
     let budget = frame.remaining();
 
     if let Some(unanswered) = &list.unanswered {

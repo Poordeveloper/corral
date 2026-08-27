@@ -503,11 +503,23 @@ fn a_run_corral_shut_down_reports_a_terminated_ending() {
 /// rather than restated here, so the containment's regression floor and the
 /// surface that reports it cannot drift onto different bytes.
 fn poisoning_input() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    let reproducer = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("corpus")
         .join("terminal")
-        .join("osc-title-truncation-splits-a-character.bin")
+        .join("osc-title-truncation-splits-a-character.bin");
+
+    // The tests that use it feed the path to a child. A corpus entry that
+    // moved would leave the screen unpoisoned and the failure would arrive as
+    // an assertion about a screen that served itself — the daemon blamed for a
+    // missing fixture.
+    assert!(
+        reproducer.is_file(),
+        "{} is missing; the tests that need it cannot say so for themselves",
+        reproducer.display()
+    );
+
+    reproducer
 }
 
 #[test]

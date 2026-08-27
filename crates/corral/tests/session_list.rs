@@ -125,8 +125,12 @@ fn the_list_opens_a_session_and_comes_back_to_a_current_one() {
     // A session may have turned mouse reporting on and died with it on. A
     // terminal still reporting sends three coordinate bytes for every click,
     // and a click in the eighty-first column sends `q`.
-    terminal.wait_for_after(detached, NO_MOUSE);
-    let returned = frame_after(&terminal, detached);
+    let claimed = terminal.wait_for_after(detached, NO_MOUSE);
+    // The first frame back is the list as it was left, drawn at once so the
+    // person is not looking at the session they just detached from. The one
+    // after it is the answer, which the poll asks for on the way in.
+    let handed_back = terminal.wait_for_after(claimed, FRAME);
+    let returned = frame_after(&terminal, handed_back);
 
     assert!(
         returned.contains("sleep"),
@@ -294,13 +298,12 @@ fn what_was_typed_after_open_reaches_the_session() {
     assert!(terminal.wait_for_exit().success());
 }
 
-/// The list opens against a daemon that never started, and says so.
-///
-/// It is the one surface with something to do without a daemon: recovery that
-/// only worked from minute two would be recovery a person never reaches, since
-/// the way they find out corrald is unreachable is by trying to open this.
+/// No daemon, no list. The plan rules that the TUI reports it and exits, as
+/// every other command does — it never starts a daemon differently from the
+/// CLI (`docs/plans/done/2026-08-25-pr4-minimal-tui.md`, Failure / unknown
+/// states).
 #[test]
-fn the_list_opens_even_when_no_daemon_could_be_started() {
+fn the_list_reports_a_daemon_it_could_not_start_and_exits() {
     // A peer that is reachable and never becomes protocol-ready is what an
     // activation budget exists for, and running out of it is what a corrald
     // that cannot start looks like from here.
@@ -310,10 +313,12 @@ fn the_list_opens_even_when_no_daemon_could_be_started() {
 
     let mut terminal = Terminal::spawn(account.corral_on_pty(&["tui"]), ROWS, COLS);
 
-    terminal.wait_for("corrald did not answer");
-
-    terminal.typed(b"q");
-    assert!(terminal.wait_for_exit().success());
+    assert!(!terminal.wait_for_exit().success());
+    let drawn = String::from_utf8_lossy(&terminal.drawn()).into_owned();
+    assert!(
+        !drawn.contains(TAKE),
+        "the terminal was taken for a list that could not be shown:\n{drawn}"
+    );
 }
 
 /// The keyboard keeps working while a daemon does not answer.

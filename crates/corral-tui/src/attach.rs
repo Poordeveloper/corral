@@ -43,12 +43,25 @@ pub struct RawMode {
 }
 
 impl RawMode {
+    /// Put this terminal in raw mode.
+    ///
+    /// `None` means there was no terminal to put in it, which is legal:
+    /// `corral new` from a script has a pipe on standard input and nobody
+    /// typing into it. A terminal whose mode could not be *read* is a
+    /// different answer and an error — carrying on would leave a reader parked
+    /// on a terminal still in line discipline, echoing what the person types,
+    /// holding it until Enter, and turning the detach byte into SIGQUIT for
+    /// whoever is in the foreground.
     pub fn enter() -> std::io::Result<Option<Self>> {
         let stdin = std::io::stdin();
-        let Ok(original) = rustix::termios::tcgetattr(stdin.as_fd()) else {
-            // Not a terminal: piped input is legal, it just cannot be raw.
+        // Asked as the portable question rather than read off an errno: what a
+        // platform returns for `tcgetattr` on something that is not a terminal
+        // varies, and only one of the two answers here is an error.
+        if !std::io::IsTerminal::is_terminal(&stdin) {
             return Ok(None);
-        };
+        }
+
+        let original = rustix::termios::tcgetattr(stdin.as_fd()).map_err(std::io::Error::from)?;
 
         let mut raw = original.clone();
         raw.make_raw();

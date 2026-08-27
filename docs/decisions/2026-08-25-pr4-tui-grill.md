@@ -1,7 +1,7 @@
 # Founder Decision Record — PR4's minimal TUI
 
 > Status: founder-ruled, 2026-08-25, in one round over a prepared frontier.
-> Materialized by `docs/plans/2026-08-25-pr4-minimal-tui.md`. Two of the
+> Materialized by `docs/plans/done/2026-08-25-pr4-minimal-tui.md`. Two of the
 > seven rulings corrected the recommendation they answered; both corrections
 > are recorded with the reasoning, because in each case the recommendation was
 > wrong in a way that would have shipped.

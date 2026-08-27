@@ -54,26 +54,36 @@ impl Keyboard {
         Some(key)
     }
 
-    /// Whether all that is held is an Escape that could still become a
-    /// sequence.
+    /// Whether what is held is waiting on bytes that may never come.
     ///
-    /// The one ambiguity a decoder cannot settle from bytes alone: `ESC` is
-    /// both the Escape key and the first byte of every cursor key. A local
-    /// terminal writes a cursor key in one go, but one behind ssh or tmux can
-    /// hand over the `ESC` and the rest in two reads — and deciding early
-    /// makes Down cancel the prompt and then type `[` and `B` into it. So it
-    /// waits, and the caller decides when nothing has followed.
+    /// Two shapes. A bare `ESC` is the ambiguity a decoder cannot settle from
+    /// bytes alone — it is both the Escape key and the first byte of every
+    /// cursor key — and a local terminal writes a cursor key in one go where
+    /// one behind ssh or tmux need not. Everything else here is a sequence or
+    /// a character that arrived in part.
+    ///
+    /// Both wait, and both must be given up on: bytes held forever make the
+    /// person's next key the missing final byte of a sequence they abandoned,
+    /// which is a `q` that does not quit and says nothing.
     pub fn undecided(&self) -> bool {
-        self.held == [ESCAPE]
+        if self.held.is_empty() {
+            return false;
+        }
+        self.held == [ESCAPE] || decode_one(&self.held).is_none()
     }
 
-    /// Nothing followed the Escape, so it was the key.
+    /// Nothing followed, so what is held is all it will ever be.
+    ///
+    /// A bare Escape was the Escape key. Anything else never became one and is
+    /// dropped rather than kept — reported, because a keystroke that did
+    /// nothing should still redraw rather than look ignored.
     pub fn settle(&mut self) -> Option<Key> {
         if !self.undecided() {
             return None;
         }
+        let escape = self.held == [ESCAPE];
         self.held.clear();
-        Some(Key::Escape)
+        Some(if escape { Key::Escape } else { Key::Unknown })
     }
 
     /// Everything read but not turned into a key.
