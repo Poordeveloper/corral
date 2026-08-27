@@ -18,7 +18,7 @@ use std::time::SystemTime;
 
 use corral_core::{
     Assurance, Binding, BindingKey, BindingKind, Evidence, EvidenceSource, ExternalId, Provenance,
-    ProviderId,
+    ProviderId, RunId,
 };
 use corral_state::{BindingResolution, Contested, StateError};
 use tracing::{debug, info, warn};
@@ -47,10 +47,26 @@ pub struct Delivered {
     pub observed_at: SystemTime,
 }
 
-/// Where the endpoint puts what it received.
+/// Everything the one serial consumer has to act on, in the order it happened.
+///
+/// A Run ending rides the same queue as the events of that Run, deliberately.
+/// Retiring its token on another thread would race the events already waiting
+/// here — a session's last `SessionEnd` is delivered and then its process
+/// exits, so the two are milliseconds apart — and the retirement would win
+/// often enough to lose the tail of every session. One queue makes "after"
+/// mean after.
+pub(crate) enum Ingest {
+    Delivered(Box<Delivered>),
+    /// This Run is over. Its token resolves to nothing from here on, whatever
+    /// arrives under it (ADR 0004 D5).
+    RunEnded(RunId),
+}
+
+/// Where the endpoint puts what it received, and where a Run's ending is
+/// announced.
 #[derive(Clone)]
 pub struct Deliveries {
-    sender: tokio::sync::mpsc::Sender<Delivered>,
+    sender: tokio::sync::mpsc::Sender<Ingest>,
 }
 
 impl Deliveries {
@@ -60,30 +76,54 @@ impl Deliveries {
     /// caller that could block there is a caller that can delay the user's
     /// agent.
     pub fn offer(&self, delivered: Delivered) {
-        if self.sender.try_send(delivered).is_err() {
-            warn!("a hook event was dropped: the evidence queue is full or closed");
+        self.send(
+            Ingest::Delivered(Box::new(delivered)),
+            "a hook event was dropped",
+        );
+    }
+
+    /// Announce that a Run is over, behind everything it already delivered.
+    ///
+    /// Never waits either: the caller is the thread that records run lifecycle
+    /// facts, and making it wait on this queue would put database work behind
+    /// hook interpretation.
+    pub fn run_ended(&self, run: RunId) {
+        self.send(
+            Ingest::RunEnded(run),
+            "a run's launch token was not retired",
+        );
+    }
+
+    fn send(&self, ingest: Ingest, lost: &str) {
+        if self.sender.try_send(ingest).is_err() {
+            warn!("{lost}: the evidence queue is full or closed");
         }
     }
 }
 
-pub fn queue() -> (Deliveries, tokio::sync::mpsc::Receiver<Delivered>) {
+pub(crate) fn queue() -> (Deliveries, tokio::sync::mpsc::Receiver<Ingest>) {
     let (sender, receiver) = tokio::sync::mpsc::channel(QUEUE);
     (Deliveries { sender }, receiver)
 }
 
-/// Interpret every delivered event, one at a time, for as long as the daemon
-/// serves.
-pub async fn ingest(
+/// Interpret everything the queue carries, one at a time, for as long as the
+/// daemon serves.
+pub(crate) async fn ingest(
     state: Arc<DaemonState>,
-    mut deliveries: tokio::sync::mpsc::Receiver<Delivered>,
+    mut incoming: tokio::sync::mpsc::Receiver<Ingest>,
 ) {
-    while let Some(delivered) = deliveries.recv().await {
-        if let Err(error) = ingest_one(&state, delivered).await {
-            // Never fatal to the daemon. A store that cannot take evidence
-            // costs awareness of one session; the runs it owns are unaffected,
-            // and the store's own conclusions are what decide whether it can
-            // still vouch.
-            warn!(%error, "a hook event could not be recorded");
+    while let Some(ingest) = incoming.recv().await {
+        match ingest {
+            Ingest::Delivered(delivered) => {
+                if let Err(error) = ingest_one(&state, *delivered).await {
+                    // Never fatal to the daemon. A store that cannot take
+                    // evidence costs awareness of one session; the runs it owns
+                    // are unaffected, and the store's own conclusions are what
+                    // decide whether it can still vouch.
+                    warn!(%error, "a hook event could not be recorded");
+                }
+            }
+            Ingest::RunEnded(run) => state.retire_launch_tokens_of(run),
         }
     }
 }
@@ -93,13 +133,10 @@ async fn ingest_one(state: &Arc<DaemonState>, delivered: Delivered) -> Result<()
     // event belongs to. An event with no token, an unknown token, or another
     // launch's token is dropped with diagnostics and never correlated by cwd
     // or time — heuristics never bind (ADR 0004 D5).
-    // A runtime that cannot be consulted and a token nobody minted reach the
-    // same place deliberately: neither is a launch this event can be filed
-    // under, and inventing a difference would invite a caller to act on one.
-    let resolved = state
-        .with_runtime(|runtime| runtime.launch_tokens.resolve(&delivered.token))
-        .flatten();
-    let Some(scope) = resolved else {
+    // A token nobody minted and a token whose Run is over reach the same place
+    // deliberately: neither is a launch this event may be filed under, and
+    // inventing a difference would invite a caller to act on one.
+    let Some(scope) = state.resolve_launch_token(&delivered.token) else {
         debug!("a hook event named a launch this daemon does not remember");
         return Ok(());
     };
@@ -167,7 +204,7 @@ async fn apply(
         Some(existing) if existing.key().external_id() == &reported_id => {
             reobserved(state, scope, &existing, report, observed_at).await
         }
-        Some(existing) => contest(state, scope, &existing, reported_id, observed_at).await,
+        Some(existing) => contest(state, scope, &existing, report, reported_id, observed_at).await,
     }
 }
 
@@ -300,9 +337,17 @@ async fn contest(
     state: &Arc<DaemonState>,
     scope: &LaunchScope,
     existing: &Binding,
+    report: &ProviderReport,
     reported_id: ExternalId,
     observed_at: SystemTime,
 ) -> Result<(), StateError> {
+    // Diagnostics, and diagnostics only: a contest is a contest whichever way
+    // the runtime came to name a second conversation. What this buys is a
+    // person being able to find out *why* continuing this Session stopped
+    // being possible — most often because they cleared it.
+    let origin = report
+        .origin
+        .map_or("unstated", crate::provider::SessionOrigin::as_str);
     let evidence = Evidence::new(
         EvidenceSource::ProviderHook,
         Assurance::Attested,
@@ -316,6 +361,7 @@ async fn contest(
             info!(
                 session = %scope.session,
                 binding = %binding.id(),
+                origin,
                 "a managed session reported a provider identity that contradicts the one Corral \
                  accepted; continuing this provider session is refused",
             );
@@ -326,6 +372,7 @@ async fn contest(
         Ok(Contested::Already(_)) => {
             debug!(
                 session = %scope.session,
+                origin,
                 "a further provider identity report on an already contested session",
             );
         }

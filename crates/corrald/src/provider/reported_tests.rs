@@ -152,3 +152,61 @@ fn a_forgotten_session_is_unknown_again() {
     reported.forget(session);
     assert!(reported.get(session).is_none());
 }
+
+/// Latest by observation, not by arrival. Each hook is delivered by its own
+/// process over its own connection, so two events fired back to back can be
+/// accepted in either order — and a row that went backwards would make
+/// `latest` mean "most recently delivered", which is not what it says.
+#[test]
+fn an_out_of_order_delivery_does_not_move_a_row_backwards() {
+    let mut reported = ReportedSessions::new();
+    let session = CorralSessionId::mint();
+    reported.launched(session, KnownProvider::Claude);
+
+    reported.reported(
+        session,
+        KnownProvider::Claude,
+        fact(AgentFactKind::AwaitingInput, 90),
+    );
+    reported.reported(
+        session,
+        KnownProvider::Claude,
+        fact(AgentFactKind::TurnEnded, 30),
+    );
+
+    let held = reported
+        .get(session)
+        .and_then(|held| held.latest)
+        .expect("a fact");
+    assert_eq!(held.kind, AgentFactKind::AwaitingInput);
+    assert_eq!(
+        held.observed_at,
+        SystemTime::UNIX_EPOCH + Duration::from_secs(90)
+    );
+}
+
+/// Two facts stamped at the same instant are the ordinary case on a coarse
+/// clock, and the later arrival is the better answer for them.
+#[test]
+fn a_fact_at_the_same_instant_supersedes() {
+    let mut reported = ReportedSessions::new();
+    let session = CorralSessionId::mint();
+    reported.reported(
+        session,
+        KnownProvider::Claude,
+        fact(AgentFactKind::TurnStarted, 42),
+    );
+    reported.reported(
+        session,
+        KnownProvider::Claude,
+        fact(AgentFactKind::TurnEnded, 42),
+    );
+
+    assert_eq!(
+        reported
+            .get(session)
+            .and_then(|held| held.latest)
+            .map(|held| held.kind),
+        Some(AgentFactKind::TurnEnded),
+    );
+}

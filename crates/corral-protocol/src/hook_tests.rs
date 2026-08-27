@@ -62,6 +62,68 @@ fn a_payload_that_is_not_text_is_not_reported_as_oversize() {
     );
 }
 
+/// Oversize is decided by length, before validity — and it has to be. A
+/// payload read up to the cap ends wherever the cap falls, which for anything
+/// but ASCII usually lands mid-character; asking "is this text?" first would
+/// turn the ordinary oversize case into a silent drop, exactly where a
+/// systematic oversize is supposed to become visible.
+#[test]
+fn an_oversize_payload_cut_mid_character_is_still_marked() {
+    // Every one of these ends with a truncated multi-byte character, which is
+    // what a byte-bounded read of real text produces.
+    for tail in [&[0xe2_u8][..], &[0xe2, 0x82][..], &[0xf0, 0x9f, 0x92][..]] {
+        let mut payload = vec![b'x'; MAX_HOOK_PAYLOAD_BYTES + 1 - tail.len()];
+        payload.extend_from_slice(tail);
+        assert!(payload.len() > MAX_HOOK_PAYLOAD_BYTES);
+
+        let carried = delivery(&payload);
+
+        assert_eq!(carried.payload, None, "{} bytes", payload.len());
+        assert_eq!(
+            carried.payload_omitted.as_deref(),
+            Some(PAYLOAD_OMITTED_OVERSIZE),
+        );
+    }
+}
+
+/// The cap bounds the payload; the framing limit bounds the message. JSON
+/// escaping expands a control character six-fold, so a payload well under the
+/// cap can encode past what the channel carries — and the delivery marked
+/// instead is what keeps the event from vanishing without a record.
+#[test]
+fn a_payload_that_escapes_past_the_frame_has_a_marked_form_that_fits() {
+    let escaping = vec![0x1b_u8; MAX_HOOK_PAYLOAD_BYTES];
+    let carried = delivery(&escaping);
+    assert!(carried.payload.is_some(), "it is under the cap");
+
+    let framed = |delivery: &HookDelivery| {
+        let params = serde_json::to_value(delivery).expect("encodable");
+        crate::encode_frame(&crate::Frame::request(
+            crate::RequestId(0),
+            HOOK_DELIVER,
+            Some(params),
+        ))
+        .expect("framable")
+        .len()
+    };
+
+    assert!(
+        framed(&carried) > crate::MAX_FRAME_BYTES,
+        "the worst case has to be a real one for this to be worth handling",
+    );
+    let marked = carried.without_payload();
+    assert!(framed(&marked) < crate::MAX_FRAME_BYTES);
+    assert_eq!(marked.payload, None);
+    assert_eq!(
+        marked.payload_omitted.as_deref(),
+        Some(PAYLOAD_OMITTED_OVERSIZE),
+    );
+    // Everything a delivery is placed by survives the drop.
+    assert_eq!(marked.launch_token, carried.launch_token);
+    assert_eq!(marked.provider, carried.provider);
+    assert_eq!(marked.hook_protocol_version, carried.hook_protocol_version);
+}
+
 /// Future input: an envelope gaining fields must stay decodable by a build
 /// that has no word for them (`AGENTS.md` §Protocol).
 #[test]

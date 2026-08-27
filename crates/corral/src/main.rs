@@ -155,8 +155,11 @@ async fn new_session(
         Ok(started) => started,
         Err(error) => {
             let code = report_request_failure(&error);
+            // The daemon names the agents it knows; the form for a plain
+            // command is this surface's own syntax, so this surface is what
+            // states it.
             if let Some(named) = named {
-                eprintln!("For a raw command, use: corral new -- {named}");
+                eprintln!("For a plain command, use: corral new -- {named}");
             }
             return code;
         }

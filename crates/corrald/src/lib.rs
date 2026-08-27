@@ -163,7 +163,14 @@ fn start() -> Result<ExitCode, StartupError> {
     }
     // Best effort: the next claim winner owns whatever an abrupt death leaves
     // behind, so failing to unlink here costs nothing.
+    //
+    // Both pathnames, here, because dropping the runtime cancels the hook
+    // endpoint's task wherever it was parked — its own cleanup runs only when
+    // the loop exits on its own, which a cancelled task never does. A daemon
+    // that left its hook socket behind would be a departed daemon that still
+    // looks present to anything reading the path.
     let _ = std::fs::remove_file(paths.socket());
+    let _ = std::fs::remove_file(paths.hook_socket());
     drop(claim);
 
     // A daemon that stopped because it could not trust its own durable state

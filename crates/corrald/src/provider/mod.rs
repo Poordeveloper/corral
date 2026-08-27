@@ -28,8 +28,10 @@ use std::time::SystemTime;
 
 use corral_core::ExternalId;
 
+pub use claude::ArgumentRefused;
 pub use launch::{
-    InjectedSettings, InjectionFailed, LaunchScope, LaunchToken, LaunchTokens, sweep_launch_dir,
+    InjectedSettings, InjectionFailed, LaunchScope, LaunchToken, LaunchTokens, NoRandomness,
+    sweep_launch_dir,
 };
 pub use reported::{ReportedSession, ReportedSessions};
 
@@ -108,6 +110,42 @@ pub struct AgentFact {
     pub observed_at: SystemTime,
 }
 
+/// How a provider session came to be, as its start reported it.
+///
+/// **Diagnostics only in this phase, and deliberately so.** ADR 0004 D6 injects
+/// `SessionStart` for identity *and* for start discrimination, and this is the
+/// discrimination — normalized, because the provider's own spellings never
+/// leave layer 2. Nothing decides on it: a contest is a contest whichever way
+/// the runtime came to name a second conversation, and a phase that models
+/// in-runtime switching is the one that gets to act on this (ADR 0004 D8).
+///
+/// What it buys today is a person being able to find out *why* continuing a
+/// Session stopped being possible. `Replaced` is the common one: clearing or
+/// compacting a conversation starts a new one in the same runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionOrigin {
+    Startup,
+    Resumed,
+    Forked,
+    /// The runtime deliberately moved to a new conversation — cleared,
+    /// compacted, or however else a provider spells starting over in place.
+    Replaced,
+    /// A spelling this build has no word for. Named rather than guessed.
+    Unrecognized,
+}
+
+impl SessionOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::Resumed => "resumed",
+            Self::Forked => "forked",
+            Self::Replaced => "replaced",
+            Self::Unrecognized => "unrecognized",
+        }
+    }
+}
+
 /// What one provider hook event says, once the provider adapter has read it.
 ///
 /// Both parts are optional and they are separate questions. An event may name
@@ -119,6 +157,9 @@ pub struct ProviderReport {
     /// The provider session id the payload names.
     pub identity: Option<ExternalId>,
     pub fact: Option<AgentFactKind>,
+    /// How the session started, when the event is a start and says so.
+    /// Diagnostics; see `SessionOrigin`.
+    pub origin: Option<SessionOrigin>,
 }
 
 /// Why a hook payload produced no report.
@@ -137,6 +178,19 @@ pub enum Uninterpretable {
 pub fn program(provider: KnownProvider) -> &'static str {
     match provider {
         KnownProvider::Claude => claude::PROGRAM,
+    }
+}
+
+/// Refuse provider arguments that would compete with Corral's own injection.
+///
+/// Asked before anything is minted or written, because the answer is about the
+/// request rather than about anything Corral has built yet.
+pub fn refuse_arguments(
+    provider: KnownProvider,
+    args: &[String],
+) -> Result<(), claude::ArgumentRefused> {
+    match provider {
+        KnownProvider::Claude => claude::refuse_arguments(args),
     }
 }
 

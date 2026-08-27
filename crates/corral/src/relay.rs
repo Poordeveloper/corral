@@ -24,7 +24,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use corral_protocol::hook::{HOOK_DELIVER, HookDelivery, MAX_HOOK_PAYLOAD_BYTES};
-use corral_protocol::{Frame, RequestId, encode_frame};
+use corral_protocol::{Frame, MAX_FRAME_BYTES, RequestId, encode_frame};
 use corral_rendezvous::RendezvousPaths;
 
 /// The maximum synchronous interference one hook relay invocation may cost the
@@ -59,10 +59,7 @@ pub fn deliver(token: &str, provider: &str, started: Instant) -> ExitCode {
     ) else {
         return fail_open;
     };
-    let Ok(params) = serde_json::to_value(&delivery) else {
-        return fail_open;
-    };
-    let Ok(frame) = encode_frame(&Frame::request(RequestId(0), HOOK_DELIVER, Some(params))) else {
+    let Some(frame) = framed(&delivery).or_else(|| framed(&delivery.without_payload())) else {
         return fail_open;
     };
 
@@ -80,6 +77,18 @@ pub fn deliver(token: &str, provider: &str, started: Instant) -> ExitCode {
 
     let _ = send_and_settle(stream, &frame, started);
     fail_open
+}
+
+/// One delivery as a frame this channel can carry, or nothing.
+///
+/// `None` when the encoded message is past the framing limit, which is the
+/// caller's cue to try the same delivery with its payload marked instead of
+/// carried: the endpoint would refuse an oversized frame as a framing fault
+/// and the event would vanish with no record of why.
+fn framed(delivery: &HookDelivery) -> Option<Vec<u8>> {
+    let params = serde_json::to_value(delivery).ok()?;
+    let frame = encode_frame(&Frame::request(RequestId(0), HOOK_DELIVER, Some(params))).ok()?;
+    (frame.len() <= MAX_FRAME_BYTES).then_some(frame)
 }
 
 /// Write the message and wait for the one receipt the protocol requires.
@@ -115,8 +124,14 @@ fn send_and_settle(mut stream: UnixStream, frame: &[u8], started: Instant) -> st
 /// than joined: this process is about to exit, and waiting for it would
 /// reintroduce the wait that was just avoided.
 ///
-/// One byte past the cap is read on purpose, so that oversize is *observed*
-/// rather than inferred from a payload that happens to end at the limit.
+/// One byte past the cap is kept on purpose, so that oversize is *observed*
+/// rather than inferred from a payload that happens to end at the limit. The
+/// rest is read and discarded rather than left unread: a relay that stops
+/// reading while the provider is still writing hands it a broken pipe, which
+/// is a way a shim that never writes and always exits 0 could still perturb
+/// the agent. Discarding is bounded by the budget like everything else — a
+/// write that cannot finish inside the interference ceiling is the one case
+/// where returning control wins over reading politely (ADR 0004 D4).
 fn read_payload(budget: Duration) -> Option<Vec<u8>> {
     if budget.is_zero() {
         return None;
@@ -124,10 +139,13 @@ fn read_payload(budget: Duration) -> Option<Vec<u8>> {
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let mut payload = Vec::new();
-        let read = std::io::stdin()
-            .lock()
+        let mut stdin = std::io::stdin().lock();
+        let read = (&mut stdin)
             .take(MAX_HOOK_PAYLOAD_BYTES as u64 + 1)
             .read_to_end(&mut payload);
+        if read.is_ok() && payload.len() > MAX_HOOK_PAYLOAD_BYTES {
+            let _ = std::io::copy(&mut stdin, &mut std::io::sink());
+        }
         let _ = sender.send(read.map(|_| payload));
     });
     receiver.recv_timeout(budget).ok()?.ok()

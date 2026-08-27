@@ -108,6 +108,19 @@ impl LaunchTokens {
         self.minted.remove(&token);
     }
 
+    /// Forget the launch of a Run that is over.
+    ///
+    /// A token outlives its Run only as a way to be wrong. Evidence arriving
+    /// afterwards is late evidence about a dead Run, which may claim nothing
+    /// (ADR 0004 D5) — and once a continuation has replaced the Session's
+    /// runtime, a token from the Run before it would let a provider process
+    /// that outlived its episode contest the identity of the one that
+    /// replaced it. It also bounds the map: without this, a daemon that runs
+    /// for weeks holds one entry per launch it ever made.
+    pub fn forget_run(&mut self, run: RunId) {
+        self.minted.retain(|_, scope| scope.run != run);
+    }
+
     pub fn outstanding(&self) -> usize {
         self.minted.len()
     }

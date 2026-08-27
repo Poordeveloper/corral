@@ -645,6 +645,12 @@ fn read_session_new(request: &Request) -> Result<NewSession, ProtocolError> {
         (Some(name), None) => {
             let provider =
                 KnownProvider::from_name(name).ok_or_else(|| invalid(unknown_provider(name)))?;
+            // Before anything is minted or written: an argument that would
+            // compete with Corral's own injection is refused rather than
+            // dropped, because either silence would be a lie — one about the
+            // person's configuration, the other about what Corral is watching.
+            provider::refuse_arguments(provider, &params.args)
+                .map_err(|refused| invalid(refused.to_string()))?;
             LaunchPlan::Provider {
                 provider,
                 args: params.args.clone(),
@@ -684,15 +690,19 @@ fn read_session_new(request: &Request) -> Result<NewSession, ProtocolError> {
     })
 }
 
-/// Name the fix rather than guess what was meant.
+/// Name what Corral does know rather than guess what was meant.
+///
+/// Surface-neutral on purpose. Every client renders this string as it stands,
+/// and each one's way of asking for a plain command is its own — so the
+/// sentence names the agents and stops, and the surface that knows its own
+/// syntax adds it (`PRODUCT.md` §8; grill Q6).
 fn unknown_provider(name: &str) -> String {
     let known: Vec<&str> = KnownProvider::ALL
         .iter()
         .map(|provider| provider.as_str())
         .collect();
     format!(
-        "{name} is not a provider this daemon integrates ({}). For a raw command, \
-         send it as argv instead.",
+        "Corral does not know how to start {name}. It knows: {}.",
         known.join(", "),
     )
 }
@@ -798,6 +808,7 @@ async fn execute_session_new(
                 session,
                 run,
                 provider,
+                SessionOrigin::Minted,
                 &working_directory,
                 |settings| provider::launch_argv(provider, settings, &args),
             ) {
@@ -1072,6 +1083,18 @@ async fn execute_session_resume(
 ) -> Result<Concluded, corral_state::StateError> {
     let ResumeSession { command, session } = resume;
 
+    // Before the receipt is consulted, and held past the commit. Two different
+    // command ids continuing one Session would otherwise both find nothing
+    // running and both spawn, putting two provider processes on one
+    // conversation — which the version matrix records a provider will happily
+    // allow (grill Q7).
+    let Some(_continuing) = state.claim_continuation(session) else {
+        return Ok(Concluded::Refused {
+            code: ErrorCode::Busy,
+            message: "Corral is already continuing this session".to_owned(),
+        });
+    };
+
     match state.completed_managed_session(command.clone()).await {
         Ok(Some(already)) => {
             return Ok(Concluded::Accepted {
@@ -1100,6 +1123,7 @@ async fn execute_session_resume(
         session,
         run,
         plan.provider,
+        SessionOrigin::Existing,
         &plan.working_directory,
         |settings| provider::resume_argv(plan.provider, &plan.external_id, settings),
     ) {
@@ -1232,6 +1256,7 @@ fn compose_provider_launch(
     session: CorralSessionId,
     run: RunId,
     provider: KnownProvider,
+    minted: SessionOrigin,
     working_directory: &std::path::Path,
     argv: impl FnOnce(&std::path::Path) -> Vec<std::ffi::OsString>,
 ) -> Result<(LaunchRequest, Option<Injected>), String> {
@@ -1241,25 +1266,23 @@ fn compose_provider_launch(
         provider,
     };
     let token = state
-        .with_runtime(|runtime| {
-            let token = runtime.launch_tokens.mint(scope);
-            if token.is_ok() {
-                // Recorded with the token, so a row says which agent it runs
-                // from the first list that includes it rather than only once a
-                // hook has arrived.
-                runtime.reported.launched(session, provider);
-            }
-            token
-        })
-        .ok_or_else(|| "the runtime could not be consulted".to_owned())?
+        .mint_launch_token(scope)
         .map_err(|_| InjectionFailed::NoRandomness.to_string())?;
+    // Recorded with the token, so a row says which agent it runs from the
+    // first list that includes it rather than only once a hook has arrived.
+    state.with_runtime(|runtime| runtime.reported.launched(session, provider));
     // Nothing below leaves a half-made launch behind: a token that named a
     // process nobody started would keep resolving for the daemon's whole life.
-    let forget = |state: &Arc<DaemonState>| {
-        state.with_runtime(|runtime| {
-            runtime.launch_tokens.forget(token);
-            runtime.reported.forget(session);
-        });
+    //
+    // The Session is dropped only when this launch is what brought it into
+    // being. A continuation names a Session that already exists and already
+    // has evidence — its provider, its identity, the last fact it reported —
+    // and forgetting that would blank a live row over a launch that failed.
+    let forget = move |state: &Arc<DaemonState>| {
+        state.forget_launch_token(token);
+        if minted == SessionOrigin::Minted {
+            state.with_runtime(|runtime| runtime.reported.forget(session));
+        }
     };
 
     let settings = match provider::launch::relay_command(provider, token)
@@ -1277,7 +1300,14 @@ fn compose_provider_launch(
         argv(settings.path()),
         working_directory,
     ) {
-        Ok(launch) => Ok((launch, Some(Injected { token, session }))),
+        Ok(launch) => Ok((
+            launch,
+            Some(Injected {
+                token,
+                session,
+                minted,
+            }),
+        )),
         Err(refusal) => {
             InjectedSettings::remove_for(state.launch_dir(), run);
             forget(state);
@@ -1286,10 +1316,25 @@ fn compose_provider_launch(
     }
 }
 
+/// Whether a launch is what brought its Session into being.
+///
+/// The two paths differ in exactly one consequence — what may be undone when
+/// the launch fails — and a boolean at the call site would not have said which
+/// way round it read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionOrigin {
+    /// `session.new`: the Session id was minted for this launch and names
+    /// nothing yet.
+    Minted,
+    /// `session.resume`: the Session already exists and already has evidence.
+    Existing,
+}
+
 /// What a launch that may still be abandoned left behind.
 struct Injected {
     token: LaunchToken,
     session: CorralSessionId,
+    minted: SessionOrigin,
 }
 
 /// Undo a launch that never became one.
@@ -1302,10 +1347,10 @@ fn abandon_injection(state: &Arc<DaemonState>, injected: Option<Injected>, run: 
         return;
     };
     InjectedSettings::remove_for(state.launch_dir(), run);
-    state.with_runtime(|runtime| {
-        runtime.launch_tokens.forget(injected.token);
-        runtime.reported.forget(injected.session);
-    });
+    state.forget_launch_token(injected.token);
+    if injected.minted == SessionOrigin::Minted {
+        state.with_runtime(|runtime| runtime.reported.forget(injected.session));
+    }
 }
 
 /// End a runtime whose Run never became a durable fact.

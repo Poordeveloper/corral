@@ -100,11 +100,23 @@ impl ReportedSessions {
     }
 
     /// Record the latest fact an agent reported about itself.
+    ///
+    /// The latest by observation, not by arrival. Each hook is delivered by its
+    /// own process over its own connection, and the endpoint stamps each on
+    /// arrival — so two events fired back to back can be accepted in either
+    /// order under ordinary scheduling. Replacing unconditionally would let a
+    /// row go backwards, and `latest` would stop meaning what it says.
     pub fn reported(&mut self, session: CorralSessionId, provider: KnownProvider, fact: AgentFact) {
-        self.sessions
+        let held = self
+            .sessions
             .entry(session)
-            .or_insert_with(|| ReportedSession::new(provider))
-            .latest = Some(fact);
+            .or_insert_with(|| ReportedSession::new(provider));
+        let supersedes = held
+            .latest
+            .is_none_or(|latest| latest.observed_at <= fact.observed_at);
+        if supersedes {
+            held.latest = Some(fact);
+        }
     }
 
     pub fn get(&self, session: CorralSessionId) -> Option<&ReportedSession> {

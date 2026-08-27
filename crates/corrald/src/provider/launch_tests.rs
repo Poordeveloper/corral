@@ -263,3 +263,52 @@ fn a_relay_path_survives_the_shell_it_is_handed_to() {
     );
     assert_eq!(shell_word("/opt/it's/corral"), r"'/opt/it'\''s/corral'");
 }
+
+/// A token outlives its Run only as a way to be wrong. Once the Run is over,
+/// evidence arriving under its token is late evidence about a dead Run — and
+/// after a continuation has replaced the Session's runtime, that token would
+/// let a process which outlived its episode contest the identity of the one
+/// that replaced it (ADR 0004 D5).
+#[test]
+fn a_token_is_retired_with_the_run_it_names() {
+    let mut tokens = LaunchTokens::new();
+    let session = CorralSessionId::mint();
+    let first = LaunchScope {
+        session,
+        run: RunId::mint(),
+        provider: KnownProvider::Claude,
+    };
+    let second = LaunchScope {
+        session,
+        run: RunId::mint(),
+        provider: KnownProvider::Claude,
+    };
+    let ended = tokens.mint(first).expect("a token");
+    let live = tokens.mint(second).expect("a token");
+
+    tokens.forget_run(first.run);
+
+    assert_eq!(
+        tokens.resolve(&ended),
+        None,
+        "the ended run's token is retired"
+    );
+    assert_eq!(
+        tokens.resolve(&live),
+        Some(second),
+        "the run that replaced it keeps its own",
+    );
+    assert_eq!(tokens.outstanding(), 1, "the map does not grow forever");
+}
+
+/// A Run nothing minted a token for is not an error to retire.
+#[test]
+fn retiring_a_run_with_no_token_is_quiet() {
+    let mut tokens = LaunchTokens::new();
+    let scope = scope();
+    tokens.mint(scope).expect("a token");
+
+    tokens.forget_run(RunId::mint());
+
+    assert_eq!(tokens.outstanding(), 1);
+}

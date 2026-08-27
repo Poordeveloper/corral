@@ -166,3 +166,26 @@ fn the_unverifiable_refusal_states_the_ruling_verbatim() {
          provider session automatically",
     );
 }
+
+/// The same law, applied to the refusal a person meets first.
+///
+/// Every client renders this string as it stands — including the session list,
+/// which cannot append its own hint the way the command line does — so the
+/// daemon's sentence may name neither Corral's machinery nor any one surface's
+/// syntax (`PRODUCT.md` §8).
+#[test]
+fn the_unknown_agent_refusal_exposes_no_machinery_and_no_surface() {
+    let said = unknown_provider("bash").to_lowercase();
+
+    for jargon in ["daemon", "argv", "provider", "binding", "token", "runtime"] {
+        assert!(!said.contains(jargon), "{said:?} exposes {jargon}");
+    }
+    assert!(
+        said.contains("bash"),
+        "{said:?} does not name what was asked for"
+    );
+    assert!(
+        said.contains(crate::provider::KnownProvider::Claude.as_str()),
+        "{said:?} does not name what Corral does know",
+    );
+}

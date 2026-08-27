@@ -22,6 +22,28 @@ fn offering_to_a_closed_queue_is_quiet() {
     let (deliveries, receiver) = queue();
     drop(receiver);
     deliveries.offer(delivered());
+    deliveries.run_ended(corral_core::RunId::mint());
+}
+
+/// A Run's ending rides the same queue as that Run's events, so it lands
+/// behind them. Retiring the token from another thread would race the events
+/// already waiting — a session's last `SessionEnd` is delivered milliseconds
+/// before its process exits — and would lose the tail of every session.
+#[tokio::test]
+async fn a_run_ending_arrives_behind_the_events_that_run_delivered() {
+    let (deliveries, mut incoming) = queue();
+    let run = corral_core::RunId::mint();
+
+    deliveries.offer(delivered());
+    deliveries.run_ended(run);
+    deliveries.offer(delivered());
+
+    assert!(matches!(incoming.recv().await, Some(Ingest::Delivered(_))));
+    assert!(matches!(
+        incoming.recv().await,
+        Some(Ingest::RunEnded(named)) if named == run
+    ));
+    assert!(matches!(incoming.recv().await, Some(Ingest::Delivered(_))));
 }
 
 fn delivered() -> Delivered {

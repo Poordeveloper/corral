@@ -139,21 +139,68 @@ fn tool_use_hooks_are_not_injected() {
     assert!(!document.contains("PostToolUse"), "{document}");
 }
 
-/// The injection has to survive a caller repeating the flag. The last
-/// `--settings` a provider sees is the one it uses, so Corral's has to be
-/// first — otherwise a session launches unattested while looking launched.
+/// The injection has to survive a caller repeating the flag. Verified
+/// first-party: the **last** `--settings` is the one Claude Code loads (matrix
+/// scenario 8), so Corral's has to come after everything the caller passed —
+/// otherwise a session launches unattested while looking launched.
 #[test]
-fn caller_arguments_cannot_displace_the_injected_settings() {
+fn the_injected_settings_are_the_last_word_in_the_argv() {
     let argv = launch_argv(
         std::path::Path::new("/state/launch/corral-launch-x.json"),
-        &["--settings".to_owned(), "/tmp/theirs.json".to_owned()],
+        &["--model".to_owned(), "opus".to_owned()],
     );
-    assert_eq!(argv[0], std::ffi::OsString::from("--settings"));
+    let argv: Vec<String> = argv
+        .iter()
+        .map(|word| word.to_string_lossy().into_owned())
+        .collect();
+
     assert_eq!(
-        argv[1],
-        std::ffi::OsString::from("/state/launch/corral-launch-x.json"),
+        argv,
+        vec![
+            "--model",
+            "opus",
+            "--settings",
+            "/state/launch/corral-launch-x.json",
+        ],
     );
-    assert_eq!(argv.len(), 4);
+}
+
+/// Position holds against any spelling; this is what turns the one spelling
+/// Corral can recognise into an error a person can act on, rather than a
+/// settings file of theirs quietly not loading.
+#[test]
+fn a_caller_supplied_settings_flag_is_refused_rather_than_dropped() {
+    for spelling in [
+        vec!["--settings".to_owned(), "/tmp/theirs.json".to_owned()],
+        vec!["--settings=/tmp/theirs.json".to_owned()],
+        vec![
+            "--model".to_owned(),
+            "opus".to_owned(),
+            "--settings".to_owned(),
+        ],
+        // The flag also takes a JSON string rather than a path, and the
+        // refusal is about the flag either way.
+        vec!["--settings".to_owned(), "{\"hooks\":{}}".to_owned()],
+    ] {
+        let refusal = refuse_arguments(&spelling).expect_err("refused");
+        assert!(refusal.argument.starts_with("--settings"), "{refusal:?}");
+        // What a person reads names what they typed and why it is Corral's.
+        let said = refusal.to_string();
+        assert!(said.contains("--settings"), "{said}");
+    }
+}
+
+/// Everything else a person may want to pass to their own agent is theirs.
+#[test]
+fn ordinary_provider_arguments_pass_through() {
+    for allowed in [
+        vec![],
+        vec!["--model".to_owned(), "opus".to_owned()],
+        vec!["--setting-sources".to_owned(), "user".to_owned()],
+        vec!["--add-dir".to_owned(), "/work".to_owned()],
+    ] {
+        assert_eq!(refuse_arguments(&allowed), Ok(()), "{allowed:?}");
+    }
 }
 
 #[test]

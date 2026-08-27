@@ -135,6 +135,50 @@ opens a searchable picker of the project's conversations, and selecting one
 switches the running process to that conversation's identity, as scenario 5
 records.
 
+### 8. Repeated `--settings`: the **last** one wins — **pass, and it changed the code**
+
+Expected: unknown. The implementation had assumed the opposite.
+
+Command: `claude -p "…" --settings <A> --settings <B>`, where A and B declare
+hooks writing to different logs.
+
+Observed: log B received both hooks; log A stayed empty. The last `--settings`
+is the one loaded, and the earlier one is ignored entirely.
+
+Consequence: Corral's injected file goes **after** anything a caller passes, or
+a caller's own `--settings` would displace it and the session would launch
+looking managed and reporting nothing. A caller-supplied `--settings` is also
+refused outright, so a person is told rather than having their file silently
+ignored. There is no short alias for the flag on 2.1.247.
+
+### 9. `/clear` starts a new conversation in the same runtime — **pass, and it is a known cost**
+
+Expected: unknown; scenario 5 raised the question for the picker, and `/clear`
+is the same shape by another route.
+
+Observed, in one interactive process under one injected settings file:
+
+```text
+SessionStart   8593a016…  source: startup
+UserPromptSubmit / Stop / SessionEnd   8593a016…
+SessionStart   cbb54bac…  source: clear
+```
+
+`SessionStart.source` distinguishes it: `clear` rather than `resume`.
+
+Consequence, stated plainly because it is a real cost a person can hit: under
+the accepted design, `/clear` in a Corral-managed session contests that
+Session's provider binding, and contested is monotonic with no way to clear it
+in M1 (ADR 0004 D8). Continuing that Session is refused from then on.
+
+That is fail-closed rather than wrong — after a `/clear` the conversation
+Corral recorded is not the one the runtime is on, and continuing the recorded
+one would silently resume what the person just cleared away. But it makes a
+routine action permanently costly, and it is the strongest argument yet for the
+correction / re-identification mechanism ADR 0004 D8 already names as future
+work. Corral records the normalized origin (`replaced`) in its diagnostics so
+the cause is findable; nothing decides on it.
+
 ## Relay interference, measured
 
 Not a provider behaviour, but the number ADR 0004 D4 asks for evidence on. One
@@ -162,6 +206,11 @@ the flake law owns that trade (`AGENTS.md` §Tests).
 - Scenario 6 was run once, in one direction (headless resuming an interactive
   session). Whether the reverse, or two interactive sessions, behaves the same
   was not driven; the refusal does not depend on the answer.
+- Scenario 9 drove `/clear`. `/compact` was not driven; it is treated as the
+  same normalized origin on the documented `source` value alone, and nothing
+  decides on that value.
+- Scenario 8 exercised two `--settings`. Three or more, and the interaction
+  with `--setting-sources`, were not driven.
 - Every scenario used a project-local scratch directory. Behaviour with a
   project that has its own `.claude/settings.json` declaring the same hooks was
   not driven — ADR 0004 D6's additive claim rests on the flag's documented

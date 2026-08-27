@@ -147,6 +147,25 @@ fn an_unusable_payload_is_still_silent_success() {
     failed_open(&output, elapsed, "empty payload");
 }
 
+/// A departed daemon leaves no endpoint behind.
+///
+/// The pathname is the daemon's to create and to remove, and a shutdown that
+/// left it would mean anything reading the path sees a daemon that is gone as
+/// one that is present.
+#[test]
+fn a_departing_daemon_takes_its_hook_endpoint_with_it() {
+    let account = TestAccount::new("relay-endpoint-gone");
+    let hook = account.corral_root().join("run/hook.sock");
+    let daemon = account.start_daemon();
+    support::wait_until(Duration::from_secs(10), || hook.exists());
+
+    daemon.signal(rustix::process::Signal::TERM);
+    let (_status, _log) = daemon.wait();
+    support::wait_until(Duration::from_secs(10), || !lock_is_held(&account.lock()));
+
+    assert!(!hook.exists(), "the hook endpoint outlived its daemon");
+}
+
 /// Delivery that works, end to end, over the daemon's real endpoint: the relay
 /// still says nothing and still exits 0, because the outcome is not a shim's
 /// business either way.

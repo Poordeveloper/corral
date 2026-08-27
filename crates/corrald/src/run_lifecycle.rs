@@ -18,6 +18,7 @@ use corral_core::RunEnd;
 use corral_state::{Durability, Refusal, StateError, Store};
 use tracing::{error, warn};
 
+use crate::hook_evidence::Deliveries;
 use crate::provider::InjectedSettings;
 use crate::runtime::{ObservedRuns, RunOccurrence, Weight};
 
@@ -55,24 +56,36 @@ pub const LONGEST_RECORD: Duration =
 
 /// Record every run occurrence this daemon observes, on a thread of its own.
 ///
-/// It also destroys the per-launch provider configuration of a Run whose exit
-/// it just established. That belongs here rather than beside the endpoint
-/// because this is the one place that learns an exit *and* what kind of end it
-/// was: the file is removed on an established exit and retained on an
-/// unverifiable one, and no other party has both facts (ADR 0004 D6).
-pub fn record_observed_runs(store: Arc<Mutex<Store>>, observed: ObservedRuns, launch_dir: PathBuf) {
+/// It also retires what a Run leaves behind: its launch token, and — when the
+/// exit is established — its per-launch provider configuration. Both belong
+/// here rather than beside the endpoint because this is the one place that
+/// learns an ending *and* what kind of ending it was, and the two artifacts
+/// have deliberately different rules (ADR 0004 D5, D6).
+pub fn record_observed_runs(
+    store: Arc<Mutex<Store>>,
+    observed: ObservedRuns,
+    launch_dir: PathBuf,
+    deliveries: Deliveries,
+) {
     std::thread::spawn(move || {
         // Ends when the last runtime that could report is gone, which for this
         // daemon means the process is ending.
         while let Some(observation) = observed.next() {
             let occurrence = observation.occurrence();
-            if let RunOccurrence::Exited {
-                run,
-                end: RunEnd::Exited(_),
-                ..
-            } = occurrence
-            {
-                InjectedSettings::remove_for(&launch_dir, run);
+            if let RunOccurrence::Exited { run, end, .. } = occurrence {
+                // The token goes on any ending, established or not: whatever
+                // this Run is now, it is not one whose hooks may still speak
+                // for the Session (ADR 0004 D5). Announced rather than done
+                // here, so it lands behind the events that Run already
+                // delivered instead of racing them.
+                //
+                // The file goes only on an established exit — destroying it
+                // needs ownership evidence as strong as the destruction, and an
+                // unverifiable end is not that (grill Q10).
+                deliveries.run_ended(run);
+                if matches!(end, RunEnd::Exited(_)) {
+                    InjectedSettings::remove_for(&launch_dir, run);
+                }
             }
             // Only a fact the daemon must be able to account for ends the
             // accounting. An attachment the store would not take costs a line

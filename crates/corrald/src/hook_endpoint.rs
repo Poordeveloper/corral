@@ -69,6 +69,10 @@ pub async fn serve(
         }
     }
 
+    // Reached only when the loop leaves on its own. A shutdown that drops the
+    // runtime cancels this task wherever it was parked, so the departing
+    // daemon unlinks both pathnames itself; this is what makes the ordinary
+    // exit tidy rather than what makes it correct.
     drop(listener);
     let _ = std::fs::remove_file(socket);
     Ok(())

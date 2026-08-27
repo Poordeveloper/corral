@@ -17,7 +17,7 @@ use std::path::Path;
 use corral_core::ExternalId;
 use serde_json::{Value, json};
 
-use super::{AgentFactKind, ProviderReport, Uninterpretable};
+use super::{AgentFactKind, ProviderReport, SessionOrigin, Uninterpretable};
 
 /// How Corral names this provider, on the wire and in bindings.
 ///
@@ -59,17 +59,49 @@ const INJECTED: [(&str, AgentFactKind); 5] = [
 
 /// The argv of a fresh managed Claude session.
 ///
-/// The injected settings file comes first, before anything the caller passed,
-/// so a caller cannot displace it by repeating the flag — the last `--settings`
-/// would otherwise win and the session would launch unattested while looking
-/// launched.
+/// The injected settings file goes **last**, after everything the caller
+/// passed. Verified first-party: given two `--settings`, Claude Code loads the
+/// last one and ignores the first (matrix scenario 8). A caller's flag placed
+/// after Corral's would therefore launch a session that looks managed and can
+/// never report — attested in the row and silent in fact.
+///
+/// Position is the mechanism that holds for any spelling; `refuse_arguments`
+/// is what turns the one spelling Corral can recognise into an error a person
+/// can act on rather than a file of theirs quietly not loading.
 pub fn launch_argv(settings: &Path, args: &[String]) -> Vec<OsString> {
-    let mut argv = vec![
-        OsString::from(SETTINGS_FLAG),
-        OsString::from(settings.as_os_str()),
-    ];
-    argv.extend(args.iter().map(OsString::from));
+    let mut argv: Vec<OsString> = args.iter().map(OsString::from).collect();
+    argv.push(OsString::from(SETTINGS_FLAG));
+    argv.push(OsString::from(settings.as_os_str()));
     argv
+}
+
+/// Why a caller's provider arguments cannot be passed through.
+///
+/// One reason, because there is one: an argument that would compete with the
+/// hook injection. Everything else a person may want to pass is theirs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArgumentRefused {
+    pub argument: String,
+}
+
+/// Refuse provider arguments Corral cannot honour.
+///
+/// A caller may pass anything to their own agent except the one flag Corral
+/// needs for itself. Refused rather than dropped: silently discarding a
+/// settings file a person asked for would be Corral deciding their
+/// configuration, and silently honouring it would be a session Corral believes
+/// it is watching and is not.
+pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
+    let equals = format!("{SETTINGS_FLAG}=");
+    match args
+        .iter()
+        .find(|argument| *argument == SETTINGS_FLAG || argument.starts_with(&equals))
+    {
+        Some(argument) => Err(ArgumentRefused {
+            argument: argument.clone(),
+        }),
+        None => Ok(()),
+    }
 }
 
 /// The argv that continues the provider's own session as a new Run.
@@ -141,8 +173,40 @@ pub fn interpret(payload: &str) -> Result<ProviderReport, Uninterpretable> {
     Ok(ProviderReport {
         identity,
         fact: Some(fact),
+        origin: document
+            .get("source")
+            .and_then(Value::as_str)
+            .map(session_origin),
     })
 }
+
+/// Claude Code's `SessionStart.source`, normalized.
+///
+/// Verified first-party: `startup` on a fresh launch, `resume` on `--resume`,
+/// `--continue`, and the in-session picker, and `clear` when a person clears
+/// the conversation in place (matrix scenarios 2, 5, 9). `fork` is documented
+/// and not exercised here; `compact` is the other in-place replacement.
+fn session_origin(source: &str) -> SessionOrigin {
+    match source {
+        "startup" => SessionOrigin::Startup,
+        "resume" => SessionOrigin::Resumed,
+        "fork" => SessionOrigin::Forked,
+        "clear" | "compact" => SessionOrigin::Replaced,
+        _ => SessionOrigin::Unrecognized,
+    }
+}
+
+impl std::fmt::Display for ArgumentRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} is Corral's to pass: it is how Corral watches the session it starts for you",
+            self.argument,
+        )
+    }
+}
+
+impl std::error::Error for ArgumentRefused {}
 
 #[cfg(test)]
 #[path = "claude_tests.rs"]

@@ -35,6 +35,29 @@ pub const MAX_HOOK_PAYLOAD_BYTES: usize = 256 * 1024;
 /// Why a delivery carries no payload. The only reason this version defines.
 pub const PAYLOAD_OMITTED_OVERSIZE: &str = "oversize";
 
+/// The same delivery with its payload dropped and marked.
+///
+/// The cap above bounds the payload; this bounds the *message*, which is what
+/// the channel actually has to carry. JSON escaping expands a control
+/// character six-fold, so a payload comfortably under the cap — pasted
+/// terminal output, say — can encode past the framing limit. Dropping it there
+/// would lose the event with no record; marking it keeps the rule that a
+/// systematic oversize is visible rather than silently missing
+/// (ADR 0004 D3).
+impl HookDelivery {
+    #[must_use]
+    pub fn without_payload(&self) -> Self {
+        Self {
+            hook_protocol_version: self.hook_protocol_version,
+            launch_token: self.launch_token.clone(),
+            provider: self.provider.clone(),
+            shim_version: self.shim_version.clone(),
+            payload: None,
+            payload_omitted: Some(PAYLOAD_OMITTED_OVERSIZE.to_owned()),
+        }
+    }
+}
+
 /// One hook event, as the provider produced it.
 ///
 /// The payload travels as the provider wrote it, because the relay is
@@ -100,9 +123,9 @@ impl HookDelivery {
     /// The cap is applied here rather than at the endpoint so the decision is
     /// made once, by the only party that ever holds the whole payload.
     ///
-    /// `None` for a payload this channel cannot carry at all. It is the
-    /// relay's cue to fail open now: there is nothing to deliver and nothing
-    /// truthful to say about it.
+    /// `None` only for a payload that is under the cap and is not text. It is
+    /// the relay's cue to fail open now: there is nothing to deliver and
+    /// nothing truthful to say about it.
     #[must_use]
     pub fn new(
         launch_token: String,
@@ -110,11 +133,16 @@ impl HookDelivery {
         shim_version: String,
         payload: &[u8],
     ) -> Option<Self> {
-        let text = std::str::from_utf8(payload).ok()?;
-        let (payload, payload_omitted) = if text.len() <= MAX_HOOK_PAYLOAD_BYTES {
-            (Some(text.to_owned()), None)
-        } else {
+        // Length first, validity second, and the order is the point. A payload
+        // read up to the cap ends wherever the cap falls, which for anything
+        // but ASCII is usually mid-character — so asking "is this text?" first
+        // would turn every oversize payload with a non-ASCII byte near the
+        // boundary into a silent drop, exactly where a systematic oversize is
+        // supposed to become visible (ADR 0004 D3).
+        let (payload, payload_omitted) = if payload.len() > MAX_HOOK_PAYLOAD_BYTES {
             (None, Some(PAYLOAD_OMITTED_OVERSIZE.to_owned()))
+        } else {
+            (Some(std::str::from_utf8(payload).ok()?.to_owned()), None)
         };
         Some(Self {
             hook_protocol_version: HOOK_PROTOCOL_VERSION,

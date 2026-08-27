@@ -189,6 +189,37 @@ fn the_same_identity_reported_twice_stays_one_binding() {
     drop(daemon);
 }
 
+/// The last thing a session says still counts.
+///
+/// A provider fires its closing hook and then exits, so the delivery and the
+/// Run's ending are milliseconds apart. Retiring the launch token off the
+/// ingestion path would race that delivery and lose the tail of every session
+/// — which is why the ending rides the same queue as the events it follows.
+#[test]
+fn the_event_a_session_ends_on_still_lands() {
+    let account = account("closing-event");
+    let script = Script::new(&account, "closing-event")
+        .fires(&session_start(FIRST, "startup"))
+        .fires(&session_end(FIRST));
+    let daemon = daemon_running(&account, &script);
+    let session = new_claude(&account);
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    // Its Run is over by now, which is the point: the fact arrived before the
+    // ending and must survive it.
+    wait_until(SETTLE, || {
+        listed(&sessions(&mut client, 1), &session)
+            .is_some_and(|listed| listed["execution_state"] == "exited")
+    });
+    wait_until(provider::DELIVERED, || {
+        listed(&sessions(&mut client, 2), &session).and_then(agent_event_kind)
+            == Some("session_ended")
+    });
+
+    drop(daemon);
+}
+
 /// A launch token names one launch, and an event carrying one this daemon
 /// never minted is dropped with diagnostics — never correlated by cwd or time
 /// (ADR 0004 D5).
@@ -717,13 +748,14 @@ fn the_command_line_keeps_the_provider_and_command_namespaces_apart() {
     let stderr = support::stderr(&refused);
     assert!(!refused.status.success(), "{stderr}");
     assert!(
-        stderr.contains("is not a provider this daemon integrates"),
+        stderr.contains("Corral does not know how to start bash"),
         "{stderr}",
     );
     assert!(
-        stderr.contains("For a raw command, use: corral new -- bash"),
+        stderr.contains("For a plain command, use: corral new -- bash"),
         "{stderr}",
     );
+
     assert!(script.launches().is_empty(), "{:?}", script.launches());
 
     // The raw form still means exactly what it always meant.
@@ -780,6 +812,161 @@ fn the_command_line_continues_a_session_by_the_start_of_its_id() {
         script.launches()[1].starts_with(&format!("--resume {FIRST} ")),
         "{:?}",
         script.launches(),
+    );
+
+    drop(daemon);
+}
+
+/// The injection is Corral's to make, and a caller's own `--settings` would
+/// take its place: verified first-party, the last one wins (matrix scenario
+/// 8). Refused rather than silently dropped or silently honoured — the first
+/// would decide a person's configuration for them, the second would leave a
+/// session Corral believes it is watching and is not.
+#[test]
+fn a_caller_cannot_pass_the_flag_corral_injects_with() {
+    let account = account("caller-settings");
+    let script = Script::new(&account, "caller-settings").fires(&session_start(FIRST, "startup"));
+    let daemon = daemon_running(&account, &script);
+
+    let refused = support::run(
+        account
+            .corral()
+            .arg("new")
+            .arg("claude")
+            .arg("--")
+            .arg("--settings")
+            .arg("/tmp/theirs.json")
+            .stdin(std::process::Stdio::null()),
+    );
+
+    let stderr = support::stderr(&refused);
+    assert!(!refused.status.success(), "{stderr}");
+    assert!(stderr.contains("--settings"), "{stderr}");
+    assert!(script.launches().is_empty(), "{:?}", script.launches());
+    assert!(
+        launch_files(&account).is_empty(),
+        "a refused launch wrote a file"
+    );
+
+    drop(daemon);
+}
+
+/// Two continuations of one Session, arriving together under different command
+/// ids. The in-flight table dedupes by command id and cannot see this; without
+/// per-Session serialization both would find nothing running, both would
+/// spawn, and two provider processes would be driving one conversation — which
+/// the version matrix records a provider will happily allow (grill Q7).
+#[test]
+fn two_continuations_of_one_session_start_one_runtime() {
+    let account = account("continue-race");
+    let script = Script::new(&account, "continue-race").fires(&session_start(FIRST, "startup"));
+    let daemon = daemon_running(&account, &script);
+    let session = new_claude(&account);
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    wait_until(provider::DELIVERED, || {
+        listed(&sessions(&mut client, 1), &session).is_some_and(|listed| {
+            external_id(listed) == Some(FIRST) && listed["execution_state"] == "exited"
+        })
+    });
+
+    let socket = account.socket();
+    let racers: Vec<std::thread::JoinHandle<Value>> = (0..2)
+        .map(|which| {
+            let socket = socket.clone();
+            let session = session.clone();
+            std::thread::spawn(move || {
+                let mut client = RawClient::connect(&socket);
+                client.establish();
+                client
+                    .request(
+                        1,
+                        "session.resume",
+                        Some(json!({
+                            "command_id": format!("resume-{which}"),
+                            "session_id": session,
+                        })),
+                    )
+                    .expect("session.resume answered")
+            })
+        })
+        .collect();
+    let answers: Vec<Value> = racers
+        .into_iter()
+        .map(|racer| racer.join().expect("a racer finished"))
+        .collect();
+
+    // Exactly one continuation happened, and one runtime was started for it.
+    let accepted = answers
+        .iter()
+        .filter(|answer| answer["outcome"]["result"]["run_id"].is_string())
+        .count();
+    assert_eq!(accepted, 1, "{answers:#?}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        script.launches().len(),
+        2,
+        "one launch and one continuation: {:?}",
+        script.launches(),
+    );
+    // The loser is told to send it again rather than that its request was
+    // wrong: nothing about it was.
+    let refused = answers
+        .iter()
+        .find(|answer| answer["outcome"]["error"].is_object())
+        .expect("one was refused");
+    assert_eq!(error_code(refused), Some("busy"), "{refused}");
+
+    drop(daemon);
+}
+
+/// A continuation that fails after Corral has minted its launch must undo
+/// exactly what it made. The Session already existed and already had evidence
+/// — its provider, its identity, the last thing it reported — and blanking
+/// that would leave a Claude session rendering as though Corral never knew.
+#[test]
+fn a_failed_continuation_leaves_the_sessions_provider_facts_standing() {
+    let account = account("continue-undo");
+    let script = Script::new(&account, "continue-undo")
+        .fires(&session_start(FIRST, "startup"))
+        .fires(&provider::stop(FIRST));
+    let daemon = daemon_running(&account, &script);
+    let session = new_claude(&account);
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    wait_until(provider::DELIVERED, || {
+        listed(&sessions(&mut client, 1), &session).is_some_and(|listed| {
+            external_id(listed) == Some(FIRST)
+                && agent_event_kind(listed) == Some("turn_ended")
+                && listed["execution_state"] == "exited"
+        })
+    });
+
+    // The agent is no longer where the launch will look for it, so the
+    // continuation fails at the spawn — after its token and settings file
+    // exist.
+    std::fs::remove_file(account.scratch().join("bin/claude")).expect("remove the stand-in");
+    let refusal = client
+        .request(
+            2,
+            "session.resume",
+            Some(json!({"command_id": "resume-1", "session_id": session})),
+        )
+        .expect("session.resume answered");
+    assert!(refusal["outcome"]["error"].is_object(), "{refusal}");
+
+    let all = sessions(&mut client, 3);
+    let row = listed(&all, &session).expect("the session is still listed");
+    assert_eq!(provider_name(row), Some("claude"), "{row}");
+    assert_eq!(external_id(row), Some(FIRST), "{row}");
+    assert_eq!(agent_event_kind(row), Some("turn_ended"), "{row}");
+    // And what the failed launch did make is gone.
+    assert!(
+        launch_files(&account).is_empty(),
+        "{:?}",
+        launch_files(&account)
     );
 
     drop(daemon);
