@@ -56,27 +56,34 @@ impl Keyboard {
 
     /// Whether what is held is waiting on bytes that may never come.
     ///
-    /// Two shapes. A bare `ESC` is the ambiguity a decoder cannot settle from
-    /// bytes alone — it is both the Escape key and the first byte of every
-    /// cursor key — and a local terminal writes a cursor key in one go where
-    /// one behind ssh or tmux need not. Everything else here is a sequence or
-    /// a character that arrived in part.
+    /// A bare `ESC` is the ambiguity a decoder cannot settle from bytes alone
+    /// — it is both the Escape key and the first byte of every cursor key —
+    /// and a local terminal writes a cursor key in one go where one behind ssh
+    /// or tmux need not. An unterminated sequence is the other: bytes held
+    /// forever make the person's next key its missing final byte, which is a
+    /// `q` that does not quit and says nothing.
     ///
-    /// Both wait, and both must be given up on: bytes held forever make the
-    /// person's next key the missing final byte of a sequence they abandoned,
-    /// which is a `q` that does not quit and says nothing.
+    /// A part-arrived character is neither, and waits without a timer.
     pub fn undecided(&self) -> bool {
-        if self.held.is_empty() {
-            return false;
+        match self.held.first() {
+            None => false,
+            // A bare Escape, or a sequence with no end in sight. Both may
+            // never resolve, and a sequence held forever makes the person's
+            // next key its missing final byte.
+            Some(&ESCAPE) => self.held == [ESCAPE] || decode_one(&self.held).is_none(),
+            // A character missing some of its bytes waits without a timer:
+            // the rest are always coming, and whatever arrives next resolves
+            // it either way. Giving up on one would throw away a character
+            // somebody typed because their link was slow.
+            Some(_) => false,
         }
-        self.held == [ESCAPE] || decode_one(&self.held).is_none()
     }
 
     /// Nothing followed, so what is held is all it will ever be.
     ///
-    /// A bare Escape was the Escape key. Anything else never became one and is
-    /// dropped rather than kept — reported, because a keystroke that did
-    /// nothing should still redraw rather than look ignored.
+    /// A bare Escape was the Escape key. An abandoned sequence never became
+    /// one and is dropped rather than kept — reported, because a keystroke
+    /// that did nothing should still redraw rather than look ignored.
     pub fn settle(&mut self) -> Option<Key> {
         if !self.undecided() {
             return None;

@@ -169,6 +169,17 @@ impl LocalKeys {
         self.typed.recv().await
     }
 
+    /// Bytes handed back and not yet taken, if any.
+    ///
+    /// Asked without waiting, by a surface that wants to act on what is
+    /// already there before it asks the daemon anything.
+    pub fn pending(&mut self) -> Option<Vec<u8>> {
+        if self.unconsumed.is_empty() {
+            return None;
+        }
+        Some(std::mem::take(&mut self.unconsumed))
+    }
+
     /// Hand back bytes read but not consumed, for whoever reads next.
     pub fn put_back(&mut self, bytes: Vec<u8>) {
         if bytes.is_empty() {
@@ -187,10 +198,17 @@ pub enum OpenFailed {
     /// The daemon would not grant this session's terminal, or could not be
     /// asked for it. A fact about the connection the grant was asked on.
     Refused(RequestError),
+    /// The grant went unanswered. Also a fact about that connection — its next
+    /// read is an answer nobody is holding — but not a protocol fault: a slow
+    /// daemon is not a broken one, and saying so would accuse it of something
+    /// it did not do.
+    GrantUnanswered,
     /// The grant was made and its channel could not be opened. A second
     /// connection to the same rendezvous, so this says nothing about the one
     /// that granted it, and a caller must not treat it as if it did.
     Unopened(RequestError),
+    /// The same, for a channel that did not answer in time.
+    ChannelUnanswered,
     /// The channel itself failed while the person was attached.
     Channel(std::io::Error),
 }
@@ -347,7 +365,7 @@ pub async fn open(
     let grant =
         match tokio::time::timeout(crate::ANSWER, connection.terminal_attach(session_id)).await {
             Ok(grant) => grant.map_err(OpenFailed::Refused)?,
-            Err(_) => return Err(OpenFailed::Refused(no_answer())),
+            Err(_) => return Err(OpenFailed::GrantUnanswered),
         };
 
     let endpoint = connection.endpoint().to_path_buf();
@@ -358,7 +376,7 @@ pub async fn open(
     .await;
     let channel = match opened {
         Ok(channel) => channel.map_err(OpenFailed::Unopened)?,
-        Err(_) => return Err(OpenFailed::Unopened(no_answer())),
+        Err(_) => return Err(OpenFailed::ChannelUnanswered),
     };
 
     // The session's size is what the daemon reports; this terminal's is what
@@ -491,18 +509,19 @@ pub async fn run(
     Ok(())
 }
 
-/// What ran out of patience, said the way a request failure is said.
-fn no_answer() -> RequestError {
-    RequestError::Protocol {
-        detail: format!("nothing within {} seconds", crate::ANSWER.as_secs()),
-    }
-}
-
 impl std::fmt::Display for OpenFailed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let seconds = crate::ANSWER.as_secs();
         match self {
             Self::Refused(error) => write!(f, "{error}"),
+            Self::GrantUnanswered => write!(f, "corrald did not answer within {seconds} seconds"),
             Self::Unopened(error) => write!(f, "the terminal channel did not open: {error}"),
+            Self::ChannelUnanswered => {
+                write!(
+                    f,
+                    "the terminal channel did not open within {seconds} seconds"
+                )
+            }
             Self::Channel(error) => write!(f, "the terminal channel ended: {error}"),
         }
     }

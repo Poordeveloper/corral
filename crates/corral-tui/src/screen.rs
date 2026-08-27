@@ -18,8 +18,15 @@ use crate::attach::Geometry;
 /// Corral hands the terminal back — theirs from before they ran this, and not
 /// Corral's to consume.
 const TAKE: &[u8] = b"\x1b[?1049h";
-/// Give it back, cursor and all.
-const RELEASE: &[u8] = b"\x1b[?7h\x1b[?25h\x1b[?1049l";
+/// Remember the modes `claim` is about to change, so they can be given back.
+///
+/// They are terminal-global rather than per-screen-buffer, so a shell that had
+/// bracketed paste on and does not re-enable it every prompt would otherwise
+/// have it off for good after this surface exits. Unconditionally setting them
+/// back on would be its own guess; this asks the terminal to remember.
+const REMEMBER_MODES: &[u8] = b"\x1b[?7;1000;1002;1003;1006;2004s";
+/// Give it back: the modes as they were, the cursor, the screen.
+const RELEASE: &[u8] = b"\x1b[?7;1000;1002;1003;1006;2004r\x1b[?25h\x1b[?1049l";
 /// Scrolling covers the whole screen again, whatever a session left set.
 const WHOLE_SCREEN: &[u8] = b"\x1b[r";
 /// No mouse reporting, in any of the ways a program turns it on.
@@ -36,6 +43,8 @@ const NO_BRACKETED_PASTE: &[u8] = b"\x1b[?2004l";
 /// selected leaves the whole list rendered as box glyphs, with nothing on
 /// screen to say why.
 const ASCII_CHARSET: &[u8] = b"\x1b(B";
+/// Autowrap as a terminal normally has it, for whoever draws next.
+const WRAP: &[u8] = b"\x1b[?7h";
 /// No autowrap.
 ///
 /// A frame draws exactly one row per line and counts on that: a line wider
@@ -95,6 +104,7 @@ impl FullScreen {
             out: std::io::stdout(),
             last: Geometry::of(&std::io::stdin()),
         };
+        screen.out.write_all(REMEMBER_MODES)?;
         screen.claim()?;
         Ok(screen)
     }
@@ -141,6 +151,13 @@ impl FullScreen {
     /// return it belongs to the session.
     pub fn hand_over(&mut self) -> std::io::Result<()> {
         self.out.write_all(SHOW_CURSOR.as_bytes())?;
+        // And wrapping, which `claim` turned off for a frame that counts its
+        // own rows. It is the one mode here a program assumes rather than
+        // sets: the daemon's snapshot carries only what differs from the
+        // emulator's defaults, and wrapping is on by default, so nothing in
+        // the session would ever turn it back on. Left off, every line of `ls`
+        // longer than the window is clipped for the whole takeover.
+        self.out.write_all(WRAP)?;
         self.out.flush()
     }
 

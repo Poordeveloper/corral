@@ -44,11 +44,6 @@ const ESCAPE_GRACE: Duration = Duration::from_millis(30);
 
 /// Run the session list until the person leaves it.
 pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std::io::Result<()> {
-    if Geometry::of(&std::io::stdin()).is_none() {
-        return Err(std::io::Error::other(
-            "the session list needs a terminal on standard input",
-        ));
-    }
     // Before anything reads the terminal, and held for the whole surface
     // rather than taken and given back around each takeover. A reader parked
     // on a terminal still in line discipline echoes what the person types and
@@ -57,11 +52,8 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
     // attachment enters raw mode of its own and restores what it found, which
     // is this.
     let Some(_raw) = RawMode::enter()? else {
-        // The guard above says standard input is a terminal, so this is one
-        // whose mode could not be set — and everything the comment below says
-        // about line discipline would be true of it.
         return Err(std::io::Error::other(
-            "the session list needs a terminal it can put in raw mode",
+            "the session list needs a terminal on standard input",
         ));
     };
     let Some(mut keys) = LocalKeys::start() else {
@@ -167,6 +159,19 @@ async fn show(
     // Kept across the whole pass: a read boundary can fall inside a cursor
     // key, and the half that arrived is not a key until the rest does.
     let mut keyboard = Keyboard::default();
+    // Bytes the takeover handed back were typed before this pass began, and
+    // they are ready the moment the loop starts. Acted on first, because a key
+    // that wins the race against the first question cancels it — and a
+    // cancelled question costs the connection it was asked on.
+    if let Some(waiting) = keys.pending() {
+        keyboard.add(&waiting);
+        while let Some(key) = keyboard.next() {
+            if let Some(chosen) = list.act(key) {
+                keys.put_back(keyboard.unread());
+                return Ok(chosen);
+            }
+        }
+    }
 
     let mut poll = tokio::time::interval(POLL);
     // The first tick fires immediately, and a slow answer delays the next
@@ -195,11 +200,14 @@ async fn show(
                 }
                 draw(screen, list)?;
             }
-            // Nothing followed the Escape, so it was the Escape key.
+            // Nothing followed, so what was held is as much as it will be.
             () = tokio::time::sleep(ESCAPE_GRACE), if keyboard.undecided() => {
-                if let Some(key) = keyboard.settle()
-                    && let Some(chosen) = list.act(key) {
-                    return Ok(chosen);
+                if let Some(key) = keyboard.settle() {
+                    // Escape cancels a prompt and Unknown does nothing:
+                    // neither is a key that leaves the list, which is what
+                    // makes this branch a redraw rather than a choice.
+                    let leaving = list.act(key);
+                    debug_assert!(leaving.is_none(), "{key:?} left the list from a settle");
                 }
                 draw(screen, list)?;
             }
@@ -207,18 +215,16 @@ async fn show(
     }
 }
 
-/// Take the terminal back, and say at once if the takeover had something to
-/// report.
+/// Take the terminal back, and draw at once.
 ///
 /// The poll below redraws, but a daemon that is slow or gone is exactly when
 /// it will not do so soon — and until it does, the person is looking at
-/// whatever the takeover left on the screen, with no sign of what just failed.
+/// whatever the takeover left on the screen, with no list and no sign of
+/// anything that just failed. What is drawn is the last answer, which is what
+/// this list shows between any two ticks; the tick that follows fires at once.
 fn returned(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> {
     screen.take_back()?;
-    if list.notice.is_some() {
-        draw(screen, list)?;
-    }
-    Ok(())
+    draw(screen, list)
 }
 
 /// The next answer, once the next poll is due.
@@ -241,7 +247,7 @@ async fn next_answer(
 /// it.
 async fn open(daemon: &mut Daemon<'_>, session_id: &str, keys: &mut LocalKeys) -> Option<String> {
     let outcome = {
-        let connection = match daemon.connection().await {
+        let connection = match daemon.connection() {
             Ok(connection) => connection,
             Err(reason) => return Some(reason),
         };
@@ -254,8 +260,13 @@ async fn open(daemon: &mut Daemon<'_>, session_id: &str, keys: &mut LocalKeys) -
             // Only the grant was asked on this connection. The channel is a
             // second socket to the same rendezvous, so its failures say
             // nothing about whether this one can be asked again.
-            if let OpenFailed::Refused(refused) = &error {
-                daemon.forget_if_unusable(refused);
+            match &error {
+                OpenFailed::Refused(refused) => daemon.forget_if_unusable(refused),
+                // Nobody is holding the answer that is still coming.
+                OpenFailed::GrantUnanswered => daemon.forget(),
+                OpenFailed::Unopened(_)
+                | OpenFailed::ChannelUnanswered
+                | OpenFailed::Channel(_) => {}
             }
             Some(error.to_string())
         }
@@ -265,11 +276,25 @@ async fn open(daemon: &mut Daemon<'_>, session_id: &str, keys: &mut LocalKeys) -
 /// Start a session and go straight into it, the way `corral new` does.
 async fn start(daemon: &mut Daemon<'_>, argv: Vec<String>, keys: &mut LocalKeys) -> Option<String> {
     let started = {
-        let connection = match daemon.connection().await {
+        let connection = match daemon.connection() {
             Ok(connection) => connection,
             Err(reason) => return Some(reason),
         };
-        crate::launch::start_session(connection, argv).await
+        // Bounded here rather than in `launch`, because it is this surface
+        // that has handed the terminal over. The CLI waits as long as starting
+        // a session takes; here a person is looking at a screen nobody is
+        // drawing. A session the daemon goes on to create is not lost by
+        // this — it arrives in the next answer, which is what a list is for.
+        match tokio::time::timeout(ANSWER, crate::launch::start_session(connection, argv)).await {
+            Ok(started) => started,
+            Err(_) => {
+                daemon.forget();
+                return Some(format!(
+                    "corrald did not answer within {} seconds",
+                    ANSWER.as_secs()
+                ));
+            }
+        }
     };
 
     match started {
@@ -377,14 +402,18 @@ struct Listed {
 }
 
 impl Daemon<'_> {
-    async fn connection(&mut self) -> Result<&mut Connection, String> {
-        match self.connection {
-            Some(ref mut connection) => Ok(connection),
-            None => {
-                let fresh = self.activated().await.map_err(|why| why.line())?;
-                Ok(self.connection.insert(fresh))
-            }
-        }
+    /// The connection this daemon already has, for something the person just
+    /// did.
+    ///
+    /// Never activates. Activation may spawn a daemon and wait out an
+    /// activation deadline that is not this crate's to bound, and this runs
+    /// with the terminal handed over and nothing reading the keyboard. The
+    /// poll owns starting a daemon, because the poll is the wait a person can
+    /// interrupt.
+    fn connection(&mut self) -> Result<&mut Connection, String> {
+        self.connection
+            .as_mut()
+            .ok_or_else(|| "corrald has not answered yet; the list is still asking".to_owned())
     }
 
     /// The connection, taken out of this daemon for exactly one question.
@@ -416,16 +445,20 @@ impl Daemon<'_> {
             )));
         }
 
+        // Armed before the wait, not after it. This future is dropped whole
+        // when a key arrives, and an attempt recorded only on the way out
+        // would not be recorded at all — leaving a person who types once a
+        // second starting a daemon once a second, which is the loop the
+        // backoff exists to stop.
         let failures = self.retry.as_ref().map_or(0, |backoff| backoff.failures);
+        self.retry = Some(Backoff::after(failures));
+
         match activate(self.policy).await {
             Ok(connection) => {
                 self.retry = None;
                 Ok(connection)
             }
-            Err(error) => {
-                self.retry = Some(Backoff::after(failures));
-                Err(Unanswered::Silent(error.to_string()))
-            }
+            Err(error) => Err(Unanswered::Silent(error.to_string())),
         }
     }
 
@@ -469,8 +502,13 @@ impl Daemon<'_> {
     /// The same rule `sessions` applies, because it is the same connection.
     fn forget_if_unusable(&mut self, error: &RequestError) {
         if !matches!(error, RequestError::Refused(_)) {
-            self.connection = None;
+            self.forget();
         }
+    }
+
+    /// Drop the connection, whatever it was.
+    fn forget(&mut self) {
+        self.connection = None;
     }
 }
 
@@ -771,6 +809,9 @@ fn heading(list: &SessionList) -> String {
     // heading counting only the rows would disagree with the line under them
     // saying there are more.
     match list.rows.len() + list.unrenderable {
+        // The body already says "No sessions.", and a heading counting them
+        // again is the same frame saying it twice.
+        0 => "Corral".to_owned(),
         1 => "Corral — 1 session".to_owned(),
         other => format!("Corral — {other} sessions"),
     }

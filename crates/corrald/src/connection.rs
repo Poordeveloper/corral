@@ -431,7 +431,7 @@ fn encode_session(session: &ManagedSession) -> serde_json::Value {
         // Always stated: this daemon knows the answer for every session it
         // runs, and absence on the wire means unknown rather than a value it
         // declined to send.
-        terminal_access: Some(session.terminal_access),
+        terminal_access: Some(session.terminal_access.as_wire()),
     })
     .unwrap_or_else(|_| serde_json::json!({}))
 }

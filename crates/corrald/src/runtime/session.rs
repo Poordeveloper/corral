@@ -18,7 +18,6 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::{Instant, SystemTime};
 
 use corral_core::{CorralSessionId, ExitCause, OccurrenceTime, RunEnd, RunId};
-use corral_protocol::method::TerminalAccess;
 use corral_protocol::terminal::{Epoch, Sequence};
 
 use super::launch::LaunchRequest;
@@ -36,6 +35,29 @@ pub enum ExecutionState {
     Running,
     Exited,
     Unknown,
+}
+
+/// Whether Corral can serve a session's terminal.
+///
+/// This daemon's own answer, converted at the protocol boundary like
+/// `ExecutionState` beside it. The wire has an enum of the same name and the
+/// two are deliberately separate: the protocol's may gain a discriminant, or
+/// split into typed reasons, without that reaching in here — and this one can
+/// hold a state the wire has no word for yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalAccess {
+    Available,
+    Unavailable,
+}
+
+impl TerminalAccess {
+    /// How the wire says it.
+    pub fn as_wire(self) -> corral_protocol::method::TerminalAccess {
+        match self {
+            Self::Available => corral_protocol::method::TerminalAccess::Available,
+            Self::Unavailable => corral_protocol::method::TerminalAccess::Unavailable,
+        }
+    }
 }
 
 /// What one managed session is.

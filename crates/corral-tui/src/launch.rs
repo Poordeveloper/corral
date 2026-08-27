@@ -31,21 +31,20 @@ pub async fn start_session(
     // protection against a client that does (ADR 0002, Q13).
     let command_id = uuid::Uuid::new_v4().as_hyphenated().to_string();
 
-    let asked = connection.session_new(SessionNewParams {
-        command_id,
-        argv,
-        cwd,
-        rows: geometry.map(|geometry| geometry.rows),
-        cols: geometry.map(|geometry| geometry.cols),
-    });
-
-    match tokio::time::timeout(crate::ANSWER, asked).await {
-        Ok(started) => started,
-        // Bounded like every wait in this crate: the surface that asked is
-        // holding a terminal in raw mode, and a daemon that never answers must
-        // not leave a person there.
-        Err(_) => Err(RequestError::Protocol {
-            detail: format!("nothing within {} seconds", crate::ANSWER.as_secs()),
-        }),
-    }
+    // Unbounded on purpose, unlike the questions this crate asks about state
+    // that already exists. Starting a session builds a PTY and spawns a child,
+    // which on a loaded machine can take longer than any patience worth
+    // having — and a client that gave up would report a failure for a session
+    // the daemon went on to create. A caller that cannot afford to wait bounds
+    // it itself, where it can say what it will do with the session that
+    // arrives anyway.
+    connection
+        .session_new(SessionNewParams {
+            command_id,
+            argv,
+            cwd,
+            rows: geometry.map(|geometry| geometry.rows),
+            cols: geometry.map(|geometry| geometry.cols),
+        })
+        .await
 }

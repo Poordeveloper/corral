@@ -50,15 +50,23 @@ fn a_sequence_that_never_finishes_is_given_up_on() {
     assert_eq!(keyboard.next(), Some(Key::Typed('q')));
 }
 
-/// The same for a character whose remaining bytes never arrive.
+/// A character is not given up on. Its remaining bytes are always coming, and
+/// whatever arrives next resolves it either way — so a slow link costs a
+/// moment rather than the character somebody typed.
 #[test]
-fn a_character_that_never_finishes_is_given_up_on() {
+fn a_character_still_arriving_is_waited_for_rather_than_dropped() {
     let mut keyboard = Keyboard::default();
-    keyboard.add(&"é".as_bytes()[..1]);
+    let bytes = "é".as_bytes();
+    keyboard.add(&bytes[..1]);
 
-    assert!(keyboard.undecided());
-    assert_eq!(keyboard.settle(), Some(Key::Unknown));
-    assert_eq!(keyboard.next(), None);
+    assert!(
+        !keyboard.undecided(),
+        "a character would have been given up on"
+    );
+    assert_eq!(keyboard.settle(), None);
+
+    keyboard.add(&bytes[1..]);
+    assert_eq!(keyboard.next(), Some(Key::Typed('é')));
 }
 
 /// A read boundary can fall anywhere, including inside a cursor key. Decoding

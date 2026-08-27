@@ -488,3 +488,14 @@ fn a_window_left_past_the_end_comes_back_to_what_is_there() {
         "the window stayed where the rows were"
     );
 }
+
+/// Zero is a count too, and the body already says it. "Corral — 0 sessions"
+/// over "No sessions." is the same frame saying it twice.
+#[test]
+fn an_answer_with_nothing_in_it_is_not_counted_in_the_heading() {
+    let mut list = SessionList::default();
+
+    list.take(answered(vec![]));
+
+    assert_eq!(heading(&list), "Corral");
+}

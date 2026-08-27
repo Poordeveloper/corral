@@ -41,6 +41,11 @@ const TAKE: &str = "\x1b[?1049h";
 /// terminal.
 const NO_MOUSE: &str = "\x1b[?1000l";
 
+/// Autowrap, as a terminal normally has it. The list turns it off so a frame
+/// draws one row per line; the session it hands over to assumes it on, and
+/// nothing in a session's own bytes would ever turn it back on.
+const WRAP: &str = "\x1b[?7h";
+
 const ROWS: u16 = 24;
 const COLS: u16 = 80;
 
@@ -106,6 +111,9 @@ fn the_list_opens_a_session_and_comes_back_to_a_current_one() {
     terminal.wait_for("Running · Status unknown");
 
     let opened = terminal.typed(b"\r");
+    // Wrapping is given back before the session paints, or every line of its
+    // output longer than the window is clipped for the whole takeover.
+    terminal.wait_for_after(opened, WRAP);
     // The session's own screen, replayed into this terminal: the takeover
     // happened, and it is the attachment that already existed.
     let painted = terminal.wait_for_after(opened, "in-the-session");
@@ -197,7 +205,10 @@ fn a_command_typed_at_the_prompt_starts_a_session_and_opens_it() {
     });
 
     let detached = terminal.typed(b"\x1c");
-    let returned = frame_after(&terminal, detached);
+    // The first frame back is the list being handed the screen again; the one
+    // after it is the answer the poll asks for on the way in.
+    let handed_back = terminal.wait_for_after(detached, FRAME);
+    let returned = frame_after(&terminal, handed_back);
 
     assert!(
         returned.contains("sleep"),
