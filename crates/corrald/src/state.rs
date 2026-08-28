@@ -24,7 +24,7 @@ use crate::runtime::{AttachTokens, Integrity, ManagedSessions, RunObservations, 
 /// shutdown that gave up first would declare a hole in the accounting — and
 /// exit non-zero — while the write was still going to succeed.
 const SETTLE_GRACE: Duration = Duration::from_millis(
-    crate::run_lifecycle::LONGEST_RECORD.as_millis() as u64 + STORE_WAIT_OVERSHOOT_MILLIS,
+    crate::run_lifecycle::LONGEST_OCCURRENCE.as_millis() as u64 + STORE_WAIT_OVERSHOOT_MILLIS,
 );
 
 /// The recorder's budget bounds when it stops *starting* attempts; the attempt

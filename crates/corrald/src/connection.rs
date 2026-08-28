@@ -835,7 +835,7 @@ async fn execute_session_new(
         // The command never ran, so no Run exists to report. Saying otherwise
         // would record a runtime occurrence that never happened.
         Err(error) => {
-            abandon_injection(state, injected, run);
+            abandon_injection(state, injected);
             return Ok(Concluded::Refused {
                 code: ErrorCode::InvalidParams,
                 message: error,
@@ -872,7 +872,7 @@ async fn execute_session_new(
             // and no ending is reported: with no durable start there is no Run
             // to end (grill Q9).
             abandon(pending);
-            abandon_injection(state, injected, run);
+            abandon_injection(state, injected);
             return refused_by_store(&command, error);
         }
     };
@@ -883,7 +883,7 @@ async fn execute_session_new(
     // leave a second process running.
     if !started.executed() {
         abandon(pending);
-        abandon_injection(state, injected, run);
+        abandon_injection(state, injected);
         return Ok(Concluded::Accepted {
             session: started.session(),
             run: started.run(),
@@ -1003,6 +1003,14 @@ fn read_session_resume(request: &Request) -> Result<ResumeSession, ProtocolError
 /// second native resume of a provider session that may still be live is two
 /// executions driving one conversation (grill Q7).
 enum ResumeRefused {
+    /// The Session exists and is eligible, but this daemon did not launch it
+    /// and so does not know where it ran.
+    ///
+    /// A known boundary rather than an oversight: where a Run ran is live
+    /// state on its handle, and a daemon holding no client and no live Run
+    /// exits after its idle grace — so a continuation outlives the provider
+    /// process but not the daemon. The plan's "Known limitation" section names
+    /// what repairing it needs.
     NotThisDaemon,
     /// The live runtime could not be consulted at all. Not a fact about this
     /// Session — the same request may simply be sent again.
@@ -1013,6 +1021,9 @@ enum ResumeRefused {
     RunStillLive,
     EndUnverifiable,
     NoPreviousRun,
+    /// Which Run was the most recent episode cannot be established, so which
+    /// ending governs cannot be either.
+    EpisodeOrderUnknown,
 }
 
 /// Decide whether a continuation may happen, before anything is spawned.
@@ -1041,6 +1052,18 @@ async fn resume_plan(
     let runs = state.runs_of(session).await?;
     if runs.iter().any(|run| run.end().is_none()) {
         return Ok(Err(ResumeRefused::RunStillLive));
+    }
+    // `runs_of` parks a Run whose start the runtime could not state at the end
+    // of the list, so its last entry is the most recent episode only while
+    // every start is authoritative. That holds of every Run a launch creates
+    // and is not something a control decision may assume of a Run some later
+    // phase records; reading the wrong episode's end is what would turn an
+    // unverifiable ending into a resumable one.
+    if runs
+        .iter()
+        .any(|run| run.started_at().authoritative().is_none())
+    {
+        return Ok(Err(ResumeRefused::EpisodeOrderUnknown));
     }
     match runs.last().map(corral_core::Run::end) {
         None => return Ok(Err(ResumeRefused::NoPreviousRun)),
@@ -1163,7 +1186,7 @@ async fn execute_session_resume(
     let pending = match spawn_off_the_reactor(launch, geometry).await {
         Ok(pending) => pending,
         Err(error) => {
-            abandon_injection(state, injected, run);
+            abandon_injection(state, injected);
             return Ok(Concluded::Refused {
                 code: ErrorCode::InvalidParams,
                 message: error,
@@ -1185,14 +1208,14 @@ async fn execute_session_resume(
         Ok(started) => started,
         Err(error) => {
             abandon(pending);
-            abandon_injection(state, injected, run);
+            abandon_injection(state, injected);
             return refused_by_store(&command, error);
         }
     };
 
     if !started.executed() {
         abandon(pending);
-        abandon_injection(state, injected, run);
+        abandon_injection(state, injected);
         return Ok(Concluded::Accepted {
             session: started.session(),
             run: started.run(),
@@ -1257,6 +1280,10 @@ impl std::fmt::Display for ResumeRefused {
             Self::NoPreviousRun => {
                 f.write_str("Corral has no record of this session ever having started")
             }
+            Self::EpisodeOrderUnknown => f.write_str(
+                "Corral cannot establish which run of this session was the most recent, so it \
+                 will not resume this provider session automatically",
+            ),
         }
     }
 }
@@ -1341,6 +1368,7 @@ async fn compose_provider_launch(
             Some(Injected {
                 token,
                 session,
+                run,
                 ownership,
             }),
         )),
@@ -1374,6 +1402,11 @@ enum SessionOwnership {
 struct Injected {
     token: LaunchToken,
     session: CorralSessionId,
+    /// The Run whose file this is. Carried rather than passed beside it: the
+    /// undo below deletes a live launch's settings file if the two ever
+    /// disagree, and a caller that cannot name the wrong Run cannot make that
+    /// mistake.
+    run: RunId,
     ownership: SessionOwnership,
 }
 
@@ -1382,11 +1415,11 @@ struct Injected {
 /// The file is removed here rather than left for the startup sweep, because
 /// this is the moment its owner is known not to exist. The token goes with it:
 /// it names a Session and Run nothing can ever present.
-fn abandon_injection(state: &Arc<DaemonState>, injected: Option<Injected>, run: RunId) {
+fn abandon_injection(state: &Arc<DaemonState>, injected: Option<Injected>) {
     let Some(injected) = injected else {
         return;
     };
-    InjectedSettings::remove_for(state.launch_dir(), run);
+    InjectedSettings::remove_for(state.launch_dir(), injected.run);
     state.forget_launch_token(injected.token);
     if injected.ownership == SessionOwnership::CreatedHere {
         state.with_runtime(|runtime| runtime.reported.forget(injected.session));
@@ -1459,8 +1492,6 @@ fn conflict(command: &Command) -> ProtocolError {
     )
 }
 
-/// The frame one concluded command produces, for its owner and its waiters
-/// alike.
 /// Which method's result shape an accepted outcome is encoded as.
 ///
 /// The two carry the same two identities today and are still separate wire
@@ -1472,6 +1503,8 @@ enum Produced {
     ResumedSession,
 }
 
+/// The frame one concluded command produces, for its owner and its waiters
+/// alike.
 fn answer(id: RequestId, concluded: Concluded, produced: Produced) -> Frame {
     match concluded {
         Concluded::Accepted { session, run } => match match produced {

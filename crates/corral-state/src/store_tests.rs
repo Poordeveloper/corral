@@ -2695,3 +2695,28 @@ fn a_stronger_assurance_lands_even_when_it_is_older() {
 
     assert_eq!(promoted.assurance(), Assurance::Attested);
 }
+
+/// The promotion exception is a direction, not a licence for any differing
+/// assurance to overwrite. Two kinds of evidence that both support control are
+/// of equal standing, so the older one is still stale — and letting it land
+/// would rewind the freshness of a binding while changing what it claims to
+/// rest on.
+#[test]
+fn an_older_confirmation_of_equal_standing_is_still_stale() {
+    let mut store = TestStore::new("confirm-sideways");
+    let (_, runtime) = managed_session(&mut store, "run-sideways");
+
+    let answered = store
+        .confirm_binding(
+            runtime,
+            Evidence::new(
+                EvidenceSource::ProviderHook,
+                Assurance::Attested,
+                instant(50),
+            ),
+        )
+        .expect("answered");
+
+    assert_eq!(answered.assurance(), Assurance::Deterministic);
+    assert_eq!(answered.evidence().observed_at(), instant(100));
+}

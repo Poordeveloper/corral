@@ -297,8 +297,33 @@ tolerated and counted.
 - Glossary rows landed; the plan moves to `done/`; `STORAGE_EPOCH` is
   untouched.
 
+## Known limitation, found in implementation
+
+**Continuing a Session outlives the process, not the daemon.** The
+provider resolves which of its own sessions an id names by the directory
+it was started in, and where a Run ran is live state on its handle: no
+durable event records it. So `session.resume` refuses with `NotThisDaemon`
+once the daemon that launched the Session is gone — and a daemon with no
+established client and no live Run exits after its idle grace, which for a
+plain command-line user is about a minute after the agent stops. Inside one
+daemon lifetime — the shape a person running the TUI has — continuing works
+as designed.
+
+The refusal is honest and fail-closed; substituting a directory would ask
+the provider for a conversation that is not there. Repairing it needs a
+durable record of where a Run ran, and `session.list` is live-only too, so
+the Session would still not be nameable after a restart — which is
+discovery, and discovery is PR7's. Recorded here rather than repaired
+inside this PR because the fix crosses the durable-state decision boundary
+and the surface it needs belongs to a later phase (`AGENTS.md` §Scope
+discipline).
+
 ## Follow-ups
 
+- Where a Run ran, recorded durably, plus a way to name a Session the
+  running daemon did not launch — together these are what make
+  `corral continue` work across a daemon lifetime. Requires an explicitly
+  accepted durable-state decision; see the limitation above.
 - Supported provider/version matrix automation as a `verify-release`-owned
   task — must land before the M1 release; a one-time evidence document is
   not a permanent release gate (grill Q9).

@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use super::*;
 use crate::provider::AgentFactKind;
@@ -8,6 +8,15 @@ fn fact(kind: AgentFactKind, seconds: u64) -> AgentFact {
         kind,
         observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(seconds),
     }
+}
+
+/// The monotonic instant the endpoint would have taken for a fact stamped
+/// `seconds`. A test cannot name an `Instant`, so they are offsets from one
+/// taken here — which is all supersession needs, since it only ever compares
+/// arrivals with each other.
+fn arrival(seconds: u64) -> Instant {
+    static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *BASE.get_or_init(Instant::now) + Duration::from_secs(seconds)
 }
 
 fn id(raw: &str) -> ExternalId {
@@ -59,6 +68,7 @@ fn a_newer_fact_retires_the_one_before_it() {
         session,
         KnownProvider::Claude,
         fact(AgentFactKind::AwaitingInput, 10),
+        arrival(10),
     );
     assert_eq!(
         reported
@@ -72,6 +82,7 @@ fn a_newer_fact_retires_the_one_before_it() {
         session,
         KnownProvider::Claude,
         fact(AgentFactKind::TurnStarted, 70),
+        arrival(70),
     );
     let held = reported
         .get(session)
@@ -97,6 +108,7 @@ fn withdrawing_an_identity_leaves_every_other_fact_standing() {
         session,
         KnownProvider::Claude,
         fact(AgentFactKind::TurnEnded, 5),
+        arrival(5),
     );
 
     reported.withdraw_identity(session);
@@ -128,6 +140,7 @@ fn a_fact_after_a_withdrawal_does_not_restore_the_identity() {
         session,
         KnownProvider::Claude,
         fact(AgentFactKind::TurnStarted, 9),
+        arrival(9),
     );
 
     assert_eq!(
@@ -153,10 +166,11 @@ fn a_forgotten_session_is_unknown_again() {
     assert!(reported.get(session).is_none());
 }
 
-/// Latest by observation, not by arrival. Each hook is delivered by its own
-/// process over its own connection, so two events fired back to back can be
-/// accepted in either order — and a row that went backwards would make
-/// `latest` mean "most recently delivered", which is not what it says.
+/// Latest by arrival at the endpoint, not by the order ingestion reached
+/// them. Each hook is delivered by its own process over its own connection and
+/// is stamped as it lands, so the queue can hand them over in either order —
+/// and a row that went backwards would make `latest` mean "most recently
+/// interpreted", which is not what it says.
 #[test]
 fn an_out_of_order_delivery_does_not_move_a_row_backwards() {
     let mut reported = ReportedSessions::new();
@@ -167,11 +181,13 @@ fn an_out_of_order_delivery_does_not_move_a_row_backwards() {
         session,
         KnownProvider::Claude,
         fact(AgentFactKind::AwaitingInput, 90),
+        arrival(90),
     );
     reported.reported(
         session,
         KnownProvider::Claude,
         fact(AgentFactKind::TurnEnded, 30),
+        arrival(30),
     );
 
     let held = reported
@@ -185,8 +201,8 @@ fn an_out_of_order_delivery_does_not_move_a_row_backwards() {
     );
 }
 
-/// Two facts stamped at the same instant are the ordinary case on a coarse
-/// clock, and the later arrival is the better answer for them.
+/// Two facts that arrived at the same instant are the ordinary case on a
+/// coarse clock, and the later of them is the better answer.
 #[test]
 fn a_fact_at_the_same_instant_supersedes() {
     let mut reported = ReportedSessions::new();
@@ -195,11 +211,13 @@ fn a_fact_at_the_same_instant_supersedes() {
         session,
         KnownProvider::Claude,
         fact(AgentFactKind::TurnStarted, 42),
+        arrival(42),
     );
     reported.reported(
         session,
         KnownProvider::Claude,
         fact(AgentFactKind::TurnEnded, 42),
+        arrival(42),
     );
 
     assert_eq!(
@@ -208,5 +226,44 @@ fn a_fact_at_the_same_instant_supersedes() {
             .and_then(|held| held.latest)
             .map(|held| held.kind),
         Some(AgentFactKind::TurnEnded),
+    );
+}
+
+/// A wall clock that steps backwards must not freeze a row.
+///
+/// The stamp a fact carries is what a surface renders an age from, and NTP or
+/// a person can move it. If supersession read it, every fact after the step
+/// would look older than the one on screen and be discarded — leaving a row
+/// asserting a turn that has since ended, for as long as the clock took to
+/// catch up.
+#[test]
+fn a_clock_that_steps_backwards_does_not_freeze_a_row() {
+    let mut reported = ReportedSessions::new();
+    let session = CorralSessionId::mint();
+    reported.launched(session, KnownProvider::Claude);
+
+    reported.reported(
+        session,
+        KnownProvider::Claude,
+        fact(AgentFactKind::AwaitingInput, 900),
+        arrival(10),
+    );
+    // Later, on the only clock that cannot be stepped, and stamped earlier.
+    reported.reported(
+        session,
+        KnownProvider::Claude,
+        fact(AgentFactKind::TurnStarted, 100),
+        arrival(11),
+    );
+
+    let held = reported
+        .get(session)
+        .and_then(|held| held.latest)
+        .expect("a fact");
+    assert_eq!(held.kind, AgentFactKind::TurnStarted);
+    assert_eq!(
+        held.observed_at,
+        SystemTime::UNIX_EPOCH + Duration::from_secs(100),
+        "the stamp is still the fact's own, however it compares",
     );
 }

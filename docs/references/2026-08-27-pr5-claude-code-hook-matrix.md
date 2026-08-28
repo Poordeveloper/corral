@@ -247,6 +247,12 @@ Measured after the relay stopped building an async runtime it never used. The
 earlier figures — p50 3.0 ms, p99 3.7 ms — are what that construction cost,
 and it sat outside the budget rather than inside it.
 
+Re-measured after rendezvous resolution and the connect moved onto a thread the
+deadline can stop waiting for — an account-database lookup and a Unix-domain
+connect are each unbounded on their own, and neither was inside the budget
+before: `n=100 min 2.6 p50 2.8 p90 2.9 p99 3.8 max 3.8 (ms)`. The added thread
+does not show against the process start already being paid.
+
 The 50 ms budget holds with an order of magnitude to spare. It is not asserted
 per run: a deadline that tight on a loaded machine is a flake generator, and
 the flake law owns that trade (`AGENTS.md` §Tests).

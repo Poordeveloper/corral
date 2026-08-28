@@ -300,7 +300,13 @@ pub struct SessionNewParams {
     /// carrying both or neither says nothing the daemon may act on. Empty
     /// where `provider` is present, which is how an older peer's request —
     /// always a non-empty `argv` — still means exactly what it always meant.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// Always written, empty included, and never skipped. A peer that predates
+    /// `provider` requires the field, so omitting it would answer a provider
+    /// launch sent to an older daemon with a decoder complaint instead of that
+    /// daemon's own "this needs a command" — which is the answer absence is
+    /// supposed to produce (`AGENTS.md` §Protocol).
+    #[serde(default)]
     pub argv: Vec<String>,
     /// The agent product to launch, when Corral composes the command.
     ///

@@ -68,5 +68,6 @@ fn delivered() -> Delivered {
         payload: Some("{}".to_owned()),
         payload_omitted: None,
         observed_at: SystemTime::UNIX_EPOCH,
+        arrived: std::time::Instant::now(),
     }
 }

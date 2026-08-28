@@ -11,6 +11,7 @@
 //! breath.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use corral_core::{CorralSessionId, ExternalId};
 
@@ -39,6 +40,14 @@ pub struct ReportedSession {
     /// Superseded rather than accumulated: a newer fact retires the older one,
     /// so an `awaiting_input` is not still on screen after a turn started.
     pub latest: Option<AgentFact>,
+    /// When that fact reached this daemon, on the monotonic clock.
+    ///
+    /// Supersession is decided on this and not on `latest.observed_at`. The
+    /// wall clock a fact is stamped with is what a surface renders an age
+    /// from, and it can step backwards — NTP, or a person setting it — after
+    /// which an order taken from it would discard every later fact until the
+    /// clock caught up, leaving a row asserting a turn that has since ended.
+    arrived: Option<Instant>,
 }
 
 impl ReportedSession {
@@ -47,6 +56,7 @@ impl ReportedSession {
             provider,
             external_id: None,
             latest: None,
+            arrived: None,
         }
     }
 }
@@ -107,21 +117,31 @@ impl ReportedSessions {
 
     /// Record the latest fact an agent reported about itself.
     ///
-    /// The latest by observation, not by arrival. Each hook is delivered by its
-    /// own process over its own connection, and the endpoint stamps each on
-    /// arrival — so two events fired back to back can be accepted in either
-    /// order under ordinary scheduling. Replacing unconditionally would let a
-    /// row go backwards, and `latest` would stop meaning what it says.
-    pub fn reported(&mut self, session: CorralSessionId, provider: KnownProvider, fact: AgentFact) {
+    /// The latest by arrival at this daemon. Each hook is delivered by its own
+    /// process over its own connection, so two events fired back to back can
+    /// be accepted in either order under ordinary scheduling, and replacing
+    /// unconditionally would let a row go backwards — `latest` would stop
+    /// meaning what it says.
+    ///
+    /// `arrived` is the monotonic instant the endpoint took, not the wall
+    /// clock it stamped the fact with: this is a live view of one process's
+    /// own observations, so the order it saw them in is knowable without
+    /// trusting a clock that can be stepped.
+    pub fn reported(
+        &mut self,
+        session: CorralSessionId,
+        provider: KnownProvider,
+        fact: AgentFact,
+        arrived: Instant,
+    ) {
         let held = self
             .sessions
             .entry(session)
             .or_insert_with(|| ReportedSession::new(provider));
-        let supersedes = held
-            .latest
-            .is_none_or(|latest| latest.observed_at <= fact.observed_at);
+        let supersedes = held.arrived.is_none_or(|latest| latest <= arrived);
         if supersedes {
             held.latest = Some(fact);
+            held.arrived = Some(arrived);
         }
     }
 

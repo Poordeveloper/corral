@@ -155,6 +155,49 @@ fn a_managed_launch_learns_its_provider_identity_from_its_own_hooks() {
     drop(daemon);
 }
 
+/// A lost `SessionStart` does not cost a Session its identity.
+///
+/// Delivery is at-most-once by construction: a full queue drops, and a relay
+/// past its budget fails open. A session start fires once per process, so a
+/// rule that only it could establish would turn one dropped delivery into a
+/// Session that can never be identified and never be continued. What makes the
+/// claim attributable is the launch token, and every event carries the same
+/// one.
+#[test]
+fn a_session_whose_start_never_arrived_is_still_identified() {
+    let account = account("late-identity");
+    let script = Script::new(&account, "late-identity")
+        .holding()
+        .fires(&provider::user_prompt_submit(FIRST));
+    let daemon = daemon_running(&account, &script);
+
+    let session = new_claude(&account);
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    wait_until(provider::DELIVERED, || {
+        listed(&sessions(&mut client, 1), &session).and_then(external_id) == Some(FIRST)
+    });
+
+    let all = sessions(&mut client, 2);
+    let row = listed(&all, &session).expect("the session that reported");
+    assert_eq!(agent_event_kind(row), Some("turn_started"));
+
+    // Established, not confirmed: the durable confirmation stays reserved for
+    // a session start, which never came.
+    let kinds = recorded_kinds(&account.registry());
+    assert_eq!(
+        kinds.iter().filter(|kind| *kind == "binding-added").count(),
+        2,
+        "the managed runtime binding and the provider identity: {kinds:?}",
+    );
+    assert!(
+        !kinds.iter().any(|kind| kind == "binding-confirmed"),
+        "{kinds:?}",
+    );
+
+    drop(daemon);
+}
+
 /// The same identity twice is one binding. A duplicate `SessionStart` — the
 /// ordinary shape of a resume — confirms rather than creating a second edge.
 #[test]

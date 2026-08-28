@@ -14,9 +14,12 @@
 //!   shims do not start `corrald` (`AGENTS.md`). An absent socket means the
 //!   daemon is not running, which means fail open now.
 //!
-//! And it is bounded end to end. One monotonic deadline covers reading stdin,
-//! connecting, delivering, and the acknowledgement; no phase resets it, and a
-//! definite error fails open without waiting the budget out (ADR 0004 D4).
+//! And it is bounded end to end. One monotonic deadline covers every phase —
+//! reading stdin, resolving the rendezvous, connecting, delivering, and the
+//! acknowledgement — and each of the two that can block indefinitely runs on a
+//! thread this one stops waiting for when the budget is out. No phase resets
+//! the deadline, and a definite error fails open without waiting it out
+//! (ADR 0004 D4).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -118,20 +121,49 @@ pub fn deliver(token: &str, provider: &str, started: Instant) -> ExitCode {
         return fail_open;
     };
 
-    // Derived, never passed in: the relay and the daemon compute the same
-    // rendezvous from the same rule, so a settings file cannot outlive a
-    // daemon and point a later one somewhere else (ADR 0001 D1).
-    let Ok(paths) = RendezvousPaths::canonical() else {
-        return fail_open;
-    };
-    // A missing socket, a refused connection, a permission failure: definite
-    // errors, answered now rather than by waiting out the budget.
-    let Ok(stream) = UnixStream::connect(paths.hook_socket()) else {
-        return fail_open;
-    };
-
-    let _ = send_and_settle(stream, &frame, started);
+    // Everything left can block for as long as the machine wants to, so it
+    // goes on a thread and the deadline is enforced here.
+    //
+    // Resolving the rendezvous reads the account database, which on a machine
+    // whose directory service is remote or unreachable is a call with no bound
+    // of its own; and a Unix-domain connect to a listener whose backlog is
+    // full blocks on Linux rather than being refused, so a stalled daemon
+    // would park every hook of every session in `connect`. Neither is
+    // something a shim may make the user's agent wait for (`AGENTS.md`).
+    deliver_within(remaining(started), move || {
+        // Derived, never passed in: the relay and the daemon compute the same
+        // rendezvous from the same rule, so a settings file cannot outlive a
+        // daemon and point a later one somewhere else (ADR 0001 D1).
+        let Ok(paths) = RendezvousPaths::canonical() else {
+            return;
+        };
+        // A missing socket, a refused connection, a permission failure:
+        // definite errors, answered now rather than by waiting out the budget.
+        let Ok(stream) = UnixStream::connect(paths.hook_socket()) else {
+            return;
+        };
+        let _ = send_and_settle(stream, &frame, started);
+    });
     fail_open
+}
+
+/// Run the delivery, and stop waiting for it when the budget is out.
+///
+/// The thread is abandoned rather than joined, exactly as the stdin reader is:
+/// this process is about to exit, and waiting for it would reintroduce the
+/// wait that was just avoided. What it is still doing when that happens — a
+/// name lookup, a connect, a write — is the daemon's problem or the machine's,
+/// and by then it is no longer the agent's.
+fn deliver_within(budget: Duration, delivery: impl FnOnce() + Send + 'static) {
+    if budget.is_zero() {
+        return;
+    }
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        delivery();
+        let _ = sender.send(());
+    });
+    let _ = receiver.recv_timeout(budget);
 }
 
 /// One delivery as a frame this channel can carry, or nothing.

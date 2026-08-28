@@ -677,18 +677,25 @@ impl Store {
                 }
                 .into());
             }
-            // An observation older than the one already recorded, at the same
-            // assurance, tells the log nothing and would move the binding's
-            // freshness backwards — and freshness is what later phases judge
-            // what a fact may still claim by (`AGENTS.md` §Runtime truth).
-            // Deliveries arrive on their own connections and are stamped at
-            // their own arrival, so an order that disagrees with the stamps is
-            // ordinary scheduling rather than a fault. A *stronger* assurance
-            // still lands, however it is stamped: that is a promotion, not a
-            // re-observation.
-            let stale = evidence.observed_at() < existing.evidence().observed_at()
-                && evidence.assurance() == existing.assurance();
-            if stale {
+            // An observation older than the one already recorded tells the log
+            // nothing and would move the binding's freshness backwards — and
+            // freshness is what later phases judge what a fact may still claim
+            // by (`AGENTS.md` §Runtime truth). Deliveries arrive on their own
+            // connections and are stamped at their own arrival, so an order
+            // that disagrees with the stamps is ordinary scheduling rather
+            // than a fault.
+            //
+            // The one exception is evidence that grants a capability the
+            // recorded evidence does not have: a binding that could not
+            // support control and now can has changed what it *means* rather
+            // than when it was last seen, and that lands however it is
+            // stamped. Stated as the capability gained rather than as a rank,
+            // because Corral does not order assurance — and a rank would let
+            // an older confirmation overwrite a fresher one of equal standing
+            // in a direction nobody could name.
+            let promotes =
+                !existing.assurance().permits_control() && evidence.assurance().permits_control();
+            if evidence.observed_at() < existing.evidence().observed_at() && !promotes {
                 return Ok(Written::nothing_to_record(existing));
             }
             let confirmed = existing.with_evidence(evidence);

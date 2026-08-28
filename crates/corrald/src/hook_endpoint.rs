@@ -28,7 +28,7 @@
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use corral_protocol::hook::{HOOK_DELIVER, HOOK_PROTOCOL_VERSION, HookAck, HookDelivery};
 use corral_protocol::{Frame, FrameReader, FrameWriter};
@@ -117,8 +117,12 @@ async fn take_one(stream: UnixStream, deliveries: Deliveries) {
     }
 
     // Stamped here, at arrival, and carried with the delivery: whatever the
-    // queue does afterwards, the observation happened now.
+    // queue does afterwards, the observation happened now. Both clocks,
+    // because they answer different questions — what a surface renders an age
+    // from, and what orders this daemon's own observations against each other
+    // when the first one steps.
     let observed_at = SystemTime::now();
+    let arrived = Instant::now();
     let accepted = read_delivery(request.params);
 
     // The receipt goes back whether or not the payload was usable. It says
@@ -137,6 +141,7 @@ async fn take_one(stream: UnixStream, deliveries: Deliveries) {
         payload: delivery.payload,
         payload_omitted: delivery.payload_omitted,
         observed_at,
+        arrived,
     }) {
         deliveries.offer(delivered);
     }

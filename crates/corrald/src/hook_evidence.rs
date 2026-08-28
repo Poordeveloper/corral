@@ -38,16 +38,24 @@ const QUEUE: usize = 256;
 
 /// The longest announcing a Run's ending may wait for room in that queue.
 ///
-/// Derived from the recorder's own budget rather than chosen beside it: the
-/// thread that announces is the one whose every other wait is bounded by
-/// `LONGEST_RECORD`, and the shutdown grace is derived from that bound alone.
-/// An unaccounted wait here would quietly falsify that derivation.
+/// One store wait, because that is what a full queue is waiting on: the
+/// consumer's slowest step is a store call, so a slot frees within the store's
+/// own wait unless the store is wedged — and waiting past that would only be
+/// waiting for something that is not coming.
+///
+/// This is the recorder's wait, spent in series before it records anything, so
+/// `run_lifecycle::LONGEST_OCCURRENCE` adds it to that thread's own budget and
+/// the shutdown grace is derived from the sum. Deriving it *from*
+/// `LONGEST_RECORD` instead — as this once did — made the recorder's worst
+/// case twice the bound the shutdown grace was computed from, which is exactly
+/// the falsified derivation the grace exists to prevent.
 ///
 /// Reaching it costs a token that resolves to a finished Run until the daemon
 /// exits, which is why it is said out loud rather than shrugged off — but a
 /// recorder parked forever behind hook interpretation would stop run endings
 /// reaching the log at all, and that is worse.
-const RETIREMENT_WAIT: Duration = crate::run_lifecycle::LONGEST_RECORD;
+pub(crate) const RETIREMENT_WAIT: Duration =
+    Duration::from_millis(crate::run_lifecycle::STORE_WAIT_MILLIS);
 
 /// How long to leave the queue alone between attempts. Short next to the wait
 /// above, which is what actually does the waiting.
@@ -62,6 +70,10 @@ pub struct Delivered {
     /// Stamped by the endpoint on arrival. Freshness authority belongs to the
     /// clock of the process that judges freshness (ADR 0004 D3).
     pub observed_at: SystemTime,
+    /// The same moment on the monotonic clock, for ordering this daemon's own
+    /// observations against each other. A wall clock that steps backwards
+    /// would otherwise make every later fact look older than the one on screen.
+    pub arrived: Instant,
 }
 
 /// Everything the one serial consumer has to act on, in the order it happened.
@@ -224,7 +236,14 @@ async fn ingest_one(state: &Arc<DaemonState>, delivered: Delivered) -> Result<()
         }
     };
 
-    apply(state, &scope, &report, delivered.observed_at).await
+    apply(
+        state,
+        &scope,
+        &report,
+        delivered.observed_at,
+        delivered.arrived,
+    )
+    .await
 }
 
 async fn apply(
@@ -232,12 +251,13 @@ async fn apply(
     scope: &LaunchScope,
     report: &ProviderReport,
     observed_at: SystemTime,
+    arrived: Instant,
 ) -> Result<(), StateError> {
     let session = scope.session;
     let provider = scope.provider;
     if let Some(kind) = report.fact {
         let fact = AgentFact { kind, observed_at };
-        state.with_runtime(|runtime| runtime.reported.reported(session, provider, fact));
+        state.with_runtime(|runtime| runtime.reported.reported(session, provider, fact, arrived));
     }
 
     let Some(reported_id) = report.identity.clone() else {
@@ -268,7 +288,7 @@ async fn apply(
     }
 
     match state.provider_session_binding(session).await? {
-        None => establish(state, scope, report, reported_id, observed_at).await,
+        None => establish(state, scope, reported_id, observed_at).await,
         // Contested is monotonic, and this is where that is enforced rather
         // than described. Later reports of the original id do not restore it,
         // later reports of the conflicting id do not replace it, and a third
@@ -291,30 +311,32 @@ async fn apply(
     }
 }
 
-/// The first `SessionStart` over a valid token establishes the Session's
-/// provider identity.
+/// The first report naming an identity, over a valid token, establishes the
+/// Session's provider identity.
 ///
 /// Attested, not Deterministic: live provider-native evidence corroborated by
 /// an observed process is the glossary's definition exactly, and Claude minted
 /// the id — Corral did not hold it by construction (ADR 0004 D5).
 ///
-/// Only a session-start report may establish. A turn fact naming an identity
-/// Corral has never accepted is a fact about a conversation, not the moment
-/// Corral learned which conversation this is.
+/// Any identity-carrying report may establish, not only a session start.
+/// Delivery is at-most-once by construction — a full queue drops, a relay past
+/// its budget fails open — and a session start fires exactly once per process,
+/// so a rule that only it could establish would turn one lost delivery into a
+/// Session whose identity is never learned and which can therefore never be
+/// continued, with nothing to retry and nothing to tell the person. What makes
+/// the claim attributable is the token, and every event of the launch carries
+/// the same one; ADR 0004 D7 writes `BindingAdded` "when identity is first
+/// learned", which is this moment whichever event brings it.
+///
+/// The durable *confirmation* stays reserved for a session start
+/// (`reobserved`): re-observation is a fresh Run of the same conversation, not
+/// every turn of one.
 async fn establish(
     state: &Arc<DaemonState>,
     scope: &LaunchScope,
-    report: &ProviderReport,
     reported_id: ExternalId,
     observed_at: SystemTime,
 ) -> Result<(), StateError> {
-    if report.fact != Some(AgentFactKind::SessionStarted) {
-        debug!(
-            session = %scope.session,
-            "a provider fact named an identity before any session start established one",
-        );
-        return Ok(());
-    }
     let provider = match ProviderId::new(scope.provider.as_str()) {
         Ok(provider) => provider,
         Err(error) => {

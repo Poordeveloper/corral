@@ -43,7 +43,7 @@ const BETWEEN_ATTEMPTS: Duration = Duration::from_millis(BETWEEN_ATTEMPTS_MILLIS
 /// Stated here because the budget below is a multiple of it. Not read from the
 /// store: it is that crate's number to choose, and a copy that drifted would
 /// only ever make this budget too generous, never too short.
-const STORE_WAIT_MILLIS: u64 = 5_000;
+pub(crate) const STORE_WAIT_MILLIS: u64 = 5_000;
 
 /// The longest the recorder may spend on one fact before calling it lost.
 ///
@@ -53,6 +53,17 @@ const STORE_WAIT_MILLIS: u64 = 5_000;
 /// that happens.
 pub const LONGEST_RECORD: Duration =
     Duration::from_millis(ATTEMPTS as u64 * (STORE_WAIT_MILLIS + BETWEEN_ATTEMPTS_MILLIS));
+
+/// The longest this thread may spend on one observed occurrence.
+///
+/// A Run that ended costs two bounded waits in series, not one: announcing the
+/// ending to the evidence queue, and then recording it. Both are here because
+/// both are this thread's, and a shutdown that outwaits only the second would
+/// declare a hole in the accounting while the first was still legitimately in
+/// progress.
+pub const LONGEST_OCCURRENCE: Duration = Duration::from_millis(
+    LONGEST_RECORD.as_millis() as u64 + crate::hook_evidence::RETIREMENT_WAIT.as_millis() as u64,
+);
 
 /// Record every run occurrence this daemon observes, on a thread of its own.
 ///
