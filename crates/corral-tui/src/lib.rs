@@ -38,4 +38,4 @@ mod screen;
 pub use attach::{LocalKeys, OpenFailed, RawMode, open};
 pub use launch::{Requested, continue_session, requested, start_session};
 pub use list::{run, short_id};
-pub use presentation::{MainState, SessionPresentation, present};
+pub use presentation::{MainState, SessionPresentation, present, present_at};

@@ -24,9 +24,35 @@ fn offering_to_a_closed_queue_is_quiet() {
     deliveries.offer(delivered());
     // From a thread, because that is where its one caller lives.
     let announcing = deliveries.clone();
-    std::thread::spawn(move || announcing.run_ended(corral_core::RunId::mint()))
+    let announced = std::thread::spawn(move || announcing.run_ended(corral_core::RunId::mint()))
         .join()
         .expect("the announcement returned");
+    assert!(
+        announced,
+        "a departing daemon has nothing left to retire a token for",
+    );
+}
+
+/// A queue that will not take the announcement inside its bound says so,
+/// because the caller has to retire the token itself when it does.
+///
+/// A token that outlives its Run is how a provider process that outlived its
+/// episode comes to contest the identity of the Run that replaced it — and
+/// contested is monotonic with nothing in M1 to clear it (ADR 0004 D5, D8).
+/// Out of order costs that Run's still-queued tail; never costs the Session.
+#[test]
+fn an_announcement_that_will_not_fit_says_so_rather_than_waiting_forever() {
+    let (deliveries, _receiver) = queue_waiting(std::time::Duration::from_millis(30));
+    for _ in 0..QUEUE {
+        deliveries.offer(delivered());
+    }
+
+    let announcing = deliveries.clone();
+    let announced = std::thread::spawn(move || announcing.run_ended(corral_core::RunId::mint()))
+        .join()
+        .expect("the announcement returned");
+
+    assert!(!announced, "a jammed queue was reported as having taken it");
 }
 
 /// A Run's ending rides the same queue as that Run's events, so it lands
@@ -42,9 +68,11 @@ async fn a_run_ending_arrives_behind_the_events_that_run_delivered() {
     // Announced the way the run lifecycle recorder announces it: from a thread
     // of its own, never from the reactor.
     let announcing = deliveries.clone();
-    std::thread::spawn(move || announcing.run_ended(run))
-        .join()
-        .expect("the announcement returned");
+    assert!(
+        std::thread::spawn(move || announcing.run_ended(run))
+            .join()
+            .expect("the announcement returned"),
+    );
     deliveries.offer(delivered());
 
     assert!(matches!(incoming.recv().await, Some(Ingest::Delivered(_))));

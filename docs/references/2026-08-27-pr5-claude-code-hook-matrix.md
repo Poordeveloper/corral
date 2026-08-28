@@ -145,11 +145,18 @@ hooks writing to different logs.
 Observed: log B received both hooks; log A stayed empty. The last `--settings`
 is the one loaded, and the earlier one is ignored entirely.
 
-Consequence: Corral's injected file goes **after** anything a caller passes, or
-a caller's own `--settings` would displace it and the session would launch
-looking managed and reporting nothing. A caller-supplied `--settings` is also
-refused outright, so a person is told rather than having their file silently
-ignored. There is no short alias for the flag on 2.1.247.
+Consequence: position alone cannot answer this one — whichever end Corral's
+file goes, a caller repeating the flag wins. So a caller-supplied `--settings`
+is refused outright, and a person is told rather than having their file
+silently ignored, or having Corral's silently ignored and a session launch
+looking managed while reporting nothing. There is no short alias for the flag
+on 2.1.247.
+
+Where the injection goes is settled by scenario 12, not here: **first**, and
+for the reason scenario 10 records. An earlier draft of this note concluded
+"after anything a caller passes", which scenario 10 then proved unsafe; it is
+corrected rather than left, because this record is what a later change is
+argued against.
 
 ### 9. `/clear` starts a new conversation in the same runtime — **pass, and it is a known cost**
 

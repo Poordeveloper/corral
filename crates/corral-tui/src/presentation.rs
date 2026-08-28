@@ -215,6 +215,18 @@ impl SessionPresentation {
     pub fn refuses_open(&self) -> Option<&'static str> {
         self.screen
     }
+
+    /// Why Continue is refused before the person presses it, when it is.
+    ///
+    /// The live case only, and only because it is the one this surface is
+    /// already rendering: a running session has nothing to continue, and the
+    /// row says so. Every other reason a continuation can be refused — a
+    /// contested identity, an ending Corral cannot verify, a daemon that did
+    /// not launch it — rests on facts only the daemon holds, and it states
+    /// those in words this surface shows unchanged.
+    pub fn refuses_continue(&self) -> Option<&'static str> {
+        (self.runtime == Some(RUNNING)).then_some(RUNNING)
+    }
 }
 
 #[cfg(test)]

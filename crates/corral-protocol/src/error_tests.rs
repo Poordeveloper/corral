@@ -2,18 +2,44 @@ use super::*;
 
 #[test]
 fn known_codes_round_trip_through_their_wire_spelling() {
-    for code in [
+    for code in every_known_code() {
+        let encoded = serde_json::to_string(&code).expect("encode");
+        let decoded: ErrorCode = serde_json::from_str(&encoded).expect("decode");
+        assert_eq!(code, decoded);
+    }
+}
+
+/// Every code this build spells, with the enum itself as the anchor.
+///
+/// The match is why this exists: adding a variant stops it compiling, so a new
+/// code cannot be minted without being round-tripped. A hand-written list is
+/// how `unknown_provider` came to ship without this covering it.
+fn every_known_code() -> Vec<ErrorCode> {
+    let codes = vec![
         ErrorCode::MethodNotFound,
         ErrorCode::InvalidParams,
         ErrorCode::MalformedHello,
         ErrorCode::ProtocolViolation,
         ErrorCode::Busy,
         ErrorCode::CommandIdConflict,
-    ] {
-        let encoded = serde_json::to_string(&code).expect("encode");
-        let decoded: ErrorCode = serde_json::from_str(&encoded).expect("decode");
-        assert_eq!(code, decoded);
+        ErrorCode::UnknownProvider,
+        ErrorCode::SessionNotContinuable,
+    ];
+    for code in &codes {
+        match code {
+            ErrorCode::MethodNotFound
+            | ErrorCode::InvalidParams
+            | ErrorCode::MalformedHello
+            | ErrorCode::ProtocolViolation
+            | ErrorCode::Busy
+            | ErrorCode::CommandIdConflict
+            | ErrorCode::UnknownProvider
+            | ErrorCode::SessionNotContinuable => {}
+            // Not a spelling this build owns: it is whatever a peer sent.
+            ErrorCode::Unknown(_) => unreachable!("the list above names no unknown code"),
+        }
     }
+    codes
 }
 
 #[test]

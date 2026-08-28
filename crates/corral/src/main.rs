@@ -7,6 +7,7 @@
 //! decides on the user's behalf to upgrade, downgrade, or stop a daemon.
 
 use std::process::ExitCode;
+use std::time::SystemTime;
 
 use clap::{Parser, Subcommand};
 
@@ -38,6 +39,16 @@ enum Command {
     /// and `corral new -- bash` runs a raw command. An unknown first word is
     /// refused by name rather than guessed at, so the two namespaces stay
     /// distinct (grill Q6).
+    ///
+    /// An agent's own arguments need the separator here, where the list's
+    /// prompt takes them with or without it. The stricter shape is not a
+    /// preference: the separator is the only thing that tells a provider from
+    /// a raw command, and a parser that let it be optional after the provider
+    /// would have to be given the separator to see — which clap never does, it
+    /// consumes it. `corral new -- bash` and `corral new bash` would become
+    /// the same words, and the two namespaces grill Q6 kept apart would
+    /// collapse into whichever the daemon guessed. A person who types the
+    /// shorter form is told the exact fix by the parser.
     New {
         /// The agent to start, or nothing when a command follows `--`.
         provider: Option<String>,
@@ -331,11 +342,15 @@ async fn list(connection: &mut Connection) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // One instant for the whole listing. A row that read the clock for itself
+    // would let two facts observed at the same moment print two different
+    // ages, which is a listing disagreeing with itself.
+    let now = SystemTime::now();
     let mut unrenderable = 0;
     for session in &sessions.sessions {
         match serde_json::from_value::<SessionListItem>(session.clone()) {
             Ok(item) => {
-                for row in session_rows(&item) {
+                for row in session_rows(&item, now) {
                     println!("{row}");
                 }
             }
@@ -367,8 +382,8 @@ const STATE_COLUMN: usize = 36;
 /// plus whatever secondary lines the projection allows. Every word of it comes from the
 /// shared projection: this surface and the session list say the same thing
 /// about the same session or one of them is lying (grill Q2).
-fn session_rows(item: &SessionListItem) -> Vec<String> {
-    let presented = corral_tui::present(item);
+fn session_rows(item: &SessionListItem, now: SystemTime) -> Vec<String> {
+    let presented = corral_tui::present_at(item, now);
     let mut rows = vec![format!(
         "{:<ID_COLUMN$}{:<STATE_COLUMN$}{}",
         corral_tui::short_id(&item.session_id),

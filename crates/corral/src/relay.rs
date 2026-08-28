@@ -76,7 +76,6 @@ pub fn invocation(arguments: impl IntoIterator<Item = OsString>) -> Option<Invoc
     }
     let mut provider = String::new();
     let mut token = String::new();
-    let mut arguments = arguments;
     while let Some(argument) = arguments.next() {
         // A flag whose value is missing leaves the field empty. The daemon
         // refuses what it cannot place, and silence is this program's whole

@@ -18,6 +18,7 @@ mod hook_endpoint;
 mod hook_evidence;
 mod in_flight;
 mod lifecycle;
+mod managed_launch;
 mod platform;
 mod policy;
 /// Coding-agent knowledge: launch and resume composition, hook ingress

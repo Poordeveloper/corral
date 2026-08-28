@@ -46,6 +46,16 @@ pub enum ErrorCode {
     /// person asks it for a plain command instead. Matching the daemon's
     /// sentence would make that hint drift with the wording.
     UnknownProvider,
+    /// The Session named cannot be continued, and repeating the request will
+    /// not change that.
+    ///
+    /// Its own code for the same reason `command_id_conflict` has one: what a
+    /// client must do about it is the opposite of what `busy` invites. The
+    /// parameters were fine — it is the Session's own state that refuses — so
+    /// `invalid_params` would send a client looking for a mistake in its
+    /// request that is not there. Which state it is stays in the message: a
+    /// person is told, and no client branches on it in this phase.
+    SessionNotContinuable,
     Unknown(String),
 }
 
@@ -68,6 +78,7 @@ impl ErrorCode {
             Self::Busy => "busy",
             Self::CommandIdConflict => "command_id_conflict",
             Self::UnknownProvider => "unknown_provider",
+            Self::SessionNotContinuable => "session_not_continuable",
             Self::Unknown(raw) => raw,
         }
     }
@@ -83,6 +94,7 @@ impl From<String> for ErrorCode {
             "busy" => Self::Busy,
             "command_id_conflict" => Self::CommandIdConflict,
             "unknown_provider" => Self::UnknownProvider,
+            "session_not_continuable" => Self::SessionNotContinuable,
             _ => Self::Unknown(raw),
         }
     }

@@ -111,7 +111,7 @@ fn withdrawing_an_identity_leaves_every_other_fact_standing() {
         arrival(5),
     );
 
-    reported.withdraw_identity(session);
+    reported.contested(session);
 
     let held = reported.get(session).expect("a session");
     assert_eq!(held.external_id, None, "the claim is withdrawn");
@@ -134,7 +134,7 @@ fn a_fact_after_a_withdrawal_does_not_restore_the_identity() {
     let mut reported = ReportedSessions::new();
     let session = CorralSessionId::mint();
     reported.identified(session, KnownProvider::Claude, id("first"));
-    reported.withdraw_identity(session);
+    reported.contested(session);
 
     reported.reported(
         session,

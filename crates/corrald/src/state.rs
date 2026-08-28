@@ -14,7 +14,7 @@ use corral_state::{
 
 use crate::hook_evidence::{Deliveries, Ingest};
 use crate::in_flight::InFlightCommands;
-use crate::provider::{LaunchTokens, ReportedSessions};
+use crate::provider::{ReportedSessions, SharedLaunchTokens};
 use crate::runtime::{AttachTokens, Integrity, ManagedSessions, RunObservations, observe_runs};
 
 /// How long a departing daemon waits for its last observed facts to land.
@@ -70,7 +70,7 @@ pub struct DaemonState {
     /// Beside the runtime rather than inside it, because it has a second
     /// owner: the thread that learns a Run ended drops that Run's token there
     /// (ADR 0004 D5). A token that outlived its Run is only a way to be wrong.
-    launch_tokens: Arc<Mutex<LaunchTokens>>,
+    launch_tokens: SharedLaunchTokens,
 
     /// This node's identity, read once at startup. Every binding key is scoped
     /// by it, and asking the store for it on each ingest would be a lock taken
@@ -132,13 +132,14 @@ impl DaemonState {
         // report an ending before anything was draining the channel would fill
         // it and lose the accounting the daemon exists to keep.
         let (observations, observed) = observe_runs();
-        let launch_tokens = Arc::new(Mutex::new(LaunchTokens::new()));
+        let launch_tokens = SharedLaunchTokens::new();
         let (deliveries, incoming) = crate::hook_evidence::queue();
         crate::run_lifecycle::record_observed_runs(
             Arc::clone(&store),
             observed,
             launch_dir.to_path_buf(),
             deliveries.clone(),
+            launch_tokens.clone(),
         );
         Ok(Self {
             store,
@@ -165,7 +166,7 @@ impl DaemonState {
         &self,
         scope: crate::provider::LaunchScope,
     ) -> Result<crate::provider::LaunchToken, crate::provider::NoRandomness> {
-        self.launch_tokens().mint(scope)
+        self.launch_tokens.mint(scope)
     }
 
     /// The launch a token names, if this daemon minted it and its Run is not
@@ -174,12 +175,12 @@ impl DaemonState {
         &self,
         token: &crate::provider::LaunchToken,
     ) -> Option<crate::provider::LaunchScope> {
-        self.launch_tokens().resolve(token)
+        self.launch_tokens.resolve(token)
     }
 
     /// Drop a token whose launch never became one.
     pub fn forget_launch_token(&self, token: crate::provider::LaunchToken) {
-        self.launch_tokens().forget(token);
+        self.launch_tokens.forget(token);
     }
 
     /// Retire the token of a Run that is over.
@@ -188,16 +189,7 @@ impl DaemonState {
     /// already delivered, so "after the Run ended" means after rather than
     /// racing it.
     pub fn retire_launch_tokens_of(&self, run: RunId) {
-        self.launch_tokens().forget_run(run);
-    }
-
-    /// A poisoned lock means another holder panicked mid-mutation. The map is
-    /// live correlation state with no durable consequence, so refusing to look
-    /// would stop every later event from being placed for no gain.
-    fn launch_tokens(&self) -> MutexGuard<'_, LaunchTokens> {
-        self.launch_tokens
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.launch_tokens.forget_run(run);
     }
 
     /// Where per-launch provider configuration Corral owns is written.

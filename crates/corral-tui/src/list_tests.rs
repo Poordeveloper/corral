@@ -486,8 +486,9 @@ fn an_answer_with_nothing_in_it_is_not_counted_in_the_heading() {
     assert_eq!(heading(&list), "Corral");
 }
 
-/// Every precondition of a continuation is the daemon's, so the keystroke asks
-/// rather than judges: a surface that pre-refused would be a second owner of a
+/// Every precondition of a continuation the daemon owns stays the daemon's, so
+/// the keystroke asks rather than judges: a surface that pre-refused a
+/// contested identity or an unverifiable ending would be a second owner of a
 /// rule that fails closed, and its answer is the one a person would see.
 #[test]
 fn continuing_a_row_asks_the_daemon_about_it() {
@@ -500,6 +501,23 @@ fn continuing_a_row_asks_the_daemon_about_it() {
         matches!(chosen, Some(Chosen::Continue(ref id)) if id == "s0-exited"),
         "c on a row asks for that row",
     );
+}
+
+/// The live case is the exception, and it is the one this surface already
+/// knows: the row is displaying the runtime fact that answers it. Asking
+/// anyway would hand the terminal over and take it back for a guaranteed
+/// refusal — an alternate-screen teardown and rebuild a person watches for
+/// nothing.
+#[test]
+fn continuing_a_running_row_is_refused_before_the_terminal_is_handed_over() {
+    let mut list = SessionList::default();
+    list.take(answered(vec![session("s0-running", "running", None)]));
+
+    let chosen = list.act(Key::Typed('c'));
+
+    assert!(chosen.is_none(), "a live row was handed to the daemon");
+    let notice = list.notice.clone().expect("a reason on screen");
+    assert!(notice.contains("cannot be continued"), "{notice}");
 }
 
 /// An empty list has no action, and inventing a message for it would be noise

@@ -513,11 +513,19 @@ impl SessionList {
 
     /// Ask for the selected session to run again.
     ///
-    /// Nothing is refused here. Whether a Session can be continued rests on
-    /// facts only the daemon holds, and it states them in words this surface
-    /// shows unchanged.
+    /// One refusal is answered here, for the same reason Open's is: choosing
+    /// hands the terminal over and takes it back, and doing that for an answer
+    /// the row is already displaying is a teardown and a rebuild a person
+    /// watches for nothing. Every other reason rests on facts only the daemon
+    /// holds, and it states them in words this surface shows unchanged.
     fn continue_selected(&mut self) -> Option<Chosen> {
         let row = self.rows.get(self.selected)?;
+
+        if let Some(refusal) = row.presentation.refuses_continue() {
+            self.notice = Some(format!("{refusal}: this session cannot be continued."));
+            return None;
+        }
+
         self.notice = None;
         Some(Chosen::Continue(row.session_id.clone()))
     }

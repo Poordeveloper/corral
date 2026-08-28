@@ -31,7 +31,7 @@ use corral_core::ExternalId;
 pub use claude::ArgumentRefused;
 pub use launch::{
     InjectedSettings, InjectionFailed, LaunchScope, LaunchToken, LaunchTokens, NoRandomness,
-    sweep_launch_dir,
+    SharedLaunchTokens, sweep_launch_dir,
 };
 pub use reported::{ReportedSession, ReportedSessions};
 

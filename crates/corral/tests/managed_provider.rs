@@ -392,7 +392,11 @@ fn a_contradicting_identity_report_refuses_the_continuation() {
             Some(json!({"command_id": "resume-1", "session_id": session})),
         )
         .expect("session.resume answered");
-    assert_eq!(error_code(&refusal), Some("invalid_params"), "{refusal}");
+    assert_eq!(
+        error_code(&refusal),
+        Some("session_not_continuable"),
+        "{refusal}"
+    );
     let message = refused_with(&refusal);
     assert!(
         message.contains("contradicts the one Corral accepted"),
@@ -521,7 +525,11 @@ fn a_contest_still_refuses_a_continuation_after_a_restart() {
         )
         .expect("session.resume answered");
 
-    assert_eq!(error_code(&refusal), Some("invalid_params"), "{refusal}");
+    assert_eq!(
+        error_code(&refusal),
+        Some("session_not_continuable"),
+        "{refusal}"
+    );
     let message = refused_with(&refusal);
     assert!(
         message.contains("contradicts the one Corral accepted"),
@@ -655,7 +663,11 @@ fn continuing_a_still_running_session_is_refused() {
         )
         .expect("session.resume answered");
 
-    assert_eq!(error_code(&refusal), Some("invalid_params"), "{refusal}");
+    assert_eq!(
+        error_code(&refusal),
+        Some("session_not_continuable"),
+        "{refusal}"
+    );
     assert!(
         refused_with(&refusal).contains("still running"),
         "{refusal}"
@@ -706,7 +718,11 @@ fn continuing_after_an_unverifiable_end_is_refused_with_the_fact_stated() {
         )
         .expect("session.resume answered");
 
-    assert_eq!(error_code(&refusal), Some("invalid_params"), "{refusal}");
+    assert_eq!(
+        error_code(&refusal),
+        Some("session_not_continuable"),
+        "{refusal}"
+    );
     let message = refused_with(&refusal);
     assert!(
         message.contains("cannot verify that the previous run has exited"),
@@ -746,7 +762,11 @@ fn continuing_a_session_with_no_provider_identity_is_refused() {
         )
         .expect("session.resume answered");
 
-    assert_eq!(error_code(&refusal), Some("invalid_params"), "{refusal}");
+    assert_eq!(
+        error_code(&refusal),
+        Some("session_not_continuable"),
+        "{refusal}"
+    );
     assert!(
         refused_with(&refusal).contains("has not learned which provider session this is"),
         "{refusal}",

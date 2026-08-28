@@ -358,3 +358,26 @@ fn a_relay_that_is_not_executable_is_refused() {
     std::fs::set_permissions(&relay, PermissionsExt::from_mode(0o755)).expect("mode");
     assert_eq!(usable_relay(&relay), Ok(relay));
 }
+
+/// A Run nothing minted a token for is knowable as such, which is what lets
+/// the run lifecycle recorder skip announcing an ending there is nothing to
+/// retire for — every raw `corral new -- <command>` session.
+#[test]
+fn a_run_with_no_token_is_not_held() {
+    let mut tokens = LaunchTokens::new();
+    let held = corral_core::RunId::mint();
+    let never_launched = corral_core::RunId::mint();
+    tokens
+        .mint(LaunchScope {
+            session: corral_core::CorralSessionId::mint(),
+            run: held,
+            provider: KnownProvider::Claude,
+        })
+        .expect("a token");
+
+    assert!(tokens.holds_run(held));
+    assert!(!tokens.holds_run(never_launched));
+
+    tokens.forget_run(held);
+    assert!(!tokens.holds_run(held));
+}

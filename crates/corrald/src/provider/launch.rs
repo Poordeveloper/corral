@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use corral_core::{CorralSessionId, RunId};
 use tracing::{debug, warn};
@@ -125,8 +126,70 @@ impl LaunchTokens {
         self.minted.retain(|_, scope| scope.run != run);
     }
 
+    /// Whether any token still names this Run.
+    ///
+    /// Asked before announcing an ending: a Run that never had one — every raw
+    /// `corral new -- <command>` session — has nothing to retire, and the
+    /// announcement costs a slot in a queue and a bounded wait for it.
+    pub fn holds_run(&self, run: RunId) -> bool {
+        self.minted.values().any(|scope| scope.run == run)
+    }
+
     pub fn outstanding(&self) -> usize {
         self.minted.len()
+    }
+}
+
+/// The token map as the daemon's several owners share it.
+///
+/// One type rather than a bare `Arc<Mutex<_>>` passed around, because the
+/// poisoned-lock rule is a policy and not an incidental unwrap: the map is
+/// live correlation state with no durable consequence, so a holder that
+/// panicked mid-mutation must not stop every later event from being placed.
+/// Two copies of that decision is how they come to differ.
+#[derive(Clone)]
+pub struct SharedLaunchTokens(Arc<Mutex<LaunchTokens>>);
+
+impl SharedLaunchTokens {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(LaunchTokens::new())))
+    }
+
+    pub fn mint(&self, scope: LaunchScope) -> Result<LaunchToken, NoRandomness> {
+        self.held().mint(scope)
+    }
+
+    pub fn resolve(&self, token: &LaunchToken) -> Option<LaunchScope> {
+        self.held().resolve(token)
+    }
+
+    pub fn forget(&self, token: LaunchToken) {
+        self.held().forget(token);
+    }
+
+    pub fn forget_run(&self, run: RunId) {
+        self.held().forget_run(run);
+    }
+
+    pub fn holds_run(&self, run: RunId) -> bool {
+        self.held().holds_run(run)
+    }
+
+    pub fn outstanding(&self) -> usize {
+        self.held().outstanding()
+    }
+
+    fn held(&self) -> MutexGuard<'_, LaunchTokens> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Default for SharedLaunchTokens {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

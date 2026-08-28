@@ -96,6 +96,10 @@ pub(crate) enum Ingest {
 #[derive(Clone)]
 pub struct Deliveries {
     sender: tokio::sync::mpsc::Sender<Ingest>,
+    /// How long announcing a Run's ending may wait for room. Carried rather
+    /// than read from the constant so a test can drive the give-up path
+    /// without spending the real budget on it.
+    retirement_wait: Duration,
 }
 
 impl Deliveries {
@@ -128,21 +132,26 @@ impl Deliveries {
     /// **Called from outside the async runtime, and only from there.** That is
     /// where its one caller lives — `run_lifecycle` is a thread of its own
     /// precisely so nothing on a reaper's path touches the reactor.
-    pub fn run_ended(&self, run: RunId) {
-        let deadline = Instant::now() + RETIREMENT_WAIT;
+    ///
+    /// `false` means the ending did not fit inside the bound and the ordering
+    /// this queue provides is not available for it. The caller retires the
+    /// token itself then: out of order is a lost tail, and never is a token
+    /// that can contest the Session that replaced it.
+    #[must_use]
+    pub fn run_ended(&self, run: RunId) -> bool {
+        let deadline = Instant::now() + self.retirement_wait;
         let mut waiting = Ingest::RunEnded(run);
         loop {
             match self.sender.try_send(waiting) {
-                Ok(()) => return,
+                Ok(()) => return true,
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     // The daemon is on its way out; there is nothing left to
                     // retire a token for.
-                    return;
+                    return true;
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
                     if Instant::now() >= deadline {
-                        warn!(%run, "a run's launch token was not retired: the queue stayed full");
-                        return;
+                        return false;
                     }
                     waiting = returned;
                     std::thread::sleep(BETWEEN_ATTEMPTS);
@@ -159,8 +168,18 @@ impl Deliveries {
 }
 
 pub(crate) fn queue() -> (Deliveries, tokio::sync::mpsc::Receiver<Ingest>) {
+    queue_waiting(RETIREMENT_WAIT)
+}
+
+fn queue_waiting(retirement_wait: Duration) -> (Deliveries, tokio::sync::mpsc::Receiver<Ingest>) {
     let (sender, receiver) = tokio::sync::mpsc::channel(QUEUE);
-    (Deliveries { sender }, receiver)
+    (
+        Deliveries {
+            sender,
+            retirement_wait,
+        },
+        receiver,
+    )
 }
 
 /// Interpret everything the queue carries, one at a time, for as long as the
@@ -284,6 +303,23 @@ async fn apply(
         })
         .unwrap_or(false);
     if unchanged && report.fact != Some(AgentFactKind::SessionStarted) {
+        return Ok(());
+    }
+
+    // A contested Session is the other case that writes nothing, and it is the
+    // one that would otherwise pay most: its identity claim is withdrawn for
+    // good, so no report can ever match it, and the trip above would be made
+    // on every prompt for the rest of its life only to be turned away below.
+    // Live state may answer because this daemon is the one that withdrew the
+    // claim; a restart forgets it and the store answers again.
+    if state
+        .with_runtime(|runtime| runtime.reported.is_contested(session))
+        .unwrap_or(false)
+    {
+        debug!(
+            session = %scope.session,
+            "a provider identity report on an already contested session changes nothing",
+        );
         return Ok(());
     }
 
@@ -492,7 +528,7 @@ async fn contest(
     // recorded: the claim is unsafe either way, and a live view that kept
     // publishing it would be the fail-closed behaviour leaking.
     let session = scope.session;
-    state.with_runtime(|runtime| runtime.reported.withdraw_identity(session));
+    state.with_runtime(|runtime| runtime.reported.contested(session));
     Ok(())
 }
 
