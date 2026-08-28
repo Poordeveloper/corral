@@ -148,15 +148,16 @@ impl SessionOrigin {
 
 /// What one provider hook event says, once the provider adapter has read it.
 ///
-/// Both parts are optional and they are separate questions. An event may name
-/// an identity without carrying a fact worth showing, and a payload this build
-/// cannot make sense of carries neither — asserting nothing rather than
-/// guessing.
+/// There is always a fact: an event this build has no word for is
+/// `Uninterpretable::UnknownEvent`, which asserts nothing — not even the
+/// identity it happens to carry (ADR 0004 D3). The identity is separate and
+/// may be absent, because an event can be true of the launch its token names
+/// while carrying no id Corral can hold.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderReport {
     /// The provider session id the payload names.
     pub identity: Option<ExternalId>,
-    pub fact: Option<AgentFactKind>,
+    pub fact: AgentFactKind,
     /// How the session started, when the event is a start and says so.
     /// Diagnostics; see `SessionOrigin`.
     pub origin: Option<SessionOrigin>,

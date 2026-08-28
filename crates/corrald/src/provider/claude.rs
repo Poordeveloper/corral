@@ -16,6 +16,7 @@ use std::path::Path;
 
 use corral_core::ExternalId;
 use serde_json::{Value, json};
+use tracing::warn;
 
 use super::{AgentFactKind, ProviderReport, SessionOrigin, Uninterpretable};
 
@@ -180,14 +181,24 @@ pub fn interpret(payload: &str) -> Result<ProviderReport, Uninterpretable> {
     // malformed payload: the fact is still true of the launch the token names,
     // and refusing the whole event would lose it over a field Corral does not
     // need to know what happened.
-    let identity = document
-        .get("session_id")
-        .and_then(Value::as_str)
-        .and_then(|id| ExternalId::new(id).ok());
+    // Refused separately from absent, and said out loud. A payload carrying an
+    // id Corral will not hold is a provider doing something this build did not
+    // expect; treating it exactly like a payload that carried none would leave
+    // a session that never binds and never explains why.
+    let identity = match document.get("session_id").and_then(Value::as_str) {
+        None => None,
+        Some(raw) => match ExternalId::new(raw) {
+            Ok(id) => Some(id),
+            Err(refusal) => {
+                warn!(%refusal, "a provider reported an identity Corral cannot hold");
+                None
+            }
+        },
+    };
 
     Ok(ProviderReport {
         identity,
-        fact: Some(fact),
+        fact,
         // Only a start has an origin. The field is read off a start and
         // nowhere else, because `SessionOrigin` means "how this provider
         // session came to be" — Claude Code's `SessionEnd` already carries a

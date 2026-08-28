@@ -91,6 +91,25 @@ pub(crate) enum Ingest {
     RunEnded(RunId),
 }
 
+/// What became of a Run's ending when it was announced.
+///
+/// Three outcomes and not a boolean, because the caller reports the failure to
+/// a person and the two failures are not the same event. A full queue under a
+/// live daemon is a daemon falling behind; a queue that is gone is ordinary on
+/// the way out and is not worth a warning that reads like a fault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Retirement {
+    /// The queue took it, and the ending is ordered behind this Run's events.
+    Taken,
+    /// It did not fit inside the bound. The ordering is lost: events of this
+    /// Run still waiting will resolve to nothing.
+    QueueFull,
+    /// There is no consumer. Ordinary during shutdown, and the same answer
+    /// when an ingest task ended for any other reason — this side cannot tell
+    /// those apart, so it says only what it knows.
+    QueueGone,
+}
+
 /// Where the endpoint puts what it received, and where a Run's ending is
 /// announced.
 #[derive(Clone)]
@@ -133,17 +152,17 @@ impl Deliveries {
     /// where its one caller lives — `run_lifecycle` is a thread of its own
     /// precisely so nothing on a reaper's path touches the reactor.
     ///
-    /// `false` means the ending did not fit inside the bound and the ordering
-    /// this queue provides is not available for it. The caller retires the
-    /// token itself then: out of order is a lost tail, and never is a token
-    /// that can contest the Session that replaced it.
+    /// Anything but `Taken` means the caller retires the token itself: out of
+    /// order is a lost tail, and never is a token that can contest the Session
+    /// that replaced it. Which of the two it is decides whether that is worth
+    /// alarming a reader about, so it is answered rather than flattened.
     #[must_use]
-    pub fn run_ended(&self, run: RunId) -> bool {
+    pub fn run_ended(&self, run: RunId) -> Retirement {
         let deadline = Instant::now() + self.retirement_wait;
         let mut waiting = Ingest::RunEnded(run);
         loop {
             match self.sender.try_send(waiting) {
-                Ok(()) => return true,
+                Ok(()) => return Retirement::Taken,
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     // A closed channel usually means the daemon is on its way
                     // out — but it also means an ingest task that ended for
@@ -152,11 +171,11 @@ impl Deliveries {
                     // every later Run resolving for the rest of a daemon that
                     // is still serving. The caller retires it directly, which
                     // costs nothing on the shutdown reading.
-                    return false;
+                    return Retirement::QueueGone;
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
                     if Instant::now() >= deadline {
-                        return false;
+                        return Retirement::QueueFull;
                     }
                     waiting = returned;
                     std::thread::sleep(BETWEEN_ATTEMPTS);
@@ -279,10 +298,11 @@ async fn apply(
 ) -> Result<(), StateError> {
     let session = scope.session;
     let provider = scope.provider;
-    if let Some(kind) = report.fact {
-        let fact = AgentFact { kind, observed_at };
-        state.with_runtime(|runtime| runtime.reported.reported(session, provider, fact, arrived));
-    }
+    let fact = AgentFact {
+        kind: report.fact,
+        observed_at,
+    };
+    state.with_runtime(|runtime| runtime.reported.reported(session, provider, fact, arrived));
 
     let Some(reported_id) = report.identity.clone() else {
         return Ok(());
@@ -307,7 +327,7 @@ async fn apply(
                 .is_some_and(|held| held.external_id.as_ref() == Some(&reported_id))
         })
         .unwrap_or(false);
-    if unchanged && report.fact != Some(AgentFactKind::SessionStarted) {
+    if unchanged && report.fact != AgentFactKind::SessionStarted {
         return Ok(());
     }
 
@@ -474,7 +494,7 @@ async fn reobserved(
     let external_id = existing.key().external_id().clone();
     state.with_runtime(|runtime| runtime.reported.identified(session, provider, external_id));
 
-    if report.fact != Some(AgentFactKind::SessionStarted) {
+    if report.fact != AgentFactKind::SessionStarted {
         return Ok(());
     }
     let evidence = Evidence::new(

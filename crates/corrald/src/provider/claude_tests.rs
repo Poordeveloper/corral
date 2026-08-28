@@ -26,7 +26,7 @@ fn every_injected_event_normalizes_to_the_fact_it_names() {
         (NOTIFICATION, AgentFactKind::AwaitingInput),
         (SESSION_END, AgentFactKind::SessionEnded),
     ] {
-        assert_eq!(reported(payload).fact, Some(expected));
+        assert_eq!(reported(payload).fact, expected);
     }
 }
 
@@ -63,7 +63,7 @@ fn a_resumed_start_reports_the_same_identity_as_the_first_one() {
 #[test]
 fn an_older_versions_payload_is_read_by_this_build() {
     let report = reported(SESSION_START_OLDER);
-    assert_eq!(report.fact, Some(AgentFactKind::SessionStarted));
+    assert_eq!(report.fact, AgentFactKind::SessionStarted);
     assert_eq!(
         report.identity.as_ref().map(ExternalId::as_str),
         Some("e670c1cf-1b2a-4c33-9d55-0f6a8c1b2d34"),
@@ -77,10 +77,7 @@ fn unknown_payload_fields_are_ignored() {
         "\"hook_event_name\"",
         "\"a_field_from_later\": {\"nested\": [1, 2]}, \"hook_event_name\"",
     );
-    assert_eq!(
-        reported(&extended).fact,
-        Some(AgentFactKind::SessionStarted)
-    );
+    assert_eq!(reported(&extended).fact, AgentFactKind::SessionStarted);
 }
 
 /// Future input: a hook Corral does not inject, or one a later version adds.
@@ -108,7 +105,7 @@ fn a_known_event_without_a_usable_id_still_reports_its_fact() {
         "\"session_id\": \"\"",
     );
     let report = reported(&anonymous);
-    assert_eq!(report.fact, Some(AgentFactKind::TurnEnded));
+    assert_eq!(report.fact, AgentFactKind::TurnEnded);
     assert_eq!(report.identity, None);
 }
 

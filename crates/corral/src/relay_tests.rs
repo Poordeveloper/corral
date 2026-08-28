@@ -54,6 +54,15 @@ fn a_flag_without_its_value_leaves_the_field_empty() {
 
     assert_eq!(read.provider, "");
     assert_eq!(read.token, "");
+
+    // Mid-argv, where the next word is another flag rather than the end. One
+    // missing value must not consume the flag after it and take its value with
+    // it.
+    let read = invocation(arguments(&["hook-relay", "--provider", "--token", "abc"]))
+        .expect("a relay invocation");
+
+    assert_eq!(read.provider, "");
+    assert_eq!(read.token, "abc");
 }
 
 #[test]

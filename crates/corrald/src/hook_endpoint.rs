@@ -185,16 +185,23 @@ fn read_delivery(params: Option<serde_json::Value>) -> Option<Accepted> {
     // relay exits 0 regardless, because fail-open is not conditional on being
     // understood (ADR 0004 D3).
     if delivery.hook_protocol_version != HOOK_PROTOCOL_VERSION {
+        // The shim's own build, because that is what the diagnosis needs: skew
+        // is normal (ADR 0004 D3), and "which binary is speaking a contract
+        // this daemon does not" is the question the field exists to answer.
         warn!(
             claimed = delivery.hook_protocol_version,
             speaks = HOOK_PROTOCOL_VERSION,
+            shim = %delivery.shim_version,
             "a hook delivery stated a contract this build does not speak",
         );
         return None;
     }
 
     let Some(token) = LaunchToken::from_wire(&delivery.launch_token) else {
-        debug!("a hook delivery carried no usable launch token");
+        debug!(
+            shim = %delivery.shim_version,
+            "a hook delivery carried no usable launch token",
+        );
         return None;
     };
 

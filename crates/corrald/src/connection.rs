@@ -189,7 +189,17 @@ async fn bootstrap(
         // could not ask would offer a person Continue against a daemon too old
         // to serve it and report `method_not_found` as if the person had asked
         // for something wrong.
-        capabilities: BTreeSet::from([capability::MANAGED_SESSIONS.to_owned()]),
+        //
+        // And withheld by the same reasoning when this daemon could not bind
+        // its hook endpoint, because then it will refuse every managed launch
+        // for the life of the process. Serving the method is not the question
+        // a capability answers; whether the offer leads anywhere is. The bind
+        // is attempted before the first hello, so the answer is known here.
+        capabilities: if state.hook_endpoint_was_bound() {
+            BTreeSet::from([capability::MANAGED_SESSIONS.to_owned()])
+        } else {
+            BTreeSet::new()
+        },
         compatibility_result: verdict,
     };
 

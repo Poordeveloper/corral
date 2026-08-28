@@ -68,7 +68,7 @@ pub struct Invocation {
 /// Read a hook delivery out of this process's own arguments, or `None` when
 /// this invocation is something else entirely.
 pub fn invocation(arguments: impl IntoIterator<Item = OsString>) -> Option<Invocation> {
-    let mut arguments = arguments.into_iter().skip(1);
+    let mut arguments = arguments.into_iter().skip(1).peekable();
     if arguments.next()? != *RELAY_SUBCOMMAND {
         return None;
     }
@@ -79,7 +79,14 @@ pub fn invocation(arguments: impl IntoIterator<Item = OsString>) -> Option<Invoc
         // refuses what it cannot place, and silence is this program's whole
         // way of failing.
         let mut named = |value: &mut String| {
-            if let Some(next) = arguments.next() {
+            // Peeked, not taken: a word that looks like a flag is not this
+            // flag's value, and swallowing it would make one missing value into
+            // two — the field holding the next flag's name, and that flag's own
+            // value read as a stray word.
+            let is_value = arguments
+                .peek()
+                .is_some_and(|next| !next.to_string_lossy().starts_with("--"));
+            if is_value && let Some(next) = arguments.next() {
                 *value = next.to_string_lossy().into_owned();
             }
         };

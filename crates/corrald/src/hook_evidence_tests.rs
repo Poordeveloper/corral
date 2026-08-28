@@ -43,7 +43,11 @@ fn a_closed_queue_hands_the_retirement_back_rather_than_claiming_it() {
         .join()
         .expect("the announcement returned");
 
-    assert!(!announced, "a closed queue was reported as having taken it");
+    assert_eq!(
+        announced,
+        Retirement::QueueGone,
+        "a closed queue was reported as having taken it",
+    );
 }
 
 /// A queue that will not take the announcement inside its bound says so,
@@ -65,7 +69,11 @@ fn an_announcement_that_will_not_fit_says_so_rather_than_waiting_forever() {
         .join()
         .expect("the announcement returned");
 
-    assert!(!announced, "a jammed queue was reported as having taken it");
+    assert_eq!(
+        announced,
+        Retirement::QueueFull,
+        "a jammed queue was reported as having taken it",
+    );
 }
 
 /// A Run's ending rides the same queue as that Run's events, so it lands
@@ -81,10 +89,11 @@ async fn a_run_ending_arrives_behind_the_events_that_run_delivered() {
     // Announced the way the run lifecycle recorder announces it: from a thread
     // of its own, never from the reactor.
     let announcing = deliveries.clone();
-    assert!(
+    assert_eq!(
         std::thread::spawn(move || announcing.run_ended(run))
             .join()
             .expect("the announcement returned"),
+        Retirement::Taken,
     );
     deliveries.offer(delivered());
 

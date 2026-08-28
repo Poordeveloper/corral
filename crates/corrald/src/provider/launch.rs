@@ -336,9 +336,20 @@ pub fn relay_command(
     token: LaunchToken,
 ) -> Result<String, InjectionFailed> {
     let relay = sibling_relay().map_err(InjectionFailed::RelayUnresolvable)?;
+    // Refused rather than rewritten. A lossy conversion substitutes U+FFFD for
+    // every byte a shell would have needed verbatim, composing a command line
+    // that names a path nothing can execute — the session that looks managed
+    // and can never report, which is exactly what `usable_relay` refuses a
+    // launch over one line above.
+    let relay = relay.to_str().ok_or_else(|| {
+        InjectionFailed::RelayUnresolvable(format!(
+            "{} is not a path this hook configuration can name",
+            relay.display()
+        ))
+    })?;
     Ok(format!(
         "{} {RELAY_SUBCOMMAND} {RELAY_PROVIDER_FLAG} {} {RELAY_TOKEN_FLAG} {}",
-        shell_word(&relay.to_string_lossy()),
+        shell_word(relay),
         provider.as_str(),
         token.to_wire(),
     ))

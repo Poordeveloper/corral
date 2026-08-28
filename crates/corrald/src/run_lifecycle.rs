@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use corral_core::RunEnd;
 use corral_state::{Durability, Refusal, StateError, Store};
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
-use crate::hook_evidence::Deliveries;
+use crate::hook_evidence::{Deliveries, Retirement};
 use crate::provider::{InjectedSettings, SharedLaunchTokens};
 use crate::runtime::{ObservedRuns, RunOccurrence, Weight};
 
@@ -100,21 +100,33 @@ pub fn record_observed_runs(
                 // announcing anyway would spend the queue's wait on a no-op —
                 // on the single thread every durable ending goes through. Raw
                 // `corral new -- <command>` sessions are most of these.
-                if launch_tokens.holds_run(run) && !deliveries.run_ended(run) {
-                    // The announcement did not fit inside its bound. Retiring
-                    // it here loses the ordering the queue was giving it:
-                    // events of this Run still waiting there will resolve to
-                    // nothing and be dropped. That is the far smaller harm — a
-                    // token outliving its Run is what lets a process that
-                    // outlived its episode contest the identity of the one
-                    // that replaced it, and contested is monotonic with no way
-                    // to clear it (ADR 0004 D5, D8).
-                    warn!(
-                        %run,
-                        "a run's launch token was retired out of order: the evidence queue \
-                         would not take the ending",
-                    );
-                    launch_tokens.forget_run(run);
+                if launch_tokens.holds_run(run) {
+                    // Whatever the queue did with it, an unretired token is
+                    // the one outcome not on the table: a token outliving its
+                    // Run is what lets a process that outlived its episode
+                    // contest the identity of the one that replaced it, and
+                    // contested is monotonic with no way to clear it
+                    // (ADR 0004 D5, D8). Retiring it here costs the ordering —
+                    // events of this Run still waiting resolve to nothing —
+                    // which is the far smaller harm.
+                    match deliveries.run_ended(run) {
+                        Retirement::Taken => {}
+                        Retirement::QueueFull => {
+                            warn!(
+                                %run,
+                                "a run's launch token was retired out of order: the evidence \
+                                 queue would not take the ending",
+                            );
+                            launch_tokens.forget_run(run);
+                        }
+                        // Not a fault: this is what the ordinary way out looks
+                        // like from here, and a daemon still serving would
+                        // have logged its own reason for losing the consumer.
+                        Retirement::QueueGone => {
+                            debug!(%run, "a run's launch token was retired without the queue");
+                            launch_tokens.forget_run(run);
+                        }
+                    }
                 }
                 if matches!(end, RunEnd::Exited(_)) {
                     InjectedSettings::remove_for(&launch_dir, run);
