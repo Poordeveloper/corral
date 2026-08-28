@@ -645,6 +645,7 @@ impl Store {
             let binding = Binding::new(BindingId::mint(), session, key, provenance, evidence, at);
             refuse_reserved_namespace(&binding)?;
             refuse_second_control_capable_runtime_binding(transaction, &binding)?;
+            refuse_second_provider_session_binding(transaction, &binding)?;
             Ok(Written::recording(
                 BindingResolution::Created(binding.clone()),
                 vec![SessionEvent::BindingAdded(binding)],
@@ -1350,6 +1351,31 @@ fn refuse_second_control_capable_runtime_binding(
     match existing {
         None => Ok(()),
         Some(existing) => Err(Refusal::ControlCapableRuntimeBindingExists {
+            session: candidate.session(),
+            existing,
+        }
+        .into()),
+    }
+}
+
+/// One Session, one provider identity — owned here rather than left to caller
+/// discipline.
+///
+/// The consumer that serializes hook evidence checks for an existing binding
+/// before establishing one, but a check outside the write is a check with a
+/// window, and it is the only thing standing between a Session and two
+/// identities. The key's own uniqueness answers the other direction — one
+/// identity reaching two Sessions — and says nothing about this one.
+fn refuse_second_provider_session_binding(
+    connection: &Connection,
+    candidate: &Binding,
+) -> Result<(), StateError> {
+    if candidate.kind() != BindingKind::ProviderSession {
+        return Ok(());
+    }
+    match projection::provider_session_binding(connection, candidate.session(), candidate.id())? {
+        None => Ok(()),
+        Some(existing) => Err(Refusal::ProviderSessionBindingExists {
             session: candidate.session(),
             existing,
         }

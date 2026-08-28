@@ -273,6 +273,36 @@ pub(crate) fn control_capable_runtime_binding(
     Ok(None)
 }
 
+/// The provider-session binding a Session already holds, if it holds one.
+///
+/// The uniqueness guard's own question, asked of the store rather than of a
+/// caller. Every assurance counts: a Session's provider identity is one
+/// question with one answer, and a second binding of any strength is the
+/// identity contest ADR 0004 D8 rules on rather than a second fact.
+pub(crate) fn provider_session_binding(
+    connection: &Connection,
+    session: CorralSessionId,
+    excluding: BindingId,
+) -> Result<Option<BindingId>, StateError> {
+    let mut statement = connection.prepare_cached(
+        "SELECT id FROM bindings
+          WHERE session_id = ?1 AND kind = ?2 AND id != ?3
+          LIMIT 1",
+    )?;
+    let mut rows = statement.query_map(
+        params![
+            session.to_string(),
+            binding_kind_token(BindingKind::ProviderSession),
+            excluding.to_string(),
+        ],
+        |row| text(row, 0),
+    )?;
+    match rows.next() {
+        None => Ok(None),
+        Some(row) => Ok(Some(row?.parse().map_err(FatalState::from)?)),
+    }
+}
+
 pub(crate) fn bindings_of(
     connection: &Connection,
     session: CorralSessionId,

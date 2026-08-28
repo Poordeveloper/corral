@@ -1,11 +1,9 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use corral_core::{
-    Command, CommandFingerprint, CommandId, CommandKind, CorralSessionId, OccurrenceTime,
-    ProviderId, RunId,
+    Command, CommandFingerprint, CommandId, CommandKind, CorralSessionId, ProviderId, RunId,
 };
 
 use corral_protocol::method::{
@@ -26,13 +24,12 @@ use tracing::{debug, error, warn};
 use crate::in_flight::{self, Claim, Concluded};
 use crate::lifecycle::{EstablishedGuard, Lifecycle, ShutdownReason};
 use crate::managed_launch::{
-    ResumeRefused, SessionOwnership, abandon_injection, compose_provider_launch, resume_plan,
+    self, Committed, ResumeRefused, SessionOwnership, compose_provider_launch, resume_plan,
 };
 use crate::policy::DaemonPolicy;
 use crate::provider::{self, KnownProvider, ReportedSession};
 use crate::runtime::{
-    AttachGrant, AttachToken, LaunchRequest, ManagedSession, PendingSession, PtyGeometry,
-    TerminalAccess,
+    AttachGrant, AttachToken, LaunchRequest, ManagedSession, PtyGeometry, TerminalAccess,
 };
 use crate::state::{DaemonState, Vouched};
 
@@ -511,23 +508,6 @@ fn encode_session(
     .unwrap_or_else(|_| serde_json::json!({}))
 }
 
-/// Spawn on the blocking pool.
-///
-/// `openpty` plus fork and exec can take a while under memory pressure, and
-/// `LaunchRequest::new` stats the working directory. On the daemon's one
-/// reactor thread that window is one where nothing else is served — the same
-/// cost every other call here goes out of its way to avoid.
-async fn spawn_off_the_reactor(
-    launch: LaunchRequest,
-    geometry: PtyGeometry,
-) -> Result<PendingSession, String> {
-    tokio::task::spawn_blocking(move || {
-        crate::runtime::spawn_session(&launch, geometry).map_err(|error| error.to_string())
-    })
-    .await
-    .unwrap_or_else(|_| Err("the session could not be started".to_owned()))
-}
-
 /// What one `session.new` needs, once the wire has been read.
 struct NewSession {
     command: Command,
@@ -842,96 +822,43 @@ async fn execute_session_new(
         }
     };
 
-    let pending = match spawn_off_the_reactor(launch, geometry).await {
-        Ok(pending) => pending,
-        // The command never ran, so no Run exists to report. Saying otherwise
-        // would record a runtime occurrence that never happened.
-        Err(error) => {
-            abandon_injection(state, injected);
-            return Ok(Concluded::Refused {
-                code: ErrorCode::InvalidParams,
-                message: error,
-            });
+    let committed = managed_launch::spawn_and_commit(
+        state,
+        session,
+        run,
+        launch,
+        geometry,
+        injected,
+        |began, at| {
+            let state = Arc::clone(state);
+            let command = command.clone();
+            async move {
+                state
+                    .start_managed_session(command, session, run, began, at)
+                    .await
+            }
+        },
+    )
+    .await;
+
+    concluded(committed, &command)
+}
+
+/// What a managed launch became, in the words a client is answered with.
+fn concluded(
+    committed: Committed,
+    command: &Command,
+) -> Result<Concluded, corral_state::StateError> {
+    Ok(match committed {
+        Committed::Started { session, run } | Committed::Replayed { session, run } => {
+            Concluded::Accepted { session, run }
         }
-    };
-
-    // A concrete runtime occurrence now exists, so its start may be written —
-    // and must be, before anything that could report its end exists. The
-    // producer of `RunEnded` is created only after this commits (grill Q9).
-    //
-    // Two instants, because they answer different questions: when the runtime
-    // began, which Corral watched, and when Corral accepted the command. ADR
-    // 0002 D6 keeps them apart, and one value used for both would be the
-    // conflation it exists to prevent. The first is the spawn's own, measured
-    // where the process was created rather than here — the gap across a
-    // blocking-pool hop and a reschedule is arbitrary under load, and an
-    // instant measured after the fact is not an authoritative one.
-    let began = pending.began();
-    let started = match state
-        .start_managed_session(
-            command.clone(),
-            session,
-            run,
-            OccurrenceTime::Authoritative(began),
-            SystemTime::now(),
-        )
-        .await
-    {
-        Ok(started) => started,
-        Err(error) => {
-            // The child is running and its Run is not a durable fact. It is
-            // hung up and reaped here rather than left alive and unlistable,
-            // and no ending is reported: with no durable start there is no Run
-            // to end (grill Q9).
-            abandon(pending);
-            abandon_injection(state, injected);
-            return refused_by_store(&command, error);
-        }
-    };
-
-    // Only a receipt this call wrote describes the runtime this call spawned.
-    // A replay here would mean another execution already committed — which the
-    // claim above makes impossible on one daemon, and which must still never
-    // leave a second process running.
-    if !started.executed() {
-        abandon(pending);
-        abandon_injection(state, injected);
-        return Ok(Concluded::Accepted {
-            session: started.session(),
-            run: started.run(),
-        });
-    }
-
-    let handle = pending.serve(session, run, state.observations().clone());
-
-    // The child is already running by now, so the handle must not simply be
-    // dropped if the runtime registry cannot take it: the reader thread holds
-    // another sender, so dropping this one would leave a live process and its
-    // screen running unreachable for the daemon's lifetime.
-    // Held outside the closure so a lock the daemon could not take does not
-    // drop it: the closure would never run and the handle would go with it.
-    let mut orphan = Some(handle);
-    let stored = state.with_runtime(|runtime| {
-        if let Some(handle) = orphan.take() {
-            runtime.sessions.insert(handle);
-        }
-    });
-    if stored.is_none() {
-        if let Some(orphaned) = orphan.take() {
-            // Its ending is still reported and still recorded: the Run is a
-            // durable fact now, and a session Corral gives up on is an episode
-            // that ends rather than one that stays open forever.
-            orphaned.shut_down();
-        }
-        // Not `busy`, which invites a retry: the command has already executed
-        // and its receipt is durable, so a retry would replay this same answer
-        // rather than do anything different. What the caller is told is what
-        // happened — a Run that started and is ending — and the session it
-        // names is the one the log holds.
-        error!(%session, %run, "a managed run could not be registered and was ended");
-    }
-
-    Ok(Concluded::Accepted { session, run })
+        Committed::NotSpawned(message) => Concluded::Refused {
+            code: ErrorCode::InvalidParams,
+            message,
+        },
+        Committed::StoreRefused(error) => return refused_by_store(command, error),
+    })
 }
 
 /// What one `session.resume` needs, once the wire has been read.
@@ -1091,76 +1018,26 @@ async fn execute_session_resume(
     // terminal offering its size — and the first attach reconciles it, exactly
     // as it does for a session started without one.
     let geometry = PtyGeometry::expect_valid(24, 80);
-    let pending = match spawn_off_the_reactor(launch, geometry).await {
-        Ok(pending) => pending,
-        Err(error) => {
-            abandon_injection(state, injected);
-            return Ok(Concluded::Refused {
-                code: ErrorCode::InvalidParams,
-                message: error,
-            });
-        }
-    };
+    let committed = managed_launch::spawn_and_commit(
+        state,
+        session,
+        run,
+        launch,
+        geometry,
+        injected,
+        |began, at| {
+            let state = Arc::clone(state);
+            let command = command.clone();
+            async move {
+                state
+                    .resume_managed_session(command, session, run, began, at)
+                    .await
+            }
+        },
+    )
+    .await;
 
-    let began = pending.began();
-    let started = match state
-        .resume_managed_session(
-            command.clone(),
-            session,
-            run,
-            OccurrenceTime::Authoritative(began),
-            SystemTime::now(),
-        )
-        .await
-    {
-        Ok(started) => started,
-        Err(error) => {
-            abandon(pending);
-            abandon_injection(state, injected);
-            return refused_by_store(&command, error);
-        }
-    };
-
-    if !started.executed() {
-        abandon(pending);
-        abandon_injection(state, injected);
-        return Ok(Concluded::Accepted {
-            session: started.session(),
-            run: started.run(),
-        });
-    }
-
-    let handle = pending.serve(session, run, state.observations().clone());
-    // The prior Run's final screen is superseded by the new Run's live screen:
-    // one Session shows one runtime, and the record it replaces is the episode
-    // that ended (ADR 0007 L1).
-    let mut orphan = Some(handle);
-    let stored = state.with_runtime(|runtime| {
-        if let Some(handle) = orphan.take() {
-            runtime.sessions.insert(handle);
-        }
-    });
-    if stored.is_none() {
-        if let Some(orphaned) = orphan.take() {
-            orphaned.shut_down();
-        }
-        error!(%session, %run, "a resumed run could not be registered and was ended");
-    }
-
-    Ok(Concluded::Accepted { session, run })
-}
-
-/// End a runtime whose Run never became a durable fact.
-///
-/// A plain thread rather than the blocking pool, and deliberately not waited
-/// on. Reaping is the one thing a child can make Corral wait for indefinitely
-/// — a process may ignore a hang-up and never read its terminal — and neither
-/// a client's request nor the daemon's own exit may be held by that. The
-/// blocking pool would hold the exit: dropping the tokio runtime waits for
-/// every blocking task that has started. This is the same shape a served
-/// session's reaper already has.
-fn abandon(pending: PendingSession) {
-    std::thread::spawn(move || pending.abandon());
+    concluded(committed, &command)
 }
 
 /// Turn a store answer into what the client is told, or fail closed.

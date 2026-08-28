@@ -263,6 +263,61 @@ fn a_session_holds_at_most_one_control_capable_runtime_binding() {
     assert_eq!(store.bindings_of(session).expect("readable").len(), 1);
 }
 
+/// A Session has one provider identity, and the store is what enforces it.
+///
+/// Uniqueness on the key answers the other direction — one identity reaching
+/// two Sessions. Nothing but this answers a Session reaching two identities,
+/// which is the state ADR 0004 D8 calls a contest rather than a second fact.
+#[test]
+fn a_session_holds_at_most_one_provider_session_binding() {
+    let mut store = TestStore::new("one-identity");
+    let node = store.node();
+    let (session, _) = managed_session(&mut store, "run-a");
+    let BindingResolution::Created(first) = store
+        .bind(
+            session,
+            key(node, BindingKind::ProviderSession, "sess-1"),
+            Provenance::CorralCreated,
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+            instant(12),
+        )
+        .expect("bound")
+    else {
+        panic!("a new external identity is a new binding");
+    };
+
+    let refusal = store
+        .bind(
+            session,
+            key(node, BindingKind::ProviderSession, "sess-2"),
+            Provenance::CorralCreated,
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+            instant(13),
+        )
+        .expect_err("refused");
+
+    assert!(
+        matches!(
+            refusal,
+            StateError::Refused(Refusal::ProviderSessionBindingExists { existing, .. })
+                if existing == first.id()
+        ),
+        "{refusal}"
+    );
+    // Re-offering the identity it already holds is not a second one.
+    assert!(
+        store
+            .bind(
+                session,
+                key(node, BindingKind::ProviderSession, "sess-1"),
+                Provenance::CorralCreated,
+                evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+                instant(14),
+            )
+            .is_ok()
+    );
+}
+
 /// Confirming a second runtime binding acquires control just as adding one
 /// does, so it meets the same rule.
 #[test]

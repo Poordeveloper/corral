@@ -6,16 +6,179 @@
 //! and whether a continuation may happen at all are one concept with its own
 //! rules, and none of them is about a client being connected.
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 
-use corral_core::{CorralSessionId, NativeResumeEligibility, RunEnd, RunId};
+use corral_core::{CorralSessionId, NativeResumeEligibility, OccurrenceTime, RunEnd, RunId};
+use corral_state::{StartedManagedSession, StateError};
+use tracing::error;
 
 use crate::provider::{
     self, InjectedSettings, InjectionFailed, KnownProvider, LaunchScope, LaunchToken,
 };
-use crate::runtime::{ExecutionState, LaunchRequest};
+use crate::runtime::{ExecutionState, LaunchRequest, PendingSession, PtyGeometry};
 use crate::state::DaemonState;
+
+/// What became of a managed launch, in the vocabulary of what happened rather
+/// than of what a client is told.
+///
+/// The dispatcher maps these onto wire answers; nothing here knows about error
+/// codes. Both `session.new` and `session.resume` come through here, because
+/// the part they share is the part that must never diverge: who kills the
+/// child when the store refuses, and who ends a runtime the registry would not
+/// take.
+pub(crate) enum Committed {
+    /// A Run started, is registered, and is being served.
+    Started {
+        session: CorralSessionId,
+        run: RunId,
+    },
+    /// This command had already executed. Whatever it made is what the caller
+    /// is told about; nothing new is running.
+    Replayed {
+        session: CorralSessionId,
+        run: RunId,
+    },
+    /// Nothing was spawned, so no Run exists to report.
+    NotSpawned(String),
+    /// The child ran and the store would not record it. It has been reaped.
+    StoreRefused(StateError),
+}
+
+/// Spawn a composed launch, commit its Run, and serve it — or leave nothing
+/// behind.
+///
+/// The one copy of the ladder both entry points walk. Every failure past the
+/// spawn has to hang up a child that is already running: a process left alive
+/// with no durable Run is unlistable for the daemon's life, and a second copy
+/// of that reasoning is a place for one of them to be repaired alone.
+pub(crate) async fn spawn_and_commit<Commit, Committing>(
+    state: &Arc<DaemonState>,
+    session: CorralSessionId,
+    run: RunId,
+    launch: LaunchRequest,
+    geometry: PtyGeometry,
+    injected: Option<Injected>,
+    commit: Commit,
+) -> Committed
+where
+    Commit: FnOnce(OccurrenceTime, SystemTime) -> Committing,
+    Committing: Future<Output = Result<StartedManagedSession, StateError>>,
+{
+    let pending = match spawn_off_the_reactor(launch, geometry).await {
+        Ok(pending) => pending,
+        // The command never ran, so no Run exists to report. Saying otherwise
+        // would record a runtime occurrence that never happened.
+        Err(error) => {
+            abandon_injection(state, injected);
+            return Committed::NotSpawned(error);
+        }
+    };
+
+    // A concrete runtime occurrence now exists, so its start may be written —
+    // and must be, before anything that could report its end exists. The
+    // producer of `RunEnded` is created only after this commits (grill Q9).
+    //
+    // Two instants, because they answer different questions: when the runtime
+    // began, which Corral watched, and when Corral accepted the command. ADR
+    // 0002 D6 keeps them apart, and one value used for both would be the
+    // conflation it exists to prevent. The first is the spawn's own, measured
+    // where the process was created rather than here — the gap across a
+    // blocking-pool hop and a reschedule is arbitrary under load, and an
+    // instant measured after the fact is not an authoritative one.
+    let began = pending.began();
+    let started = match commit(OccurrenceTime::Authoritative(began), SystemTime::now()).await {
+        Ok(started) => started,
+        Err(error) => {
+            // The child is running and its Run is not a durable fact. It is
+            // hung up and reaped here rather than left alive and unlistable,
+            // and no ending is reported: with no durable start there is no Run
+            // to end (grill Q9).
+            abandon(pending);
+            abandon_injection(state, injected);
+            return Committed::StoreRefused(error);
+        }
+    };
+
+    // Only a receipt this call wrote describes the runtime this call spawned.
+    // A replay here would mean another execution already committed — which the
+    // claim held by both callers makes impossible on one daemon, and which must
+    // still never leave a second process running.
+    if !started.executed() {
+        abandon(pending);
+        abandon_injection(state, injected);
+        return Committed::Replayed {
+            session: started.session(),
+            run: started.run(),
+        };
+    }
+
+    // For a continuation, the prior Run's final screen is superseded by this
+    // one's live screen: one Session shows one runtime, and the record it
+    // replaces is the episode that ended (ADR 0007 L1).
+    let handle = pending.serve(session, run, state.observations().clone());
+
+    // The child is already running by now, so the handle must not simply be
+    // dropped if the runtime registry cannot take it: the reader thread holds
+    // another sender, so dropping this one would leave a live process and its
+    // screen running unreachable for the daemon's lifetime.
+    // Held outside the closure so a lock the daemon could not take does not
+    // drop it: the closure would never run and the handle would go with it.
+    let mut orphan = Some(handle);
+    let stored = state.with_runtime(|runtime| {
+        if let Some(handle) = orphan.take() {
+            runtime.sessions.insert(handle);
+        }
+    });
+    if stored.is_none() {
+        if let Some(orphaned) = orphan.take() {
+            // Its ending is still reported and still recorded: the Run is a
+            // durable fact now, and a session Corral gives up on is an episode
+            // that ends rather than one that stays open forever.
+            orphaned.shut_down();
+        }
+        // The caller still answers `Started`. Not `busy`, which invites a
+        // retry: the command has already executed and its receipt is durable,
+        // so a retry would replay this same answer rather than do anything
+        // different. What the caller is told is what happened — a Run that
+        // started and is ending — and the session it names is the one the log
+        // holds.
+        error!(%session, %run, "a managed run could not be registered and was ended");
+    }
+
+    Committed::Started { session, run }
+}
+
+/// Spawn on the blocking pool.
+///
+/// `openpty` plus fork and exec can take a while under memory pressure, and
+/// `LaunchRequest::new` stats the working directory. On the daemon's one
+/// reactor thread that window is one where nothing else is served — the same
+/// cost every other call here goes out of its way to avoid.
+async fn spawn_off_the_reactor(
+    launch: LaunchRequest,
+    geometry: PtyGeometry,
+) -> Result<PendingSession, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::runtime::spawn_session(&launch, geometry).map_err(|error| error.to_string())
+    })
+    .await
+    .unwrap_or_else(|_| Err("the session could not be started".to_owned()))
+}
+
+/// End a runtime whose Run never became a durable fact.
+///
+/// A plain thread rather than the blocking pool, and deliberately not waited
+/// on. Reaping is the one thing a child can make Corral wait for indefinitely
+/// — a process may ignore a hang-up and never read its terminal — and neither
+/// a client's request nor the daemon's own exit may be held by that. The
+/// blocking pool would hold the exit: dropping the tokio runtime waits for
+/// every blocking task that has started.
+fn abandon(pending: PendingSession) {
+    std::thread::spawn(move || pending.abandon());
+}
 
 /// Why a Session cannot be continued right now.
 ///

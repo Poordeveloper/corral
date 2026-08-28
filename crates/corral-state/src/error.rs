@@ -139,6 +139,13 @@ pub enum Refusal {
         session: CorralSessionId,
         existing: BindingId,
     },
+    /// The Session already has a provider identity, and this is a different
+    /// one. One Session is one conversation: a second identity is the contest
+    /// ADR 0004 D8 rules on, not a second fact to hold alongside the first.
+    ProviderSessionBindingExists {
+        session: CorralSessionId,
+        existing: BindingId,
+    },
     /// A binding sits wrongly in the reserved `corral` provider namespace.
     /// The namespace records who minted an identity, and a managed runtime
     /// whose provider says otherwise — or a provider identity claiming the
@@ -311,6 +318,10 @@ impl fmt::Display for Refusal {
             Self::ControlCapableRuntimeBindingExists { session, existing } => write!(
                 f,
                 "session {session} already has the control-capable runtime binding {existing}"
+            ),
+            Self::ProviderSessionBindingExists { session, existing } => write!(
+                f,
+                "session {session} already has the provider-session binding {existing}"
             ),
             Self::ReservedProviderNamespace { binding, misuse } => match misuse {
                 ReservedNamespaceMisuse::ManagedRuntimeWithoutIt => write!(
