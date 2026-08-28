@@ -1053,9 +1053,10 @@ async fn execute_session_resume(
             return Ok(Concluded::Refused {
                 // Three answers, because a client does three different things
                 // with them: send it again, ask a different daemon about the
-                // agent, or stop asking. None of them is `invalid_params` —
-                // the parameters were fine, and a client sent looking for a
-                // mistake in its request would not find one.
+                // agent, or read what the Session's own state says. None of
+                // them is `invalid_params` — the parameters were fine, and a
+                // client sent looking for a mistake in its request would not
+                // find one.
                 code: match refused {
                     ResumeRefused::RuntimeUnavailable => ErrorCode::Busy,
                     ResumeRefused::UnknownProvider(_) => ErrorCode::UnknownProvider,

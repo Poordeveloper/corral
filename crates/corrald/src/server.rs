@@ -2,7 +2,7 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
@@ -12,9 +12,6 @@ use crate::connection;
 use crate::lifecycle::{Lifecycle, Phase, ShutdownReason, watch_idle};
 use crate::policy::DaemonPolicy;
 use crate::state::DaemonState;
-
-/// Keeps a failing accept from spinning the CPU while the cause persists.
-const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 
 /// Bind, serve, and return once shutdown has run to completion.
 ///
@@ -93,7 +90,7 @@ pub async fn serve(
                 }
                 Err(source) => {
                     error!(%source, "accept failed");
-                    tokio::time::sleep(ACCEPT_BACKOFF).await;
+                    tokio::time::sleep(crate::policy::ACCEPT_BACKOFF).await;
                 }
             },
         }

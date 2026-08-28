@@ -22,15 +22,28 @@ fn offering_to_a_closed_queue_is_quiet() {
     let (deliveries, receiver) = queue();
     drop(receiver);
     deliveries.offer(delivered());
+}
+
+/// A closed queue is not proof the daemon is leaving.
+///
+/// The receiver is also gone when the ingest task ended for any other reason,
+/// and this thread cannot tell those apart. Reporting the ending as taken
+/// would leave every later token resolving for the rest of a daemon that is
+/// still serving — the state `forget_run` exists to prevent — so the caller is
+/// told to retire it itself, which costs nothing if the daemon really is on
+/// its way out.
+#[test]
+fn a_closed_queue_hands_the_retirement_back_rather_than_claiming_it() {
+    let (deliveries, receiver) = queue();
+    drop(receiver);
+
     // From a thread, because that is where its one caller lives.
     let announcing = deliveries.clone();
     let announced = std::thread::spawn(move || announcing.run_ended(corral_core::RunId::mint()))
         .join()
         .expect("the announcement returned");
-    assert!(
-        announced,
-        "a departing daemon has nothing left to retire a token for",
-    );
+
+    assert!(!announced, "a closed queue was reported as having taken it");
 }
 
 /// A queue that will not take the announcement inside its bound says so,

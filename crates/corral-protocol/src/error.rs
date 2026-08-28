@@ -46,15 +46,16 @@ pub enum ErrorCode {
     /// person asks it for a plain command instead. Matching the daemon's
     /// sentence would make that hint drift with the wording.
     UnknownProvider,
-    /// The Session named cannot be continued, and repeating the request will
-    /// not change that.
+    /// The Session named refuses the continuation, on its own state rather
+    /// than on anything about the request.
     ///
-    /// Its own code for the same reason `command_id_conflict` has one: what a
-    /// client must do about it is the opposite of what `busy` invites. The
-    /// parameters were fine — it is the Session's own state that refuses — so
-    /// `invalid_params` would send a client looking for a mistake in its
-    /// request that is not there. Which state it is stays in the message: a
-    /// person is told, and no client branches on it in this phase.
+    /// Its own code because `invalid_params` would send a client looking for a
+    /// mistake in its request that is not there: the parameters were fine.
+    /// Deliberately not a claim about permanence — one of the states it
+    /// carries is a Run that is still live, which stops being true when that
+    /// process exits, while others (a contested identity) never change in this
+    /// phase. Which state it is stays in the message; a client that must tell
+    /// them apart is what would earn the next code, and nothing does yet.
     SessionNotContinuable,
     Unknown(String),
 }

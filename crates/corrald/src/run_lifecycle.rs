@@ -112,7 +112,7 @@ pub fn record_observed_runs(
                     warn!(
                         %run,
                         "a run's launch token was retired out of order: the evidence queue \
-                         stayed full",
+                         would not take the ending",
                     );
                     launch_tokens.forget_run(run);
                 }

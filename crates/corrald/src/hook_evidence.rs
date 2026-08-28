@@ -20,7 +20,7 @@ use corral_core::{
     Assurance, Binding, BindingKey, BindingKind, Evidence, EvidenceSource, ExternalId,
     IdentityStatus, Provenance, ProviderId, RunId,
 };
-use corral_state::{BindingResolution, Contested, StateError};
+use corral_state::{BindingResolution, Contested, Refusal, StateError};
 use tracing::{debug, info, warn};
 
 use crate::provider::{
@@ -145,9 +145,14 @@ impl Deliveries {
             match self.sender.try_send(waiting) {
                 Ok(()) => return true,
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    // The daemon is on its way out; there is nothing left to
-                    // retire a token for.
-                    return true;
+                    // A closed channel usually means the daemon is on its way
+                    // out — but it also means an ingest task that ended for
+                    // any other reason, and this thread cannot tell them
+                    // apart. Reporting success would leave every token of
+                    // every later Run resolving for the rest of a daemon that
+                    // is still serving. The caller retires it directly, which
+                    // costs nothing on the shutdown reading.
+                    return false;
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
                     if Instant::now() >= deadline {
@@ -306,19 +311,21 @@ async fn apply(
         return Ok(());
     }
 
-    // A contested Session is the other case that writes nothing, and it is the
-    // one that would otherwise pay most: its identity claim is withdrawn for
-    // good, so no report can ever match it, and the trip above would be made
-    // on every prompt for the rest of its life only to be turned away below.
-    // Live state may answer because this daemon is the one that withdrew the
-    // claim; a restart forgets it and the store answers again.
+    // A Session whose identity question is closed is the other case that
+    // writes nothing, and it is the one that would otherwise pay most: its
+    // claim is `None` for good — withdrawn by a contest, or never grantable
+    // because another Session holds the identity — so no report can ever match
+    // it, and the trip above would be made on every prompt for the rest of its
+    // life only to be turned away below. Live state may answer because this
+    // daemon is the one that closed it; a restart forgets it and the store
+    // answers again.
     if state
-        .with_runtime(|runtime| runtime.reported.is_contested(session))
+        .with_runtime(|runtime| runtime.reported.identity_closed(session))
         .unwrap_or(false)
     {
         debug!(
             session = %scope.session,
-            "a provider identity report on an already contested session changes nothing",
+            "a provider identity report on a session whose identity is settled changes nothing",
         );
         return Ok(());
     }
@@ -423,8 +430,20 @@ async fn establish(
         // nothing is guessed: binding uniqueness is what stops one external
         // identity resolving to two Sessions, and the honest outcome is that
         // this Session's identity stays unknown.
+        //
+        // Recorded live, because nothing in this phase unbinds: every later
+        // report from this launch would otherwise cross the blocking pool and
+        // take the store lock to be refused the same way, once per prompt for
+        // the Session's whole life. Only this refusal is durable in that sense
+        // — the others say the store could not take the write now, and a
+        // Session is not written off over a "not now".
         Err(StateError::Refused(refusal)) => {
+            let claimed = matches!(refusal, Refusal::BindingClaimedByAnotherSession { .. });
             warn!(session = %scope.session, %refusal, "a provider identity was not bound");
+            if claimed {
+                let session = scope.session;
+                state.with_runtime(|runtime| runtime.reported.identity_claimed_elsewhere(session));
+            }
             Ok(())
         }
         Err(fatal) => Err(fatal),
@@ -497,6 +516,13 @@ async fn contest(
     let outcome = state
         .contest_binding(existing.id(), reported_id, evidence)
         .await;
+    // Withdrawn only where the log says a contest stands. Live state exists to
+    // agree with the log, and a refusal means the store recorded nothing: the
+    // binding is still Confirmed there, so `session.resume` would go ahead
+    // with an identity the row had stopped showing. That combination — hidden
+    // from the person, still driving control — is worse than either answer on
+    // its own.
+    let withdraw = outcome.is_ok();
     match outcome {
         Ok(Contested::Recorded(binding)) => {
             info!(
@@ -524,11 +550,13 @@ async fn contest(
         }
         Err(fatal) => return Err(fatal),
     }
-    // Withdrawn whether this call recorded the contest or found it already
-    // recorded: the claim is unsafe either way, and a live view that kept
-    // publishing it would be the fail-closed behaviour leaking.
-    let session = scope.session;
-    state.with_runtime(|runtime| runtime.reported.contested(session));
+    // Recorded and already-recorded both withdraw: the claim is unsafe either
+    // way, and a live view that kept publishing it would be the fail-closed
+    // behaviour leaking.
+    if withdraw {
+        let session = scope.session;
+        state.with_runtime(|runtime| runtime.reported.contested(session));
+    }
     Ok(())
 }
 

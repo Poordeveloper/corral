@@ -211,16 +211,27 @@ impl LaunchToken {
     /// `from_wire` stop being each other's inverse, and anything that later
     /// logs or compares the raw form would disagree with what resolution did.
     pub fn from_wire(raw: &str) -> Option<Self> {
-        let lowercase_hex = |byte: u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte);
-        if raw.len() != 32 || !raw.bytes().all(lowercase_hex) {
+        // One pass, so the charset the guard would check and the value it
+        // produces cannot disagree. A second, total loop after a validating
+        // one reads as though it still had failures to handle, which hides
+        // that it does not.
+        let nibble = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            _ => None,
+        };
+        if raw.len() != Self::WIRE_LENGTH {
             return None;
         }
         let mut bytes = [0_u8; 16];
-        for (index, byte) in bytes.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(raw.get(index * 2..index * 2 + 2)?, 16).ok()?;
+        for (byte, pair) in bytes.iter_mut().zip(raw.as_bytes().chunks_exact(2)) {
+            *byte = (nibble(pair[0])? << 4) | nibble(pair[1])?;
         }
         Some(Self(bytes))
     }
+
+    /// The length `to_wire` emits: two lowercase hex digits per byte.
+    const WIRE_LENGTH: usize = 32;
 }
 
 /// Never prints the value. A token in a log is a correlation handle that

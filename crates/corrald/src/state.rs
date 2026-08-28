@@ -455,6 +455,24 @@ impl DaemonState {
         Some(work(&mut runtime))
     }
 
+    /// Record that no hook endpoint is serving, so no managed launch may start.
+    pub fn hook_endpoint_unavailable(&self) {
+        self.hook_endpoint_bound.store(false, Ordering::SeqCst);
+    }
+
+    /// Whether this daemon's hook endpoint was bound at startup.
+    ///
+    /// A startup fact, and named as one. What it rules out is the case worth
+    /// ruling out — a daemon that never had an endpoint at all, into which
+    /// every managed launch would inject hooks that reach nothing. It does not
+    /// rule out an endpoint that stopped being reachable afterwards; the
+    /// realistic form of that is the socket being unlinked, which the accept
+    /// loop never sees an error for, so noticing it needs a probe this phase
+    /// does not have.
+    pub fn hook_endpoint_was_bound(&self) -> bool {
+        self.hook_endpoint_bound.load(Ordering::SeqCst)
+    }
+
     /// Whether the registry has concluded it can no longer vouch for durable
     /// truth.
     ///
@@ -462,16 +480,6 @@ impl DaemonState {
     /// recorded: the conclusion has to survive the task that reached it being
     /// dropped mid-shutdown, or a daemon that stopped over an untrusted store
     /// could still exit as though nothing happened.
-    /// Record that no hook endpoint is serving, so no managed launch may start.
-    pub fn hook_endpoint_unavailable(&self) {
-        self.hook_endpoint_bound.store(false, Ordering::SeqCst);
-    }
-
-    /// Whether a managed launch could be reported on at all.
-    pub fn can_receive_agent_reports(&self) -> bool {
-        self.hook_endpoint_bound.load(Ordering::SeqCst)
-    }
-
     pub fn stopped_vouching(&self) -> bool {
         self.cannot_vouch.load(Ordering::SeqCst)
             // A store that is perfectly healthy and a run lifecycle with a

@@ -14,7 +14,7 @@ use corral_core::{CorralSessionId, NativeResumeEligibility, RunEnd, RunId};
 use crate::provider::{
     self, InjectedSettings, InjectionFailed, KnownProvider, LaunchScope, LaunchToken,
 };
-use crate::runtime::LaunchRequest;
+use crate::runtime::{ExecutionState, LaunchRequest};
 use crate::state::DaemonState;
 
 /// Why a Session cannot be continued right now.
@@ -72,7 +72,25 @@ pub(crate) async fn resume_plan(
 
     let runs = state.runs_of(session).await?;
     if runs.iter().any(|run| run.end().is_none()) {
-        return Ok(Err(ResumeRefused::RunStillLive));
+        // A Run with no recorded end is *running* only where this daemon is
+        // the one running it. Everywhere else nothing supports the claim — a
+        // reaper that never got to write an end leaves the same absence — and
+        // telling a person "this session is still running" from an absent
+        // record is the unknown-means-running inference, in the direction that
+        // reaches them (`AGENTS.md` §Runtime truth).
+        let running_here = state
+            .with_runtime(|runtime| {
+                runtime
+                    .sessions
+                    .get(session)
+                    .is_some_and(|handle| handle.execution_state() == ExecutionState::Running)
+            })
+            .unwrap_or(false);
+        return Ok(Err(if running_here {
+            ResumeRefused::RunStillLive
+        } else {
+            ResumeRefused::EndUnverifiable
+        }));
     }
     // `runs_of` parks a Run whose start the runtime could not state at the end
     // of the list, so its last entry is the most recent episode only while
@@ -89,10 +107,11 @@ pub(crate) async fn resume_plan(
     match runs.last().map(corral_core::Run::end) {
         None => return Ok(Err(ResumeRefused::NoPreviousRun)),
         Some(Some(RunEnd::Exited(_))) => {}
-        // Unreachable given the live check above, and stated rather than
-        // wildcarded so a new end state has to be decided rather than
-        // defaulted.
-        Some(None) => return Ok(Err(ResumeRefused::RunStillLive)),
+        // Unreachable given the check above, which answered every Run without
+        // a recorded end. Stated rather than wildcarded so a new end state has
+        // to be decided rather than defaulted, and answered the way that check
+        // answers when it cannot see the process itself.
+        Some(None) => return Ok(Err(ResumeRefused::EndUnverifiable)),
         Some(Some(RunEnd::Unverifiable)) => return Ok(Err(ResumeRefused::EndUnverifiable)),
     }
 
@@ -211,7 +230,7 @@ pub(crate) async fn compose_provider_launch(
     // continued — the same outcome an unusable relay binary is refused over
     // (`provider::launch::usable_relay`). Raw sessions are unaffected: they
     // never claimed to report.
-    if !state.can_receive_agent_reports() {
+    if !state.hook_endpoint_was_bound() {
         return Err(
             "Corral cannot receive what an agent reports right now, so it will not start a \
              session it could not watch"

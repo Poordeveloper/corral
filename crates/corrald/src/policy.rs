@@ -13,6 +13,14 @@ pub const DEFAULT_PRE_HELLO_DEADLINE: Duration = Duration::from_secs(10);
 /// How long a starting daemon waits for a departing one to release the claim.
 pub const SINGLETON_CLAIM_WAIT: Duration = Duration::from_secs(5);
 
+/// How long an accept loop waits after a failed accept.
+///
+/// One number for both listeners. The canonical socket and the hook endpoint
+/// have the same loop and the same reason for it — keeping a failing accept
+/// from spinning the CPU while the cause persists — and two copies of one
+/// decision is how they come to differ.
+pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
+
 /// Timing the daemon runs under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DaemonPolicy {

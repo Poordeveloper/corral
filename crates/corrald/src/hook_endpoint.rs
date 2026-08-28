@@ -46,9 +46,6 @@ use crate::provider::LaunchToken;
 /// a stuck writer accumulate against a daemon that has agents to watch.
 const DELIVERY_DEADLINE: Duration = Duration::from_secs(2);
 
-/// Keeps a failing accept from spinning the CPU while the cause persists.
-const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
-
 /// Claim the hook endpoint's pathname, before anything can ask for a session
 /// that would report through it.
 ///
@@ -94,7 +91,7 @@ pub async fn serve(
                 }
                 Err(source) => {
                     error!(%source, "the hook endpoint could not accept");
-                    tokio::time::sleep(ACCEPT_BACKOFF).await;
+                    tokio::time::sleep(crate::policy::ACCEPT_BACKOFF).await;
                 }
             },
         }
@@ -193,10 +190,10 @@ fn read_delivery(params: Option<serde_json::Value>) -> Option<Accepted> {
         return None;
     }
 
-    let token = LaunchToken::from_wire(&delivery.launch_token).or_else(|| {
+    let Some(token) = LaunchToken::from_wire(&delivery.launch_token) else {
         debug!("a hook delivery carried no usable launch token");
-        None
-    })?;
+        return None;
+    };
 
     Some(Accepted {
         token,

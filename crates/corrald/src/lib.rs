@@ -108,7 +108,10 @@ fn start() -> Result<ExitCode, StartupError> {
     // Before the endpoint exists, not after: a daemon that answered a hello and
     // then found its registry unusable would already have told a client it can
     // be relied on.
-    paths.ensure_state_dir().map_err(StartupError::Rendezvous)?;
+    // One call: the launch directory sits inside the durable-state tree, and
+    // ensuring it ensures the tree. Asking for both walked and re-checked the
+    // same two directories twice, and gave the ownership question two callers
+    // to drift about.
     paths
         .ensure_launch_dir()
         .map_err(StartupError::Rendezvous)?;
