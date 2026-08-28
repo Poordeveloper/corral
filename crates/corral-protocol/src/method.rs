@@ -1,5 +1,7 @@
 //! The protocol 2 baseline: every method this version serves, and nothing else.
 
+use std::time::{Duration, SystemTime};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -189,6 +191,35 @@ pub struct AgentEvent {
     /// The daemon's clock, because the daemon is what judges freshness. A
     /// client renders age from it and derives nothing else.
     pub at_ms: i64,
+}
+
+impl AgentEvent {
+    /// This event as the wire carries it, or nothing.
+    ///
+    /// A clock far enough out to overflow the field cannot describe an age
+    /// either, and an omitted fact says unknown — which is true — where a
+    /// saturated number would say something false with confidence.
+    pub fn at(kind: AgentEventKind, observed_at: SystemTime) -> Option<Self> {
+        let at_ms = match observed_at.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(since) => i64::try_from(since.as_millis()).ok()?,
+            Err(before) => -i64::try_from(before.duration().as_millis()).ok()?,
+        };
+        Some(Self { kind, at_ms })
+    }
+
+    /// The instant the field names.
+    ///
+    /// The inverse of `at`, and here beside it: a sign convention split across
+    /// an encoder and a decoder in different crates is one that can be changed
+    /// in one of them.
+    pub fn observed_at(&self) -> SystemTime {
+        let magnitude = Duration::from_millis(self.at_ms.unsigned_abs());
+        if self.at_ms < 0 {
+            SystemTime::UNIX_EPOCH - magnitude
+        } else {
+            SystemTime::UNIX_EPOCH + magnitude
+        }
+    }
 }
 
 /// The provider identity Corral currently stands behind for a session.

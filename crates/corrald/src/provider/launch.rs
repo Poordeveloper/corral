@@ -16,14 +16,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use corral_core::{CorralSessionId, RunId};
+use corral_protocol::hook::{RELAY_PROVIDER_FLAG, RELAY_SUBCOMMAND, RELAY_TOKEN_FLAG};
 use tracing::{debug, warn};
 
 use super::KnownProvider;
-
-/// How the relay is invoked from a provider's hook configuration.
-const RELAY_SUBCOMMAND: &str = "hook-relay";
-const RELAY_PROVIDER_FLAG: &str = "--provider";
-const RELAY_TOKEN_FLAG: &str = "--token";
 
 /// The binary the injected hook command line names.
 const CLIENT_BINARY: &str = "corral";

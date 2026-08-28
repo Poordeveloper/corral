@@ -13,7 +13,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use corral_protocol::method::{AgentEventKind, SessionListItem, TerminalAccess};
+use corral_protocol::method::{AgentEvent, AgentEventKind, SessionListItem, TerminalAccess};
 
 /// The main state, spelled as `PRODUCT.md` §4 spells it.
 const UNKNOWN: &str = "Status unknown";
@@ -121,7 +121,7 @@ fn agent_line(item: &SessionListItem, now: SystemTime) -> Option<String> {
     Some(format!(
         "{} reported {reported} · {} ago",
         product(&provider.name),
-        age(event.at_ms, now),
+        age(event, now),
     ))
 }
 
@@ -163,13 +163,10 @@ fn product(name: &str) -> String {
 /// A clock that puts the report in the future reads as no time at all rather
 /// than as a negative age: the two clocks disagree, which says nothing about
 /// the fact.
-fn age(at_ms: i64, now: SystemTime) -> String {
-    let reported = if at_ms < 0 {
-        SystemTime::UNIX_EPOCH - Duration::from_millis(at_ms.unsigned_abs())
-    } else {
-        SystemTime::UNIX_EPOCH + Duration::from_millis(at_ms.unsigned_abs())
-    };
-    let elapsed = now.duration_since(reported).unwrap_or(Duration::ZERO);
+fn age(event: &AgentEvent, now: SystemTime) -> String {
+    let elapsed = now
+        .duration_since(event.observed_at())
+        .unwrap_or(Duration::ZERO);
     let seconds = elapsed.as_secs();
     match seconds {
         ..60 => format!("{seconds}s"),

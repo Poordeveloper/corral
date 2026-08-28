@@ -166,9 +166,15 @@ pub fn launch_file_for(account: &TestAccount, run: &str) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
-/// The hook endpoint's pathname, as the daemon derives it.
+/// The hook endpoint's pathname, by the daemon's own rule.
+///
+/// Asked of `corral-rendezvous` rather than spelled here: a literal would let
+/// the layout move under a test that kept passing against the old pathname.
 pub fn hook_socket(account: &TestAccount) -> PathBuf {
-    account.corral_root().join("run/hook.sock")
+    corral_rendezvous::RendezvousPaths::for_corral_root(account.corral_root())
+        .expect("a usable rendezvous layout")
+        .hook_socket()
+        .to_path_buf()
 }
 
 /// One session out of a `session.list` answer, by id.

@@ -1,3 +1,5 @@
+use std::time::{Duration, SystemTime};
+
 use super::*;
 use crate::ErrorCode;
 use serde_json::json;
@@ -364,4 +366,28 @@ fn the_unknown_provider_code_survives_the_wire() {
         serde_json::from_value::<ErrorCode>(encoded).expect("decode"),
         ErrorCode::UnknownProvider,
     );
+}
+
+/// The encoder and the decoder of `at_ms` are one owner, so the sign
+/// convention cannot be changed in half of it.
+#[test]
+fn an_agent_event_survives_its_own_round_trip() {
+    for at in [
+        SystemTime::UNIX_EPOCH,
+        SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_000_000),
+        SystemTime::UNIX_EPOCH - Duration::from_millis(86_400_000),
+    ] {
+        let event = AgentEvent::at(AgentEventKind::TurnEnded, at).expect("a representable instant");
+
+        assert_eq!(event.observed_at(), at, "{at:?}");
+    }
+}
+
+/// A clock too far out to describe an age omits the fact rather than
+/// saturating into a confident lie.
+#[test]
+fn an_unrepresentable_instant_produces_no_event() {
+    let far = SystemTime::UNIX_EPOCH + Duration::from_secs(u64::MAX / 1_000);
+
+    assert!(AgentEvent::at(AgentEventKind::TurnEnded, far).is_none());
 }

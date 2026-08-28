@@ -496,28 +496,9 @@ fn encode_session(
         }),
         agent_event: reported
             .and_then(|reported| reported.latest)
-            .and_then(|fact| {
-                Some(AgentEvent {
-                    kind: fact.kind.as_wire(),
-                    at_ms: unix_millis(fact.observed_at)?,
-                })
-            }),
+            .and_then(|fact| AgentEvent::at(fact.kind.as_wire(), fact.observed_at)),
     })
     .unwrap_or_else(|_| serde_json::json!({}))
-}
-
-/// An instant as the wire carries it, or nothing.
-///
-/// A clock far enough out to overflow this cannot describe an age either, and
-/// a row that omits the fact says unknown — which is true — where a saturated
-/// number would say something false with confidence.
-fn unix_millis(at: SystemTime) -> Option<i64> {
-    match at.duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(since) => i64::try_from(since.as_millis()).ok(),
-        Err(before) => i64::try_from(before.duration().as_millis())
-            .ok()
-            .map(|millis| -millis),
-    }
 }
 
 /// Spawn on the blocking pool.

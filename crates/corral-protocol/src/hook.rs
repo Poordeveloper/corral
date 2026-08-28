@@ -25,6 +25,18 @@ pub const HOOK_PROTOCOL_VERSION: u32 = 1;
 /// The one method the hook endpoint serves.
 pub const HOOK_DELIVER: &str = "hook.deliver";
 
+/// How an injected hook configuration invokes the relay.
+///
+/// One contract with two speakers: `corrald` writes this command line into a
+/// provider's settings, and the relay recognises itself by it. Skew is the
+/// normal case (ADR 0004 D3) — a settings file written at one launch invokes
+/// whatever binary is installed when an event fires — so a private copy on
+/// either side is a contract that can drift without anything failing to
+/// compile.
+pub const RELAY_SUBCOMMAND: &str = "hook-relay";
+pub const RELAY_PROVIDER_FLAG: &str = "--provider";
+pub const RELAY_TOKEN_FLAG: &str = "--token";
+
 /// The largest provider payload this channel carries.
 ///
 /// A payload past it is dropped **whole** and marked, never truncated: a

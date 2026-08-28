@@ -28,7 +28,10 @@ use std::time::{Duration, Instant};
 
 use std::ffi::OsString;
 
-use corral_protocol::hook::{HOOK_DELIVER, HookDelivery, MAX_HOOK_PAYLOAD_BYTES};
+use corral_protocol::hook::{
+    HOOK_DELIVER, HookDelivery, MAX_HOOK_PAYLOAD_BYTES, RELAY_PROVIDER_FLAG, RELAY_SUBCOMMAND,
+    RELAY_TOKEN_FLAG,
+};
 use corral_protocol::{Frame, MAX_FRAME_BYTES, RequestId, encode_frame};
 use corral_rendezvous::RendezvousPaths;
 
@@ -41,11 +44,6 @@ use corral_rendezvous::RendezvousPaths;
 /// calling pattern rather than a budget this program was granted
 /// (ADR 0004 D4).
 pub const INTERFERENCE_BUDGET: Duration = Duration::from_millis(50);
-
-/// The subcommand an injected hook configuration names.
-const SUBCOMMAND: &str = "hook-relay";
-const PROVIDER_FLAG: &str = "--provider";
-const TOKEN_FLAG: &str = "--token";
 
 /// What this invocation is, if it is a hook delivery at all.
 ///
@@ -71,7 +69,7 @@ pub struct Invocation {
 /// this invocation is something else entirely.
 pub fn invocation(arguments: impl IntoIterator<Item = OsString>) -> Option<Invocation> {
     let mut arguments = arguments.into_iter().skip(1);
-    if arguments.next()? != *SUBCOMMAND {
+    if arguments.next()? != *RELAY_SUBCOMMAND {
         return None;
     }
     let mut provider = String::new();
@@ -86,8 +84,8 @@ pub fn invocation(arguments: impl IntoIterator<Item = OsString>) -> Option<Invoc
             }
         };
         match argument.to_string_lossy().as_ref() {
-            PROVIDER_FLAG => named(&mut provider),
-            TOKEN_FLAG => named(&mut token),
+            RELAY_PROVIDER_FLAG => named(&mut provider),
+            RELAY_TOKEN_FLAG => named(&mut token),
             _ => {}
         }
     }
