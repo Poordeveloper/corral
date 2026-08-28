@@ -140,17 +140,20 @@ async fn take_one(stream: UnixStream, deliveries: Deliveries) {
     // when the first one steps.
     let observed_at = SystemTime::now();
     let arrived = Instant::now();
-    let accepted = read_delivery(request.params);
 
-    // The receipt goes back whether or not the payload was usable. It says
-    // "received" and nothing more, and a shim that waited for a verdict would
-    // be a shim whose provider waits for one.
+    // The receipt goes back before the payload is interpreted, and whether or
+    // not it turns out usable: it says "received" and nothing more. The shim's
+    // wait ends at this line, so the decode below is spent on daemon time, not
+    // inside the interference budget — and a shim that waited for a verdict
+    // would be a shim whose provider waits for one.
     if let Err(source) = writer
         .write_frame(&Frame::result(request.id, HookAck::wire_value()))
         .await
     {
         debug!(%source, "a hook delivery could not be acknowledged");
     }
+
+    let accepted = read_delivery(request.params);
 
     if let Some(delivered) = accepted.map(|delivery| Delivered {
         token: delivery.token,

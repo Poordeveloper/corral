@@ -350,6 +350,54 @@ discipline).
   binding — a future explicitly accepted decision (grill R2 Q1).
 - Provider trait extraction from two real implementations — PR6 (grill Q5).
 
+Review round 8 (confirmed, deferred — none blocks the merged behavior):
+
+- `shim_version` is set by every relay and dropped undecoded by the
+  endpoint's `Accepted`; the skew diagnosis its doc promises never reaches
+  a log line.
+- The epoch-millis conversion behind `AgentEvent.at_ms` (negative branch
+  included) is hand-rolled in three places — `connection.rs` encoding,
+  `presentation.rs` decoding, `corral-state/encoding.rs` — and needs one
+  owner.
+- `execute_session_new` / `execute_session_resume` duplicate the
+  spawn-off-the-reactor / abandon / replay / orphan-handle ladder nearly
+  verbatim (~60+ lines of lifecycle-critical code); extract the shared
+  step so a fix cannot land in one copy.
+- `Store::bind` refuses a second control-capable runtime binding but will
+  record a second ProviderSession binding for one Session; at-most-one
+  provider identity per Session is currently consumer discipline and the
+  store should own it.
+- The relay invocation contract (`hook-relay`, `--provider`, `--token`) is
+  spelled independently in `provider/launch.rs` and `corral/relay.rs` with
+  no shared definition.
+- `ProviderReport.fact` is `Option` but no path produces `None`; make it
+  required or produce the case.
+- `deliveries.run_ended`'s `bool` makes the retirement warn in
+  `run_lifecycle.rs` narrate a full queue when the channel may simply be
+  closed.
+- `shell_word` lossy-rewrites a non-UTF-8 relay path into the injected
+  settings, producing a launch whose relay silently never fires; the
+  launch should be refused instead.
+- The relay's flag parse accepts non-canonical spellings its writer never
+  produces (latent until a skewed writer exists).
+- The hello advertises `managed-sessions` statically even when the hook
+  endpoint was never bound, so a client offers a launch the daemon will
+  refuse; the capability could tell the truth the refusal already tells.
+- `launch::remove_for` unlinks synchronously on the single-threaded
+  reactor from async launch/abandon paths.
+- The test harness re-derives the hook socket pathname by literal instead
+  of asking `corral-rendezvous`.
+- `corral new claude -- --resume <id>` is admitted by argument vetting and
+  reliably manufactures a claimed-elsewhere or contested identity; decide
+  whether it deserves the `--settings` treatment.
+- A provider-reported `session_id` Corral cannot hold collapses to `None`
+  identity and is treated as a fact-only report rather than diagnosed as
+  malformed.
+- (Plausible, unverified) the hook ack write sits outside
+  `DELIVERY_DEADLINE`, so a shim that stops reading can park a `take_one`
+  task; and the mock provider resolves the first `--settings` where real
+  Claude takes the last.
+
 ## Plan size justification
 
 One provider integration is one coherent scope. The channel without a

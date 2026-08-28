@@ -12,8 +12,7 @@ fn known_codes_round_trip_through_their_wire_spelling() {
 /// Every code this build spells, with the enum itself as the anchor.
 ///
 /// The match is why this exists: adding a variant stops it compiling, so a new
-/// code cannot be minted without being round-tripped. A hand-written list is
-/// how `unknown_provider` came to ship without this covering it.
+/// code cannot be minted without being round-tripped.
 fn every_known_code() -> Vec<ErrorCode> {
     let codes = vec![
         ErrorCode::MethodNotFound,

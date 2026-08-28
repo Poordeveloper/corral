@@ -294,6 +294,21 @@ fn session_resume_names_only_a_command_and_a_session() {
     assert_eq!(encoded, json!({"command_id": "c1", "session_id": "s1"}),);
 }
 
+/// Future input: a `session.resume` from a newer peer decodes past fields
+/// this build has not learned, on both sides of the exchange.
+#[test]
+fn session_resume_decodes_past_unknown_fields() {
+    let params = json!({"command_id": "c1", "session_id": "s1", "detach": true});
+    let decoded: SessionResumeParams = serde_json::from_value(params).expect("params decode");
+    assert_eq!(decoded.command_id, "c1");
+    assert_eq!(decoded.session_id, "s1");
+
+    let result = json!({"session_id": "s1", "run_id": "r2", "resumed_at_ms": 0});
+    let decoded: SessionResumeResult = serde_json::from_value(result).expect("result decode");
+    assert_eq!(decoded.session_id, "s1");
+    assert_eq!(decoded.run_id, "r2");
+}
+
 /// A secondary fact may not take the row down. The row's promises are its
 /// identity, its label, and its execution state; a provider fact is decoration
 /// beside them, so a shape this build cannot read degrades that fact to

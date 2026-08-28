@@ -6,9 +6,7 @@ use corral_core::NativeResumeEligibility;
 ///
 /// The match below is why this exists: adding an arm to `ResumeRefused` stops
 /// it compiling, so a new refusal has to be named here before the tests that
-/// police what refusals say can run at all. Two hand-written lists is how the
-/// last one slipped past them — `EpisodeOrderUnknown` shipped a second
-/// sentence saying "run" while the test that forbids exactly that passed.
+/// police what refusals say can run at all.
 fn every_refusal() -> Vec<ResumeRefused> {
     let refusals = vec![
         ResumeRefused::NotThisDaemon,

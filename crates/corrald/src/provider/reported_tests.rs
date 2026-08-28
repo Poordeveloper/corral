@@ -267,3 +267,32 @@ fn a_clock_that_steps_backwards_does_not_freeze_a_row() {
         "the stamp is still the fact's own, however it compares",
     );
 }
+
+/// A refused identity settles only itself: the agent can mint a fresh one
+/// (`/clear` does), and a report of one must still reach the store.
+#[test]
+fn a_refused_identity_settles_only_itself() {
+    let mut reported = ReportedSessions::new();
+    let session = CorralSessionId::mint();
+    reported.launched(session, KnownProvider::Claude);
+
+    reported.identity_claimed_elsewhere(session, id("foreign"));
+
+    assert!(reported.identity_closed(session, &id("foreign")));
+    assert!(!reported.identity_closed(session, &id("minted-after")));
+}
+
+/// A contest closes the question whole, and a refusal arriving after it does
+/// not weaken that to one id.
+#[test]
+fn a_contest_is_not_weakened_to_one_identity() {
+    let mut reported = ReportedSessions::new();
+    let session = CorralSessionId::mint();
+    reported.launched(session, KnownProvider::Claude);
+    reported.contested(session);
+
+    reported.identity_claimed_elsewhere(session, id("foreign"));
+
+    assert!(reported.identity_closed(session, &id("foreign")));
+    assert!(reported.identity_closed(session, &id("any-other")));
+}

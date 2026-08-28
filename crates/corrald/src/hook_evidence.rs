@@ -46,9 +46,9 @@ const QUEUE: usize = 256;
 /// This is the recorder's wait, spent in series before it records anything, so
 /// `run_lifecycle::LONGEST_OCCURRENCE` adds it to that thread's own budget and
 /// the shutdown grace is derived from the sum. Deriving it *from*
-/// `LONGEST_RECORD` instead — as this once did — made the recorder's worst
-/// case twice the bound the shutdown grace was computed from, which is exactly
-/// the falsified derivation the grace exists to prevent.
+/// `LONGEST_RECORD` would make the recorder's worst case twice the bound the
+/// shutdown grace was computed from — exactly the falsified derivation the
+/// grace exists to prevent.
 ///
 /// Reaching it costs a token that resolves to a finished Run until the daemon
 /// exits, which is why it is said out loud rather than shrugged off — but a
@@ -311,16 +311,17 @@ async fn apply(
         return Ok(());
     }
 
-    // A Session whose identity question is closed is the other case that
-    // writes nothing, and it is the one that would otherwise pay most: its
-    // claim is `None` for good — withdrawn by a contest, or never grantable
-    // because another Session holds the identity — so no report can ever match
-    // it, and the trip above would be made on every prompt for the rest of its
-    // life only to be turned away below. Live state may answer because this
-    // daemon is the one that closed it; a restart forgets it and the store
-    // answers again.
+    // A Session whose identity question is closed against this very report is
+    // the other case that writes nothing, and it is the one that would
+    // otherwise pay most: a contest withdraws the claim for good, and an id
+    // another Session holds is never granted to this one — so the same report
+    // would make the trip above on every prompt for the rest of the launch's
+    // life only to be turned away below. Against this report, not any report:
+    // a fresh identity the agent minted after the refusal deserves the store's
+    // answer. Live state may answer because this daemon is the one that closed
+    // it; a restart forgets it and the store answers again.
     if state
-        .with_runtime(|runtime| runtime.reported.identity_closed(session))
+        .with_runtime(|runtime| runtime.reported.identity_closed(session, &reported_id))
         .unwrap_or(false)
     {
         debug!(
@@ -442,7 +443,11 @@ async fn establish(
             warn!(session = %scope.session, %refusal, "a provider identity was not bound");
             if claimed {
                 let session = scope.session;
-                state.with_runtime(|runtime| runtime.reported.identity_claimed_elsewhere(session));
+                state.with_runtime(|runtime| {
+                    runtime
+                        .reported
+                        .identity_claimed_elsewhere(session, reported_id)
+                });
             }
             Ok(())
         }

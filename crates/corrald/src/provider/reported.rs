@@ -40,17 +40,14 @@ pub struct ReportedSession {
     /// Superseded rather than accumulated: a newer fact retires the older one,
     /// so an `awaiting_input` is not still on screen after a turn started.
     pub latest: Option<AgentFact>,
-    /// Whether any further identity report about this Session can change
-    /// anything.
+    /// How far this Session's identity question is closed.
     ///
-    /// Two ways to arrive, and both are durable: Corral withdrew the claim as
-    /// unsafe (a contest), or the identity reported belongs to another Session
-    /// and this one may never take it. Held here so the ingestion step can
-    /// answer "this changes nothing" without a store hop — either session goes
-    /// on firing hooks for its whole life with an identity claim of `None`, so
-    /// without this each is exactly the session that pays the trip on every
-    /// prompt, to be turned away by the same verdict each time.
-    identity_closed: bool,
+    /// Held here so the ingestion step can answer "this changes nothing"
+    /// without a store hop: a session whose question is closed goes on firing
+    /// hooks for its whole life with an identity claim of `None`, so without
+    /// this it is exactly the session that pays the trip on every prompt, to
+    /// be turned away by the same verdict each time.
+    closure: IdentityClosure,
     /// When that fact reached this daemon, on the monotonic clock.
     ///
     /// Supersession is decided on this and not on `latest.observed_at`. The
@@ -61,12 +58,26 @@ pub struct ReportedSession {
     arrived: Option<Instant>,
 }
 
+/// How closed a Session's identity question is, and against what.
+///
+/// A contest closes it whole: Corral withdrew the claim as unsafe, and no
+/// later report of any id reopens it (ADR 0004 D8). An identity another
+/// Session holds closes exactly that id — the agent can still mint a fresh
+/// one (`/clear` does), and a report of one deserves the store's answer, not
+/// this daemon's memory of a different refusal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum IdentityClosure {
+    Open,
+    Contested,
+    ClaimedElsewhere(ExternalId),
+}
+
 impl ReportedSession {
     fn new(provider: KnownProvider) -> Self {
         Self {
             provider,
             external_id: None,
-            identity_closed: false,
+            closure: IdentityClosure::Open,
             latest: None,
             arrived: None,
         }
@@ -127,7 +138,7 @@ impl ReportedSessions {
     pub fn contested(&mut self, session: CorralSessionId) {
         if let Some(reported) = self.sessions.get_mut(&session) {
             reported.external_id = None;
-            reported.identity_closed = true;
+            reported.closure = IdentityClosure::Contested;
         }
     }
 
@@ -136,23 +147,30 @@ impl ReportedSessions {
     /// No claim to withdraw — this Session never had one — and none to make:
     /// binding uniqueness is what stops one external identity resolving to two
     /// Sessions, and nothing in this phase unbinds. What is recorded is that
-    /// asking again will not answer differently.
-    pub fn identity_claimed_elsewhere(&mut self, session: CorralSessionId) {
-        if let Some(reported) = self.sessions.get_mut(&session) {
-            reported.identity_closed = true;
+    /// asking about *this id* again will not answer differently. Only this id:
+    /// the refusal says nothing about an identity the agent has not minted
+    /// yet, and a contest already standing is not weakened to it.
+    pub fn identity_claimed_elsewhere(&mut self, session: CorralSessionId, refused: ExternalId) {
+        if let Some(reported) = self.sessions.get_mut(&session)
+            && !matches!(reported.closure, IdentityClosure::Contested)
+        {
+            reported.closure = IdentityClosure::ClaimedElsewhere(refused);
         }
     }
 
-    /// Whether any further identity report about this Session can change
-    /// anything.
+    /// Whether a report of exactly this identity can change anything.
     ///
     /// `false` for a Session this daemon holds nothing about, which is the
     /// honest answer: live state is lost on restart, and the store is the
     /// authority every path falls back to.
-    pub fn identity_closed(&self, session: CorralSessionId) -> bool {
+    pub fn identity_closed(&self, session: CorralSessionId, reported: &ExternalId) -> bool {
         self.sessions
             .get(&session)
-            .is_some_and(|reported| reported.identity_closed)
+            .is_some_and(|held| match &held.closure {
+                IdentityClosure::Open => false,
+                IdentityClosure::Contested => true,
+                IdentityClosure::ClaimedElsewhere(refused) => refused == reported,
+            })
     }
 
     /// Record the latest fact an agent reported about itself.
