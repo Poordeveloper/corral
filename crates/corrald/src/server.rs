@@ -54,19 +54,27 @@ pub async fn serve(
     if let Some(incoming) = state.take_deliveries() {
         tokio::spawn(crate::hook_evidence::ingest(Arc::clone(&state), incoming));
     }
-    // A hook endpoint that will not bind costs awareness, never the daemon: the
-    // sessions this process owns keep running, and every relay that cannot
-    // reach it fails open in milliseconds.
+    // A hook endpoint that will not bind costs awareness, never the daemon:
+    // the sessions this process owns keep running, and every relay that cannot
+    // reach it fails open in milliseconds. What it does cost is the ability to
+    // start a *managed* session — one whose hooks deliver here — so the answer
+    // is recorded rather than only logged, and bound here rather than inside
+    // the task so no client can ask before it is known.
     let hook_socket = hook_socket.to_path_buf();
-    let deliveries = state.deliveries();
-    let hook_shutdown = lifecycle.subscribe();
-    tokio::spawn(async move {
-        if let Err(source) =
-            crate::hook_endpoint::serve(&hook_socket, deliveries, hook_shutdown).await
-        {
-            error!(%source, endpoint = %hook_socket.display(), "the hook endpoint could not serve");
+    match crate::hook_endpoint::bind(&hook_socket) {
+        Ok(hook_listener) => {
+            let deliveries = state.deliveries();
+            let hook_shutdown = lifecycle.subscribe();
+            tokio::spawn(async move {
+                crate::hook_endpoint::serve(&hook_socket, hook_listener, deliveries, hook_shutdown)
+                    .await;
+            });
         }
-    });
+        Err(source) => {
+            error!(%source, endpoint = %hook_socket.display(), "the hook endpoint could not serve");
+            state.hook_endpoint_unavailable();
+        }
+    }
 
     info!(endpoint = %socket.display(), "corrald is serving");
 

@@ -49,20 +49,41 @@ const DELIVERY_DEADLINE: Duration = Duration::from_secs(2);
 /// Keeps a failing accept from spinning the CPU while the cause persists.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 
-/// Serve the hook endpoint until shutdown is committed.
-pub async fn serve(
-    socket: &Path,
-    deliveries: Deliveries,
-    mut shutdown: watch::Receiver<bool>,
-) -> io::Result<()> {
+/// Claim the hook endpoint's pathname, before anything can ask for a session
+/// that would report through it.
+///
+/// Separate from serving because the answer has to be known synchronously. A
+/// managed launch injects hooks that deliver here; if this fails, that session
+/// looks managed and can never report, which is the state
+/// `provider::launch::usable_relay` already refuses a launch over. A bind
+/// discovered inside a spawned task would be discovered after the first client
+/// had already asked.
+pub fn bind(socket: &Path) -> io::Result<UnixListener> {
     // Only this daemon owns the pathname. A leftover from a process that died
     // without unlinking would otherwise make the bind fail, and the singleton
     // claim is already what proves no other daemon is serving.
     let _ = std::fs::remove_file(socket);
     let listener = UnixListener::bind(socket)?;
-    std::fs::set_permissions(socket, PermissionsExt::from_mode(0o600))?;
+    // The run directory is already user-private; the socket says so too rather
+    // than inheriting whatever the umask happened to be. A failure here takes
+    // the pathname with it: a node nothing will ever serve reads to anything
+    // watching the path as a daemon that is present.
+    if let Err(source) = std::fs::set_permissions(socket, PermissionsExt::from_mode(0o600)) {
+        drop(listener);
+        let _ = std::fs::remove_file(socket);
+        return Err(source);
+    }
     info!(endpoint = %socket.display(), "the hook endpoint is serving");
+    Ok(listener)
+}
 
+/// Serve a bound hook endpoint until shutdown is committed.
+pub async fn serve(
+    socket: &Path,
+    listener: UnixListener,
+    deliveries: Deliveries,
+    mut shutdown: watch::Receiver<bool>,
+) {
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
@@ -85,7 +106,6 @@ pub async fn serve(
     // exit tidy rather than what makes it correct.
     drop(listener);
     let _ = std::fs::remove_file(socket);
-    Ok(())
 }
 
 /// One connection carries one message and one ack, and then it is over.

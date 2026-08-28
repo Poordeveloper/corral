@@ -61,6 +61,15 @@ pub struct DaemonState {
     /// The store latches its own conclusions; the exit status reads both.
     cannot_vouch: AtomicBool,
 
+    /// Whether this daemon can receive what a managed agent reports.
+    ///
+    /// Set once, at startup, and only to `false`: the endpoint is bound before
+    /// anything can ask for a session, so a client never sees the answer
+    /// change under it. A daemon that could not bind still serves everything
+    /// else — what it may not do is start a session whose whole point is to
+    /// report through an endpoint that is not there.
+    hook_endpoint_bound: AtomicBool,
+
     /// Where the runtime reports what it saw, and the accounting that says
     /// whether all of it was recorded.
     observations: RunObservations,
@@ -144,6 +153,7 @@ impl DaemonState {
         Ok(Self {
             store,
             cannot_vouch: AtomicBool::new(false),
+            hook_endpoint_bound: AtomicBool::new(true),
             observations,
             launch_tokens,
             node,
@@ -452,6 +462,16 @@ impl DaemonState {
     /// recorded: the conclusion has to survive the task that reached it being
     /// dropped mid-shutdown, or a daemon that stopped over an untrusted store
     /// could still exit as though nothing happened.
+    /// Record that no hook endpoint is serving, so no managed launch may start.
+    pub fn hook_endpoint_unavailable(&self) {
+        self.hook_endpoint_bound.store(false, Ordering::SeqCst);
+    }
+
+    /// Whether a managed launch could be reported on at all.
+    pub fn can_receive_agent_reports(&self) -> bool {
+        self.hook_endpoint_bound.load(Ordering::SeqCst)
+    }
+
     pub fn stopped_vouching(&self) -> bool {
         self.cannot_vouch.load(Ordering::SeqCst)
             // A store that is perfectly healthy and a run lifecycle with a

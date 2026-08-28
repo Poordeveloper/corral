@@ -116,8 +116,21 @@ pub fn deliver(token: &str, provider: &str, started: Instant) -> ExitCode {
     ) else {
         return fail_open;
     };
-    let Some(frame) = framed(&delivery).or_else(|| framed(&delivery.without_payload())) else {
+    // Two different failures, kept apart. A frame too large for the channel is
+    // what the payload marker exists for; a delivery that will not encode at
+    // all is a definite error to fail open on, and answering that one with the
+    // oversize marker would state a reason that is not the reason
+    // (`corral_protocol::hook`).
+    let Some(frame) = encoded(&delivery) else {
         return fail_open;
+    };
+    let frame = if frame.len() <= MAX_FRAME_BYTES {
+        frame
+    } else {
+        match encoded(&delivery.without_payload()) {
+            Some(marked) if marked.len() <= MAX_FRAME_BYTES => marked,
+            _ => return fail_open,
+        }
     };
 
     // Everything left can block for as long as the machine wants to, so it
@@ -165,16 +178,15 @@ fn deliver_within(budget: Duration, delivery: impl FnOnce() + Send + 'static) {
     let _ = receiver.recv_timeout(budget);
 }
 
-/// One delivery as a frame this channel can carry, or nothing.
+/// One delivery as bytes, or nothing when it will not encode at all.
 ///
-/// `None` when the encoded message is past the framing limit, which is the
-/// caller's cue to try the same delivery with its payload marked instead of
-/// carried: the endpoint would refuse an oversized frame as a framing fault
-/// and the event would vanish with no record of why.
-fn framed(delivery: &HookDelivery) -> Option<Vec<u8>> {
+/// Size is the caller's to judge, not this function's: encoding and being
+/// carryable are two questions with two different answers, and `encode_frame`
+/// enforces no length of its own — the limit is checked where a frame is
+/// decoded.
+fn encoded(delivery: &HookDelivery) -> Option<Vec<u8>> {
     let params = serde_json::to_value(delivery).ok()?;
-    let frame = encode_frame(&Frame::request(RequestId(0), HOOK_DELIVER, Some(params))).ok()?;
-    (frame.len() <= MAX_FRAME_BYTES).then_some(frame)
+    encode_frame(&Frame::request(RequestId(0), HOOK_DELIVER, Some(params))).ok()
 }
 
 /// Write the message and wait for the one receipt the protocol requires.

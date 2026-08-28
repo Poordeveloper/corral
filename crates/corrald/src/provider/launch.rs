@@ -287,11 +287,19 @@ impl InjectedSettings {
             .mode(0o600)
             .open(&partial)
             .map_err(InjectionFailed::Write)?;
-        file.write_all(document.as_bytes())
-            .and_then(|()| file.sync_all())
-            .map_err(InjectionFailed::Write)?;
+        // Everything after the file exists takes the remnant with it. The undo
+        // a failed launch runs removes the published name, which this one
+        // never reached; without this the half-written file stays in the
+        // user's state directory until some later daemon start sweeps it, one
+        // per failure.
+        let written = file
+            .write_all(document.as_bytes())
+            .and_then(|()| file.sync_all());
         drop(file);
-        std::fs::rename(&partial, &path).map_err(InjectionFailed::Write)?;
+        if let Err(source) = written.and_then(|()| std::fs::rename(&partial, &path)) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(InjectionFailed::Write(source));
+        }
         Ok(Self { path })
     }
 

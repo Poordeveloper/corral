@@ -118,12 +118,20 @@ pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
 /// caller-supplied arguments — a resume is Corral continuing what it already
 /// recorded, and arguments would make one Session's Runs differ in ways
 /// nothing recorded.
+/// The injection goes first here for the same reason it does in `launch_argv`,
+/// and the reason is sharper: the word after `--resume` is a **provider**
+/// string. `ExternalId` bounds its length and refuses characters that hide or
+/// reorder text, and that is all — `--`, `-p` and `--settings` are all valid
+/// external ids. A payload naming one of those would, with the injection
+/// placed after it, either swallow Corral's flag as prompt text (matrix
+/// scenario 10) or take it as its own value. Nothing Corral needs may sit
+/// where a provider payload can reach it.
 pub fn resume_argv(external_id: &ExternalId, settings: &Path) -> Vec<OsString> {
     vec![
-        OsString::from(RESUME_FLAG),
-        OsString::from(external_id.as_str()),
         OsString::from(SETTINGS_FLAG),
         OsString::from(settings.as_os_str()),
+        OsString::from(RESUME_FLAG),
+        OsString::from(external_id.as_str()),
     ]
 }
 
@@ -180,10 +188,20 @@ pub fn interpret(payload: &str) -> Result<ProviderReport, Uninterpretable> {
     Ok(ProviderReport {
         identity,
         fact: Some(fact),
-        origin: document
-            .get("source")
-            .and_then(Value::as_str)
-            .map(session_origin),
+        // Only a start has an origin. The field is read off a start and
+        // nowhere else, because `SessionOrigin` means "how this provider
+        // session came to be" — Claude Code's `SessionEnd` already carries a
+        // sibling `reason` with overlapping values, and a later release adding
+        // `source` to a mid-session event would otherwise have a contest
+        // report an origin describing nothing that started.
+        origin: (fact == AgentFactKind::SessionStarted)
+            .then(|| {
+                document
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .map(session_origin)
+            })
+            .flatten(),
     })
 }
 

@@ -12,7 +12,7 @@
 //! and what a row is allowed to say, which is `presentation`'s.
 
 use std::ops::RangeInclusive;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use corral_client::{ClientActivationPolicy, Connection};
 use corral_protocol::method::{SessionListItem, SessionListResult};
@@ -22,7 +22,7 @@ use crate::attach::{Geometry, LocalKeys, OpenFailed, RawMode};
 use crate::daemon::{Daemon, Unanswered};
 use crate::keys::{Key, Keyboard};
 use crate::launch::requested;
-use crate::presentation::{SessionPresentation, present};
+use crate::presentation::{SessionPresentation, present_at};
 use crate::screen::{Emphasis, Frame, FullScreen};
 
 /// How often the list asks the daemon what it holds.
@@ -415,9 +415,14 @@ fn decode(listed: SessionListResult) -> Listed {
     let mut rows = Vec::with_capacity(listed.sessions.len());
     let mut unrenderable = 0;
 
+    // One instant for the whole answer. A row that read the clock for itself
+    // would let two facts observed at the same moment print two different
+    // ages, which is a listing disagreeing with itself — and the command line
+    // renders the same answer from the same projection (grill Q2).
+    let now = SystemTime::now();
     for session in listed.sessions {
         match serde_json::from_value::<SessionListItem>(session) {
-            Ok(item) => rows.push(Row::of(&item)),
+            Ok(item) => rows.push(Row::of(&item, now)),
             Err(_) => unrenderable += 1,
         }
     }
@@ -605,8 +610,8 @@ impl SessionList {
 }
 
 impl Row {
-    fn of(item: &SessionListItem) -> Self {
-        let presentation = present(item);
+    fn of(item: &SessionListItem, now: SystemTime) -> Self {
+        let presentation = present_at(item, now);
         let mut lines = vec![
             format!("{}  {}", short_id(&item.session_id), item.title),
             presentation.state_line(),

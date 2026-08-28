@@ -1,10 +1,13 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use corral_core::{
-    Command, CommandFingerprint, CommandId, CommandKind, CorralSessionId, OccurrenceTime, RunId,
+    Command, CommandFingerprint, CommandId, CommandKind, CorralSessionId, OccurrenceTime,
+    ProviderId, RunId,
 };
+
 use corral_protocol::method::{
     self, AgentEvent, PingResult, ProviderFacts, SessionListItem, SessionListResult,
     SessionNewParams, SessionNewResult, SessionResumeParams, SessionResumeResult,
@@ -12,7 +15,8 @@ use corral_protocol::method::{
 };
 use corral_protocol::{
     ClientHello, Compatibility, ConnectionRole, ErrorCode, Frame, FrameError, FrameReader,
-    FrameWriter, ProtocolError, Request, RequestId, ServerHello, compatible, local_versions,
+    FrameWriter, ProtocolError, Request, RequestId, ServerHello, capability, compatible,
+    local_versions,
 };
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -179,7 +183,13 @@ async fn bootstrap(
     let server_hello = ServerHello {
         protocol_version: ours.protocol_version,
         min_compatible_peer_version: ours.min_compatible_peer_version,
-        capabilities: Default::default(),
+        // Advertised rather than left to be discovered by a request that
+        // fails: `session.resume` and a provider-named `session.new` are
+        // additive, so the version says nothing about them, and a client that
+        // could not ask would offer a person Continue against a daemon too old
+        // to serve it and report `method_not_found` as if the person had asked
+        // for something wrong.
+        capabilities: BTreeSet::from([capability::MANAGED_SESSIONS.to_owned()]),
         compatibility_result: verdict,
     };
 
@@ -701,10 +711,22 @@ fn unknown_provider(name: &str) -> String {
         .iter()
         .map(|provider| provider.as_str())
         .collect();
-    format!(
-        "Corral does not know how to start {name}. It knows: {}.",
-        known.join(", "),
-    )
+    let known = known.join(", ");
+    // The name came off the wire unvalidated and every client renders this
+    // sentence as it stands — the TUI into a full-screen frame it does not
+    // re-escape. `ProviderId` is the existing owner of what may be stored,
+    // logged, or displayed as a provider name: bounded length, and no
+    // character that hides or reorders the text around it. A request that
+    // fails it is answered without repeating it back.
+    match ProviderId::new(name) {
+        Ok(named) => format!(
+            "Corral does not know how to start {}. It knows: {known}.",
+            named.as_str()
+        ),
+        Err(_) => {
+            format!("Corral does not know how to start what this request named. It knows: {known}.")
+        }
+    }
 }
 
 /// The semantic identity of one `session.new`.

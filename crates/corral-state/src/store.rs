@@ -452,7 +452,9 @@ impl Store {
             if projection::session(transaction, session)?.is_none() {
                 return Err(Refusal::UnknownSession(session).into());
             }
-            let binding = projection::control_capable_runtime_binding_of(transaction, session)?
+            // No candidate to exclude: a continuation is looking for the
+            // binding its new Run belongs under, not admitting a new one.
+            let binding = projection::control_capable_runtime_binding(transaction, session, None)?
                 .ok_or(Refusal::NoManagedRuntimeBinding(session))?;
             if let Some(live) = projection::live_run_of_binding(transaction, binding)? {
                 return Err(Refusal::RunAlreadyLive { binding, run: live }.into());
@@ -1343,7 +1345,7 @@ fn refuse_second_control_capable_runtime_binding(
     let existing = projection::control_capable_runtime_binding(
         connection,
         candidate.session(),
-        candidate.id(),
+        Some(candidate.id()),
     )?;
     match existing {
         None => Ok(()),

@@ -575,7 +575,11 @@ fn continuing_a_session_runs_it_again_under_the_same_identity() {
     wait_until(SETTLE, || script.launches().len() == 2);
     let launches = script.launches();
     assert!(
-        launches[1].starts_with(&format!("--resume {FIRST} --settings ")),
+        launches[1].starts_with("--settings "),
+        "the injection sits where a provider string could reach it: {launches:?}",
+    );
+    assert!(
+        launches[1].ends_with(&format!("--resume {FIRST}")),
         "{launches:?}",
     );
     assert_ne!(
@@ -938,7 +942,7 @@ fn the_command_line_continues_a_session_by_the_start_of_its_id() {
 
     wait_until(SETTLE, || script.launches().len() == 2);
     assert!(
-        script.launches()[1].starts_with(&format!("--resume {FIRST} ")),
+        script.launches()[1].ends_with(&format!("--resume {FIRST}")),
         "{:?}",
         script.launches(),
     );
@@ -1032,7 +1036,12 @@ fn two_continuations_of_one_session_start_one_runtime() {
         .filter(|answer| answer["outcome"]["result"]["run_id"].is_string())
         .count();
     assert_eq!(accepted, 1, "{answers:#?}");
-    std::thread::sleep(Duration::from_millis(300));
+    // Waited for rather than slept on: the daemon answers as soon as the child
+    // exists, and the stand-in records its own argv afterwards from its own
+    // process. A fixed pause turns that ordering into a load test. A third
+    // launch still fails this — the wait would time out or the count would be
+    // wrong when it lands.
+    wait_until(SETTLE, || script.launches().len() == 2);
     assert_eq!(
         script.launches().len(),
         2,

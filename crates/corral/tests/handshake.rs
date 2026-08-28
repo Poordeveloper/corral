@@ -83,15 +83,25 @@ fn a_repeated_hello_is_a_protocol_violation() {
     assert!(client.receive().is_none());
 }
 
+/// The daemon names the feature contracts it serves, so a client can ask
+/// before it offers a person an action this daemon may be too old for.
+///
+/// Additive methods and fields say nothing through the protocol version, which
+/// is the whole reason the field exists — an unadvertised contract would leave
+/// a new client reporting `method_not_found` as though the person had asked
+/// for something wrong.
 #[test]
-fn the_negotiated_capability_set_is_empty() {
+fn the_daemon_advertises_the_contracts_it_serves() {
     let account = TestAccount::new("hello-capabilities");
     let _daemon = account.start_daemon();
     let mut client = RawClient::connect(&account.socket());
 
     let response = client.establish();
 
-    assert_eq!(response["outcome"]["result"]["capabilities"], json!([]));
+    assert_eq!(
+        response["outcome"]["result"]["capabilities"],
+        json!(["managed-sessions"]),
+    );
 }
 
 #[test]

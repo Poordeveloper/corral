@@ -31,7 +31,7 @@ pub use framing::{
     FrameError, FrameReader, FrameWriter, FramingFault, MAX_FRAME_BYTES, decode_frame, encode_frame,
 };
 pub use hello::{
-    ClientHello, Compatibility, ConnectionRole, PeerVersions, ServerHello, compatible,
+    ClientHello, Compatibility, ConnectionRole, PeerVersions, ServerHello, capability, compatible,
 };
 
 /// The protocol this build speaks.

@@ -244,8 +244,14 @@ pub(crate) fn binding_by_key(
 pub(crate) fn control_capable_runtime_binding(
     connection: &Connection,
     session: CorralSessionId,
-    excluding: BindingId,
+    excluding: Option<BindingId>,
 ) -> Result<Option<BindingId>, StateError> {
+    // One query with a self-comparison standing in for "exclude nothing",
+    // rather than a second copy of the loop below. The two callers ask the
+    // same question — admitting a candidate excludes it, a continuation has
+    // none to exclude — and a fix applied to one copy that silently missed the
+    // other would be a fix applied to neither.
+    let excluded = excluding.map_or_else(String::new, |binding| binding.to_string());
     let mut statement = connection.prepare_cached(
         "SELECT id, assurance FROM bindings
           WHERE session_id = ?1 AND kind = ?2 AND id != ?3",
@@ -254,36 +260,7 @@ pub(crate) fn control_capable_runtime_binding(
         params![
             session.to_string(),
             binding_kind_token(BindingKind::Runtime),
-            excluding.to_string(),
-        ],
-        |row| Ok((text(row, 0)?, text(row, 1)?)),
-    )?;
-    for row in rows {
-        let (id, assurance) = row?;
-        if assurance_from_token(&assurance)?.permits_control() {
-            return Ok(Some(id.parse().map_err(FatalState::from)?));
-        }
-    }
-    Ok(None)
-}
-
-/// The binding this Session may currently drive control through, whatever
-/// else it holds.
-///
-/// The same question `control_capable_runtime_binding` answers while a
-/// candidate is being admitted, asked without one: a continuation needs the
-/// binding its new Run belongs under, and it is not creating a binding to
-/// exclude.
-pub(crate) fn control_capable_runtime_binding_of(
-    connection: &Connection,
-    session: CorralSessionId,
-) -> Result<Option<BindingId>, StateError> {
-    let mut statement = connection
-        .prepare_cached("SELECT id, assurance FROM bindings WHERE session_id = ?1 AND kind = ?2")?;
-    let rows = statement.query_map(
-        params![
-            session.to_string(),
-            binding_kind_token(BindingKind::Runtime),
+            excluded,
         ],
         |row| Ok((text(row, 0)?, text(row, 1)?)),
     )?;

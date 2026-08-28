@@ -320,6 +320,20 @@ discipline).
 
 ## Follow-ups
 
+- A concurrency bound on accepted connections, for **both** local listeners.
+  The hook endpoint spawns one task per connection with no cap, and so does
+  the canonical socket it was modelled on; fixing one and not the other is
+  the drift worth avoiding. Not urgent: both sit behind a `0700` directory
+  and a `0600` socket, so the reach is the account's own processes, and a
+  provider firing five hooks a turn is nowhere near the pressure. Measured
+  when it is done, not before.
+- One query for the startup sweep instead of one per file. `owner_exited`
+  opens a read transaction per directory entry; measured on this machine at
+  48 ms to serving with an empty launch directory and ~68 µs per retained
+  file (500 → 79 ms, 2000 → 180 ms, 5000 → 386 ms). Retained files
+  accumulate only on unverifiable endings and are deliberately never swept,
+  so the set grows without a bound — the cost is a real slope on a small
+  constant rather than a problem today.
 - Where a Run ran, recorded durably, plus a way to name a Session the
   running daemon did not launch — together these are what make
   `corral continue` work across a daemon lifetime. Requires an explicitly

@@ -229,10 +229,35 @@ fn a_resume_names_the_provider_session_and_the_injected_settings() {
     assert_eq!(
         argv,
         vec![
-            "--resume",
-            "d2dfcafd-9a73-4162-aa70-dddf99aa6e75",
             "--settings",
             "/state/launch/corral-launch-y.json",
+            "--resume",
+            "d2dfcafd-9a73-4162-aa70-dddf99aa6e75",
         ],
     );
+}
+
+/// The word after `--resume` is a provider string, and `ExternalId` bounds its
+/// length and refuses characters that hide or reorder text — nothing more.
+/// Whatever a payload names, it lands after everything Corral needs, so no
+/// value of it can displace the injection or take it as an argument.
+#[test]
+fn a_provider_id_that_reads_like_a_flag_cannot_reach_the_injection() {
+    for hostile in ["--", "-p", "--settings", "--settings=/tmp/theirs"] {
+        let argv = resume_argv(
+            &ExternalId::new(hostile).expect("an external id this type accepts"),
+            std::path::Path::new("/state/launch/corral-launch-y.json"),
+        );
+        let argv: Vec<String> = argv
+            .iter()
+            .map(|word| word.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            &argv[..2],
+            &["--settings", "/state/launch/corral-launch-y.json"],
+            "{hostile:?} reached past the injection",
+        );
+        assert_eq!(argv.last().map(String::as_str), Some(hostile));
+    }
 }

@@ -1,5 +1,7 @@
 use super::*;
 
+use std::time::SystemTime;
+
 use serde_json::{Value, json};
 
 fn session(id: &str, execution_state: &str, terminal_access: Option<&str>) -> Value {
@@ -346,7 +348,7 @@ fn a_row_says_what_the_projection_says() {
     let item: SessionListItem =
         serde_json::from_value(session("s0-rest", "running", Some("unavailable"))).expect("decode");
 
-    let lines = Row::of(&item).lines;
+    let lines = Row::of(&item, SystemTime::now()).lines;
 
     assert_eq!(
         lines,

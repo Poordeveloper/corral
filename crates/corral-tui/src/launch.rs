@@ -11,6 +11,7 @@ use corral_client::{Connection, RequestError};
 use corral_protocol::method::{
     SessionNewParams, SessionNewResult, SessionResumeParams, SessionResumeResult,
 };
+use corral_protocol::{ErrorCode, ProtocolError};
 
 use crate::attach::Geometry;
 
@@ -72,7 +73,10 @@ pub async fn start_session(
         .ok()
         .map(|path| path.to_string_lossy().into_owned());
     let (provider, args, argv) = match requested {
-        Requested::Provider { name, args } => (Some(name), args, Vec::new()),
+        Requested::Provider { name, args } => {
+            serves_managed_sessions(connection)?;
+            (Some(name), args, Vec::new())
+        }
         Requested::Command(argv) => (None, Vec::new(), argv),
     };
 
@@ -111,6 +115,7 @@ pub async fn continue_session(
     connection: &mut Connection,
     session_id: &str,
 ) -> Result<SessionResumeResult, RequestError> {
+    serves_managed_sessions(connection)?;
     let command_id = uuid::Uuid::new_v4().as_hyphenated().to_string();
     connection
         .session_resume(SessionResumeParams {
@@ -118,4 +123,27 @@ pub async fn continue_session(
             session_id: session_id.to_owned(),
         })
         .await
+}
+
+/// Refuse before asking when the daemon does not serve managed agents.
+///
+/// `session.resume` and a provider-named `session.new` are additive, so the
+/// protocol version says nothing about them and an older daemon answers with
+/// `method_not_found` or "this needs a command" — both of which send a person
+/// looking for a mistake in what they typed. The capability is what the hello
+/// carries the answer in, and asking it is what turns that into a fact about
+/// the daemon.
+fn serves_managed_sessions(connection: &Connection) -> Result<(), RequestError> {
+    if connection
+        .peer()
+        .capabilities
+        .contains(corral_protocol::capability::MANAGED_SESSIONS)
+    {
+        return Ok(());
+    }
+    Err(RequestError::Refused(ProtocolError::new(
+        ErrorCode::MethodNotFound,
+        "the running Corral daemon does not start or continue agent sessions; it is older than \
+         this build",
+    )))
 }

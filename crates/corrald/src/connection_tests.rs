@@ -138,3 +138,27 @@ fn the_unknown_agent_refusal_exposes_no_machinery_and_no_surface() {
         "{said:?} does not name what Corral does know",
     );
 }
+
+/// The name came off the wire and every client renders this sentence as it
+/// stands — the list writes it into a full-screen frame it does not re-escape.
+/// A name that is not one is answered without being repeated back.
+#[test]
+fn an_unusable_agent_name_is_not_echoed_into_the_refusal() {
+    for hostile in [
+        "\u{202e}drowssap",
+        "clau\u{1b}[2Jde",
+        &"x".repeat(ProviderId::LIMIT + 1),
+    ] {
+        let said = unknown_provider(hostile);
+
+        assert!(!said.contains(hostile), "{said:?} repeated {hostile:?}");
+        assert!(
+            said.contains("claude"),
+            "{said:?} still names what it knows"
+        );
+    }
+
+    // An ordinary name is still named: the point is what may be shown, not
+    // that a person should be told less.
+    assert!(unknown_provider("codex").contains("codex"));
+}

@@ -205,6 +205,20 @@ pub(crate) async fn compose_provider_launch(
     working_directory: &std::path::Path,
     argv: impl FnOnce(&std::path::Path) -> Vec<std::ffi::OsString>,
 ) -> Result<(LaunchRequest, Option<Injected>), String> {
+    // Asked before anything is minted or written. A managed session's whole
+    // point is that it reports; if nothing is listening for what it reports,
+    // starting it produces a session that looks managed and can never be
+    // continued — the same outcome an unusable relay binary is refused over
+    // (`provider::launch::usable_relay`). Raw sessions are unaffected: they
+    // never claimed to report.
+    if !state.can_receive_agent_reports() {
+        return Err(
+            "Corral cannot receive what an agent reports right now, so it will not start a \
+             session it could not watch"
+                .to_owned(),
+        );
+    }
+
     let scope = LaunchScope {
         session,
         run,
