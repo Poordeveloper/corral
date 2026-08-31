@@ -41,6 +41,14 @@ pub const PROGRAM: &str = "claude";
 /// files, not by editing them carefully (ADR 0004 D6).
 const SETTINGS_FLAG: &str = "--settings";
 
+/// The flag that starts the agent with every customization off.
+///
+/// First-party measured on 2.1.251: with it, a launch carrying Corral's
+/// `--settings` runs normally, exits 0, and fires no hook at all — and
+/// `disableAllHooks: false` in the injected file does not bring them back,
+/// because this is not a settings key. Only admin policy survives it.
+const SAFE_MODE_FLAG: &str = "--safe-mode";
+
 /// The flag that continues a named conversation.
 const RESUME_FLAG: &str = "--resume";
 
@@ -83,27 +91,36 @@ pub fn launch_argv(settings: &Path, args: &[String]) -> Vec<OsString> {
 
 /// Why a caller's provider arguments cannot be passed through.
 ///
-/// One reason, because there is one: an argument that would compete with the
-/// hook injection. Everything else a person may want to pass is theirs.
+/// One reason, because there is one: an argument that would defeat the hook
+/// injection. Everything else a person may want to pass is theirs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArgumentRefused {
     pub argument: String,
 }
 
-/// Refuse the one provider argument Corral cannot honour.
+/// Refuse the provider arguments Corral cannot honour.
 ///
-/// One, because position answers everything else: a caller repeating
-/// `--settings` would displace Corral's own, since the last one is the one
-/// loaded. Everything else a person may want to pass to their own agent is
-/// theirs, including the separator.
+/// Two, and the same reason twice: each one leaves a launch Corral believes it
+/// is watching and is not. A caller repeating `--settings` displaces Corral's
+/// own, since the last one is the one loaded; `--safe-mode` starts the agent
+/// with hooks off, so the injected file is loaded and ignored. Everything else
+/// a person may want to pass to their own agent is theirs, including the
+/// separator.
 ///
-/// Refused rather than dropped. Silently discarding a settings file a person
-/// asked for would be Corral deciding their configuration, and silently
-/// honouring it would be a session Corral believes it is watching and is not.
+/// Refused rather than dropped. Silently discarding an argument a person asked
+/// for would be Corral deciding how their agent runs, and silently honouring it
+/// would be the unwatched session above.
+///
+/// Version-sensitive by nature: this is a claim about one provider's command
+/// line, held against the version the matrix records. A flag a later release
+/// adds is a flag this list does not know, which is why a managed launch also
+/// has to survive learning nothing — it does, as an identity that never binds
+/// rather than as a false one.
 pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
     let equals = format!("{SETTINGS_FLAG}=");
-    let competing =
-        |argument: &&String| *argument == SETTINGS_FLAG || argument.starts_with(&equals);
+    let competing = |argument: &&String| {
+        *argument == SETTINGS_FLAG || argument.starts_with(&equals) || *argument == SAFE_MODE_FLAG
+    };
     match args.iter().find(competing) {
         Some(argument) => Err(ArgumentRefused {
             argument: argument.clone(),
@@ -156,7 +173,14 @@ pub fn settings_document(relay_command: &str) -> String {
     // Pretty-printed: this file lands in a user's own state directory, and a
     // person who opens it to find out what Corral did should be able to read
     // it.
-    let document = json!({ "hooks": Value::Object(hooks) });
+    // Stated, not assumed. Settings layers merge by key, so a `disableAllHooks`
+    // already set in the user's or the project's own file survives an injection
+    // that does not mention it — and then Corral's hooks are configured,
+    // accepted, and never run. Measured on 2.1.251: a project
+    // `disableAllHooks: true` silences the injected hooks entirely, and this
+    // key restores them. Writing `false` here overrides nothing a person will
+    // miss: it says only that the file Corral is loading wants its own hooks.
+    let document = json!({ "disableAllHooks": false, "hooks": Value::Object(hooks) });
     format!("{document:#}\n")
 }
 

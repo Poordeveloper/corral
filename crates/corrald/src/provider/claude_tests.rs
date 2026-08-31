@@ -109,16 +109,27 @@ fn a_known_event_without_a_usable_id_still_reports_its_fact() {
     assert_eq!(report.identity, None);
 }
 
-/// The injected file declares hooks and nothing else. A settings file that
-/// carried a model, a permission, or a `strict` flag would be Corral wrapping
-/// provider-owned configuration, which ADR 0006 forbids.
+/// The injected file declares its own hooks and nothing else. A settings file
+/// that carried a model, a permission, or a `strict` flag would be Corral
+/// wrapping provider-owned configuration, which ADR 0006 forbids.
+///
+/// `disableAllHooks` is not that: it does not configure the agent, it says the
+/// file Corral is loading wants the hooks it just declared to run. Without it
+/// a `disableAllHooks: true` in the person's own settings survives the merge
+/// and silences them — measured on 2.1.251, and the whole injection becomes a
+/// session Corral believes it is watching and is not.
 #[test]
 fn the_injected_settings_declare_hooks_and_nothing_else() {
     let document: serde_json::Value =
         serde_json::from_str(&settings_document("/opt/corral hook-relay --token abc"))
             .expect("the injected settings are JSON");
     let object = document.as_object().expect("an object");
-    assert_eq!(object.len(), 1, "{document:#}");
+    assert_eq!(object.len(), 2, "{document:#}");
+    assert_eq!(
+        object["disableAllHooks"],
+        serde_json::json!(false),
+        "{document:#}"
+    );
     let hooks = object["hooks"].as_object().expect("a hooks table");
     let mut declared: Vec<&String> = hooks.keys().collect();
     declared.sort();
@@ -208,8 +219,32 @@ fn ordinary_provider_arguments_pass_through() {
         vec!["--".to_owned(), "a prompt".to_owned()],
         // A value that merely starts the same way is not the flag.
         vec!["--settings-are-fine".to_owned()],
+        vec!["--safe-mode-ish".to_owned()],
     ] {
         assert_eq!(refuse_arguments(&allowed), Ok(()), "{allowed:?}");
+    }
+}
+
+/// `--safe-mode` is refused for the same reason `--settings` is, and it is a
+/// harder case: the injected file still loads and its hooks still never run.
+///
+/// Measured on 2.1.251 — the launch exits 0, the agent answers, and not one
+/// hook fires. `disableAllHooks: false` does not rescue it, because this is
+/// not a settings key. So the refusal is the only place it can be caught.
+#[test]
+fn safe_mode_is_refused_because_the_injection_cannot_survive_it() {
+    for spelling in [
+        vec!["--safe-mode".to_owned()],
+        vec![
+            "--model".to_owned(),
+            "opus".to_owned(),
+            "--safe-mode".to_owned(),
+        ],
+    ] {
+        let refusal = refuse_arguments(&spelling).expect_err("refused");
+        assert_eq!(refusal.argument, "--safe-mode", "{refusal:?}");
+        let said = refusal.to_string();
+        assert!(said.contains("--safe-mode"), "{said}");
     }
 }
 

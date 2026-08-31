@@ -236,6 +236,57 @@ cannot answer — a caller repeating the flag, where the last wins (scenario 8) 
 is answered by refusing that flag. A caller mistake now fails loudly instead of
 producing a session that looks managed and reports nothing.
 
+### 13. `disableAllHooks` in the person's own settings silences the injection — **fail, and it changed the code**
+
+Driven on **2.1.251**, 2026-08-31, in a scratch project directory.
+
+| Run | Injected file | Project `.claude/settings.json` | Hook fired |
+| --- | --- | --- | --- |
+| baseline | `hooks` only | none | **yes** |
+| a | `hooks` only | `{"disableAllHooks": true}` | **no** |
+| b | `hooks` + `"disableAllHooks": false` | `{"disableAllHooks": true}` | **yes** |
+
+Each run was one `claude --settings <file> -p 'say ok'`; the hook appended a
+line to a file. Every run exited 0 and answered normally — the difference is
+only whether the hook ran.
+
+Settings layers merge by key, so a key the injected file does not mention is
+left to whatever a lower layer said. A person or a project that has ever set
+`disableAllHooks: true` would therefore get a session Corral configured,
+accepted, and could never watch — the exact state the `--settings` refusal
+exists to prevent, arrived at from the other side. The injected document now
+states `"disableAllHooks": false`.
+
+It is not a provider-configuration mutation under ADR 0006: nothing of the
+person's is written or edited, and the key says only that the file Corral is
+loading wants the hooks it declares in that same file.
+
+### 14. `--safe-mode` disables the injected hooks entirely — **fail, and it changed the code**
+
+Driven on **2.1.251**, 2026-08-31.
+
+| Run | Argv | Hook fired |
+| --- | --- | --- |
+| a | `--settings <file> -p '…'` | **yes** |
+| b | `--settings <file> --safe-mode -p '…'` | **no** |
+| c | `--settings <file-with-disableAllHooks-false> --safe-mode -p '…'` | **no** |
+
+Exit 0 in all three; the agent answered in all three. `--safe-mode` is
+documented as starting with "all customizations (CLAUDE.md, skills, plugins,
+hooks, MCP servers, …) disabled" and only admin-managed policy surviving, and
+run c establishes that it is not a settings key: the injected `false` does not
+reach it.
+
+So a caller could type `corral new claude -- --safe-mode` and get a launch that
+looks managed, runs fine, and reports nothing — the same failure `--settings`
+is refused over. `refuse_arguments` refuses it now.
+
+This also names the shape of the remaining risk rather than closing it: the
+refusal list is a claim about one version's command line. A flag a later
+release adds is a flag the list does not know. What holds regardless is that a
+managed launch survives learning nothing — the Session's identity stays
+unknown rather than becoming a false one.
+
 ## Relay interference, measured
 
 Not a provider behaviour, but the number ADR 0004 D4 asks for evidence on. One
@@ -284,4 +335,16 @@ the flake law owns that trade (`AGENTS.md` §Tests).
 - Every scenario used a project-local scratch directory. Behaviour with a
   project that has its own `.claude/settings.json` declaring the same hooks was
   not driven — ADR 0004 D6's additive claim rests on the flag's documented
-  semantics plus scenario 1, not on a merge test. PR7 owns merge.
+  semantics plus scenario 1, not on a merge test. PR7 owns merge. Scenario 13
+  drove the one key that turned out to decide whether the injection runs at
+  all; it is not a merge test either.
+- Scenarios 13 and 14 were driven on **2.1.251**, four patch releases after
+  the rest of this document. They were added because an external review of the
+  implementation named both, and neither had been driven.
+- Organization-managed policy settings were not driven and cannot be, on this
+  machine. `--safe-mode`'s own help states policy survives it, so a policy that
+  forbids non-managed hooks would produce the same unwatched session with no
+  argument for Corral to refuse. Nothing here detects that; a launch-time
+  handshake — refusing to call a session managed until a hook has actually
+  arrived — is the shape that would, and it is recorded as a follow-up rather
+  than built inside this PR.

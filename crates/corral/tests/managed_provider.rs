@@ -1064,6 +1064,102 @@ fn two_continuations_of_one_session_start_one_runtime() {
     drop(daemon);
 }
 
+/// An idempotent retry is answered from its own receipt, whatever else is
+/// happening to the Session.
+///
+/// The command id is what makes a mutation idempotent (ADR 0002 D4), and the
+/// per-Session continuation claim serializes *different* continuations. Asking
+/// for the claim before reading the receipt conflated the two: a client that
+/// lost its answer and retried, while an unrelated continuation of the same
+/// Session held the claim, was told `Busy` and never reached the Run it had
+/// already made — a retry that means "tell me what happened" answered as "try
+/// later".
+///
+/// Post-fix this holds every time: the receipt is consulted first, so a
+/// completed command cannot be refused. Pre-fix it fails only when the retry
+/// lands inside the other continuation's claim, which is why the contention is
+/// real rather than simulated.
+#[test]
+fn a_retry_of_a_completed_continuation_is_never_refused_as_busy() {
+    let account = account("continue-retry");
+    let script = Script::new(&account, "continue-retry").fires(&session_start(FIRST, "startup"));
+    let daemon = daemon_running(&account, &script);
+    let session = new_claude(&account);
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    wait_until(provider::DELIVERED, || {
+        listed(&sessions(&mut client, 1), &session).is_some_and(|listed| {
+            external_id(listed) == Some(FIRST) && listed["execution_state"] == "exited"
+        })
+    });
+
+    let first = client
+        .request(
+            2,
+            "session.resume",
+            Some(json!({"command_id": "resume-1", "session_id": session})),
+        )
+        .expect("session.resume answered");
+    let run = first["outcome"]["result"]["run_id"]
+        .as_str()
+        .expect("a run id")
+        .to_owned();
+
+    // A second continuation of the same Session, contending for the claim, and
+    // retries of the first arriving alongside it.
+    let socket = account.socket();
+    let workers: Vec<std::thread::JoinHandle<Vec<Value>>> = (0..4)
+        .map(|which| {
+            let socket = socket.clone();
+            let session = session.clone();
+            std::thread::spawn(move || {
+                let mut client = RawClient::connect(&socket);
+                client.establish();
+                let command = if which % 2 == 0 {
+                    "resume-1".to_owned()
+                } else {
+                    format!("resume-other-{which}")
+                };
+                (0..3)
+                    .map(|attempt| {
+                        client
+                            .request(
+                                attempt + 3,
+                                "session.resume",
+                                Some(json!({
+                                    "command_id": command,
+                                    "session_id": session,
+                                })),
+                            )
+                            .expect("session.resume answered")
+                    })
+                    .collect()
+            })
+        })
+        .collect();
+
+    let answers: Vec<Value> = workers
+        .into_iter()
+        .flat_map(|worker| worker.join().expect("a worker finished"))
+        .collect();
+
+    // Every retry of the completed command replayed its own Run. Not "did not
+    // start a second one" — that a refusal would also satisfy — but that the
+    // caller was told what happened.
+    let replays = answers
+        .iter()
+        .filter(|answer| answer["outcome"]["result"]["run_id"] == run.as_str())
+        .count();
+    assert_eq!(
+        replays,
+        answers.len() / 2,
+        "a completed continuation was not replayed: {answers:#?}",
+    );
+
+    drop(daemon);
+}
+
 /// A continuation that fails after Corral has minted its launch must undo
 /// exactly what it made. The Session already existed and already had evidence
 /// — its provider, its identity, the last thing it reported — and blanking

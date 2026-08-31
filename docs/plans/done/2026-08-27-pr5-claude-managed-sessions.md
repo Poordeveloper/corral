@@ -350,6 +350,28 @@ discipline).
   binding — a future explicitly accepted decision (grill R2 Q1).
 - Provider trait extraction from two real implementations — PR6 (grill Q5).
 
+External review, still open:
+
+- Nothing proves the agent's hooks are actually reaching Corral, only that
+  the endpoint is bound and the injection was written. Organization-managed
+  policy can forbid non-managed hooks, and no argument refusal reaches
+  that. The shape that would close it is a launch-time handshake — a
+  Session is not called managed until a hook has arrived under its token —
+  which changes what "managed" asserts and needs an accepted decision
+  (matrix scenarios 13, 14).
+- The provider-argument refusal list is version-sensitive by nature. It is
+  a claim about one release's command line, and a later flag that
+  suppresses hooks would pass. The handshake above is what makes the list
+  stop being load-bearing.
+- Hook evidence is resolvable between the spawn and the durable commit,
+  so an early report of a *different* identity during a continuation could
+  contest a Session whose new Run never committed. Not reachable on
+  recorded provider behavior — `--resume` reports the id it was given — and
+  the new-session leg self-heals, because any identity-carrying report may
+  establish. Closing it properly means pending tokens with a buffered,
+  ordered drain after commit, which is a launch-token lifetime change under
+  ADR 0004 D5.
+
 Review round 8, still open. Everything else it confirmed was repaired on
 the branch.
 

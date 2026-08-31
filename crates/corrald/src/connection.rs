@@ -942,18 +942,13 @@ async fn execute_session_resume(
 ) -> Result<Concluded, corral_state::StateError> {
     let ResumeSession { command, session } = resume;
 
-    // Before the receipt is consulted, and held past the commit. Two different
-    // command ids continuing one Session would otherwise both find nothing
-    // running and both spawn, putting two provider processes on one
-    // conversation — which the version matrix records a provider will happily
-    // allow (grill Q7).
-    let Some(_continuing) = state.claim_continuation(session) else {
-        return Ok(Concluded::Refused {
-            code: ErrorCode::Busy,
-            message: "Corral is already continuing this session".to_owned(),
-        });
-    };
-
+    // The receipt first, and before the per-Session claim, because this answer
+    // does not depend on the claim: a command that already executed is replayed
+    // from its own durable receipt and spawns nothing. Asking for the claim
+    // first would let an unrelated continuation of the same Session, running
+    // right now, turn an idempotent retry into `Busy` — a client that lost its
+    // response would be told to try later and would never reach the Run it
+    // already made (ADR 0002 D4).
     match state.completed_managed_session(command.clone()).await {
         Ok(Some(already)) => {
             return Ok(Concluded::Accepted {
@@ -964,6 +959,18 @@ async fn execute_session_resume(
         Ok(None) => {}
         Err(error) => return refused_by_store(&command, error),
     }
+
+    // Held from here past the commit. Two *different* command ids continuing
+    // one Session would otherwise both find nothing running and both spawn,
+    // putting two provider processes on one conversation — which the version
+    // matrix records a provider will happily allow (grill Q7). Each has its own
+    // receipt, so the check above never answers for the other one.
+    let Some(_continuing) = state.claim_continuation(session) else {
+        return Ok(Concluded::Refused {
+            code: ErrorCode::Busy,
+            message: "Corral is already continuing this session".to_owned(),
+        });
+    };
 
     let plan = match resume_plan(state, session).await {
         Ok(Ok(plan)) => plan,
