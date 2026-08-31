@@ -12,16 +12,17 @@
 
 use corral_core::{
     Binding, BindingId, BindingKey, BindingKind, CommandFingerprint, CommandId, CommandOutcome,
-    CommandReceipt, CorralSessionId, Evidence, ExternalId, NodeId, Provenance, ProviderId, Run,
-    RunId, RunOrdinal, Session, SessionLineage,
+    CommandReceipt, CorralSessionId, Evidence, ExternalId, IdentityStatus, NodeId, Provenance,
+    ProviderId, Run, RunId, RunOrdinal, Session, SessionLineage,
 };
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 
+use crate::encoding::StoredOutcome;
 use crate::encoding::{
     assurance_from_token, assurance_token, binding_kind_from_token, binding_kind_token,
-    command_outcome_is, command_outcome_token, evidence_source_from_token, evidence_source_token,
-    from_millis, millis, provenance_from_token, provenance_token, run_end_from_token,
-    run_end_token,
+    command_outcome_from_token, command_outcome_token, evidence_source_from_token,
+    evidence_source_token, from_millis, identity_status_from_token, identity_status_token, millis,
+    provenance_from_token, provenance_token, run_end_from_token, run_end_token,
 };
 use crate::error::{FatalState, StateError};
 use crate::event::SessionEvent;
@@ -52,8 +53,8 @@ pub(crate) fn apply(
             tx.execute(
                 "INSERT INTO bindings (
                      id, session_id, node_id, kind, provider, external_id, provenance,
-                     assurance, evidence_source, observed_at_ms, created_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     assurance, identity_status, evidence_source, observed_at_ms, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     binding.id().to_string(),
                     binding.session().to_string(),
@@ -63,6 +64,10 @@ pub(crate) fn apply(
                     binding.key().external_id().as_str(),
                     provenance_token(binding.provenance()),
                     assurance_token(binding.assurance()),
+                    // Always `confirmed`: `BindingAdded` is the fact that
+                    // Corral accepted this identity, and a contest is a
+                    // separate later fact about it.
+                    identity_status_token(binding.identity_status()),
                     evidence_source_token(binding.evidence().source()),
                     millis(binding.evidence().observed_at())?,
                     millis(binding.created_at())?,
@@ -84,6 +89,20 @@ pub(crate) fn apply(
                 ],
             )?;
             expect_one(changed, "a binding to confirm")?;
+        }
+        // Only the identity status moves. The evidence that reached the
+        // contest is recorded in the log; writing it over the binding's would
+        // replace the evidence Corral still stands behind for the assurance it
+        // keeps, and assurance stays orthogonal to a contest (ADR 0004 D8).
+        SessionEvent::BindingContested { binding, .. } => {
+            let changed = tx.execute(
+                "UPDATE bindings SET identity_status = ?2 WHERE id = ?1",
+                params![
+                    binding.to_string(),
+                    identity_status_token(IdentityStatus::Contested),
+                ],
+            )?;
+            expect_one(changed, "a binding to contest")?;
         }
         SessionEvent::RunStarted {
             session,
@@ -137,16 +156,21 @@ pub(crate) fn apply(
             outcome,
             accepted_at,
         } => {
-            let CommandOutcome::SessionCreated(created) = outcome;
+            let run = match outcome {
+                CommandOutcome::SessionCreated(_) => None,
+                CommandOutcome::RunStarted { run, .. } => Some(run.to_string()),
+            };
             tx.execute(
                 "INSERT INTO command_receipts (
-                     command_id, fingerprint, outcome_kind, outcome_target, accepted_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                     command_id, fingerprint, outcome_kind, outcome_target, outcome_run,
+                     accepted_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     command.as_str(),
                     fingerprint.as_str(),
                     command_outcome_token(*outcome),
-                    created.to_string(),
+                    outcome.session().to_string(),
+                    run,
                     millis(*accepted_at)?,
                 ],
             )?;
@@ -220,8 +244,14 @@ pub(crate) fn binding_by_key(
 pub(crate) fn control_capable_runtime_binding(
     connection: &Connection,
     session: CorralSessionId,
-    excluding: BindingId,
+    excluding: Option<BindingId>,
 ) -> Result<Option<BindingId>, StateError> {
+    // One query with a self-comparison standing in for "exclude nothing",
+    // rather than a second copy of the loop below. The two callers ask the
+    // same question — admitting a candidate excludes it, a continuation has
+    // none to exclude — and a fix applied to one copy that silently missed the
+    // other would be a fix applied to neither.
+    let excluded = excluding.map_or_else(String::new, |binding| binding.to_string());
     let mut statement = connection.prepare_cached(
         "SELECT id, assurance FROM bindings
           WHERE session_id = ?1 AND kind = ?2 AND id != ?3",
@@ -230,7 +260,7 @@ pub(crate) fn control_capable_runtime_binding(
         params![
             session.to_string(),
             binding_kind_token(BindingKind::Runtime),
-            excluding.to_string(),
+            excluded,
         ],
         |row| Ok((text(row, 0)?, text(row, 1)?)),
     )?;
@@ -241,6 +271,36 @@ pub(crate) fn control_capable_runtime_binding(
         }
     }
     Ok(None)
+}
+
+/// The provider-session binding a Session already holds, if it holds one.
+///
+/// The uniqueness guard's own question, asked of the store rather than of a
+/// caller. Every assurance counts: a Session's provider identity is one
+/// question with one answer, and a second binding of any strength is the
+/// identity contest ADR 0004 D8 rules on rather than a second fact.
+pub(crate) fn provider_session_binding(
+    connection: &Connection,
+    session: CorralSessionId,
+    excluding: BindingId,
+) -> Result<Option<BindingId>, StateError> {
+    let mut statement = connection.prepare_cached(
+        "SELECT id FROM bindings
+          WHERE session_id = ?1 AND kind = ?2 AND id != ?3
+          LIMIT 1",
+    )?;
+    let mut rows = statement.query_map(
+        params![
+            session.to_string(),
+            binding_kind_token(BindingKind::ProviderSession),
+            excluding.to_string(),
+        ],
+        |row| text(row, 0),
+    )?;
+    match rows.next() {
+        None => Ok(None),
+        Some(row) => Ok(Some(row?.parse().map_err(FatalState::from)?)),
+    }
 }
 
 pub(crate) fn bindings_of(
@@ -458,9 +518,9 @@ pub(crate) fn receipt(
     connection: &Connection,
     command: &CommandId,
 ) -> Result<Option<CommandReceipt>, StateError> {
-    let row: Option<(String, String, String, i64)> = connection
+    let row: Option<(String, String, String, Option<String>, i64)> = connection
         .query_row(
-            "SELECT fingerprint, outcome_kind, outcome_target, accepted_at_ms
+            "SELECT fingerprint, outcome_kind, outcome_target, outcome_run, accepted_at_ms
                FROM command_receipts WHERE command_id = ?1",
             params![command.as_str()],
             |row| {
@@ -468,28 +528,49 @@ pub(crate) fn receipt(
                     text(row, 0)?,
                     text(row, 1)?,
                     text(row, 2)?,
-                    integer(row, 3)?,
+                    row.get(3)?,
+                    integer(row, 4)?,
                 ))
             },
         )
         .optional()?;
-    let Some((fingerprint, outcome_kind, outcome_target, accepted_at_ms)) = row else {
+    let Some((fingerprint, outcome_kind, outcome_target, outcome_run, accepted_at_ms)) = row else {
         return Ok(None);
     };
-    command_outcome_is(&outcome_kind)?;
+    let session = outcome_target.parse().map_err(FatalState::from)?;
+    let outcome = match command_outcome_from_token(&outcome_kind)? {
+        StoredOutcome::SessionCreated => CommandOutcome::SessionCreated(session),
+        // A receipt of this kind without the Run it produced is a projection
+        // that cannot answer the retry it exists to answer. Minting one to
+        // cover the hole would answer a question about a past that is not
+        // there.
+        StoredOutcome::RunStarted => CommandOutcome::RunStarted {
+            session,
+            run: outcome_run
+                .ok_or_else(|| FatalState::Unreadable {
+                    detail: format!(
+                        "the receipt for command {} started a run and names none",
+                        command.as_str()
+                    ),
+                })?
+                .parse()
+                .map_err(FatalState::from)?,
+        },
+    };
     Ok(Some(CommandReceipt::new(
         command.clone(),
         CommandFingerprint::from_canonical(fingerprint),
-        CommandOutcome::SessionCreated(outcome_target.parse().map_err(FatalState::from)?),
+        outcome,
         from_millis(accepted_at_ms),
     )))
 }
 
 const BINDING_COLUMNS: &str = "SELECT id, session_id, node_id, kind, provider, external_id, \
-                               provenance, assurance, evidence_source, observed_at_ms, \
-                               created_at_ms FROM bindings";
+                               provenance, assurance, identity_status, evidence_source, \
+                               observed_at_ms, created_at_ms FROM bindings";
 
 type BindingRow = (
+    String,
     String,
     String,
     String,
@@ -529,8 +610,9 @@ fn binding_row(row: &Row<'_>) -> rusqlite::Result<BindingRow> {
         text(row, 6)?,
         text(row, 7)?,
         text(row, 8)?,
-        integer(row, 9)?,
+        text(row, 9)?,
         integer(row, 10)?,
+        integer(row, 11)?,
     ))
 }
 
@@ -544,11 +626,12 @@ fn binding_from(row: BindingRow) -> Result<Binding, StateError> {
         external_id,
         provenance,
         assurance,
+        identity_status,
         evidence_source,
         observed_at_ms,
         created_at_ms,
     ) = row;
-    Ok(Binding::new(
+    let binding = Binding::new(
         id.parse().map_err(FatalState::from)?,
         session.parse().map_err(FatalState::from)?,
         BindingKey::new(
@@ -564,7 +647,11 @@ fn binding_from(row: BindingRow) -> Result<Binding, StateError> {
             from_millis(observed_at_ms),
         ),
         from_millis(created_at_ms),
-    ))
+    );
+    Ok(match identity_status_from_token(&identity_status)? {
+        IdentityStatus::Confirmed => binding,
+        IdentityStatus::Contested => binding.contested(),
+    })
 }
 
 /// A stored instant is authoritative by construction: a first-observed time is

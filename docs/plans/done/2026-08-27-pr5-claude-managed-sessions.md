@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 class: C
 writes: [corrald, corral, corral-client, corral-protocol, corral-core, corral-state, corral-rendezvous, corral-tui]
 reads: [docs/adr/0004-hook-delivery.md, docs/decisions/2026-08-27-pr5-hook-delivery-grill.md, docs/adr/0002-resume-lineage.md, docs/adr/0006-provider-hook-integration-policy.md, docs/adr/0007-managed-session-lifetime.md, docs/adr/0008-managed-runtime-binding-identity.md, docs/references/2026-08-22-s2-session-identity-verification.md, ARCHITECTURE.md, PRODUCT.md, ROADMAP.md]
@@ -297,14 +297,96 @@ tolerated and counted.
 - Glossary rows landed; the plan moves to `done/`; `STORAGE_EPOCH` is
   untouched.
 
+## Known limitation, found in implementation
+
+**Continuing a Session outlives the process, not the daemon.** The
+provider resolves which of its own sessions an id names by the directory
+it was started in, and where a Run ran is live state on its handle: no
+durable event records it. So `session.resume` refuses with `NotThisDaemon`
+once the daemon that launched the Session is gone — and a daemon with no
+established client and no live Run exits after its idle grace, which for a
+plain command-line user is about a minute after the agent stops. Inside one
+daemon lifetime — the shape a person running the TUI has — continuing works
+as designed.
+
+The refusal is honest and fail-closed; substituting a directory would ask
+the provider for a conversation that is not there. Repairing it needs a
+durable record of where a Run ran, and `session.list` is live-only too, so
+the Session would still not be nameable after a restart — which is
+discovery, and discovery is PR7's. Recorded here rather than repaired
+inside this PR because the fix crosses the durable-state decision boundary
+and the surface it needs belongs to a later phase (`AGENTS.md` §Scope
+discipline).
+
 ## Follow-ups
 
+- Noticing a hook endpoint that stopped serving after it bound. The refusal
+  a managed launch meets rests on a startup fact; an endpoint whose socket is
+  later unlinked keeps accepting nothing without ever returning an error, so
+  the only way to know is to probe — machinery this phase does not have, and
+  a consecutive-failure threshold would not catch that case anyway.
+- A concurrency bound on accepted connections, for **both** local listeners.
+  The hook endpoint spawns one task per connection with no cap, and so does
+  the canonical socket it was modelled on; fixing one and not the other is
+  the drift worth avoiding. Not urgent: both sit behind a `0700` directory
+  and a `0600` socket, so the reach is the account's own processes, and a
+  provider firing five hooks a turn is nowhere near the pressure. Measured
+  when it is done, not before.
+- One query for the startup sweep instead of one per file. `owner_exited`
+  opens a read transaction per directory entry; measured on this machine at
+  48 ms to serving with an empty launch directory and ~68 µs per retained
+  file (500 → 79 ms, 2000 → 180 ms, 5000 → 386 ms). Retained files
+  accumulate only on unverifiable endings and are deliberately never swept,
+  so the set grows without a bound — the cost is a real slope on a small
+  constant rather than a problem today.
+- Where a Run ran, recorded durably, plus a way to name a Session the
+  running daemon did not launch — together these are what make
+  `corral continue` work across a daemon lifetime. Requires an explicitly
+  accepted durable-state decision; see the limitation above.
 - Supported provider/version matrix automation as a `verify-release`-owned
   task — must land before the M1 release; a one-time evidence document is
   not a permanent release gate (grill Q9).
 - A correction / re-identification mechanism able to clear a contested
   binding — a future explicitly accepted decision (grill R2 Q1).
 - Provider trait extraction from two real implementations — PR6 (grill Q5).
+
+External review, still open:
+
+- Nothing proves the agent's hooks are actually reaching Corral, only that
+  the endpoint is bound and the injection was written. Organization-managed
+  policy can forbid non-managed hooks, and no argument refusal reaches
+  that. The shape that would close it is a launch-time handshake — a
+  Session is not called managed until a hook has arrived under its token —
+  which changes what "managed" asserts and needs an accepted decision
+  (matrix scenarios 13, 14).
+- The provider-argument refusal list is version-sensitive by nature. It is
+  a claim about one release's command line, and a later flag that
+  suppresses hooks would pass. The handshake above is what makes the list
+  stop being load-bearing.
+- Hook evidence is resolvable between the spawn and the durable commit,
+  so an early report of a *different* identity during a continuation could
+  contest a Session whose new Run never committed. Not reachable on
+  recorded provider behavior — `--resume` reports the id it was given — and
+  the new-session leg self-heals, because any identity-carrying report may
+  establish. Closing it properly means pending tokens with a buffered,
+  ordered drain after commit, which is a launch-token lifetime change under
+  ADR 0004 D5.
+
+Review round 8, still open. Everything else it confirmed was repaired on
+the branch.
+
+- `launch::remove_for` unlinks synchronously on the single-threaded reactor
+  from async launch/abandon paths. One unlink, microseconds; worth moving,
+  not worth the async restructuring inside this PR.
+- `corral new claude -- --resume <id>` is admitted by argument vetting and
+  reliably manufactures a claimed-elsewhere or contested identity. Whether
+  it deserves the `--settings` treatment is a product decision, not a bug
+  fix — Corral's own continuation is the supported path, and refusing a
+  caller's own flag needs the same deliberation `--settings` got.
+- (Plausible, unverified) the hook ack write sits outside
+  `DELIVERY_DEADLINE`, so a shim that stops reading can park a `take_one`
+  task; and the mock provider resolves the first `--settings` where real
+  Claude takes the last.
 
 ## Plan size justification
 

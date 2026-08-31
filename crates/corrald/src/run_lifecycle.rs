@@ -10,12 +10,16 @@
 //! store's question; what this owns is that every fact reaches it, and that a
 //! fact which does not is loud.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use corral_core::RunEnd;
 use corral_state::{Durability, Refusal, StateError, Store};
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
+use crate::hook_evidence::{Deliveries, Retirement};
+use crate::provider::{InjectedSettings, SharedLaunchTokens};
 use crate::runtime::{ObservedRuns, RunOccurrence, Weight};
 
 /// How many times one fact is offered to a store that is momentarily held.
@@ -39,7 +43,7 @@ const BETWEEN_ATTEMPTS: Duration = Duration::from_millis(BETWEEN_ATTEMPTS_MILLIS
 /// Stated here because the budget below is a multiple of it. Not read from the
 /// store: it is that crate's number to choose, and a copy that drifted would
 /// only ever make this budget too generous, never too short.
-const STORE_WAIT_MILLIS: u64 = 5_000;
+pub(crate) const STORE_WAIT_MILLIS: u64 = 5_000;
 
 /// The longest the recorder may spend on one fact before calling it lost.
 ///
@@ -50,13 +54,84 @@ const STORE_WAIT_MILLIS: u64 = 5_000;
 pub const LONGEST_RECORD: Duration =
     Duration::from_millis(ATTEMPTS as u64 * (STORE_WAIT_MILLIS + BETWEEN_ATTEMPTS_MILLIS));
 
+/// The longest this thread may spend on one observed occurrence.
+///
+/// A Run that ended costs two bounded waits in series, not one: announcing the
+/// ending to the evidence queue, and then recording it. Both are here because
+/// both are this thread's, and a shutdown that outwaits only the second would
+/// declare a hole in the accounting while the first was still legitimately in
+/// progress.
+pub const LONGEST_OCCURRENCE: Duration = Duration::from_millis(
+    LONGEST_RECORD.as_millis() as u64 + crate::hook_evidence::RETIREMENT_WAIT.as_millis() as u64,
+);
+
 /// Record every run occurrence this daemon observes, on a thread of its own.
-pub fn record_observed_runs(store: Arc<Mutex<Store>>, observed: ObservedRuns) {
+///
+/// It also retires what a Run leaves behind: its launch token, and — when the
+/// exit is established — its per-launch provider configuration. Both belong
+/// here rather than beside the endpoint because this is the one place that
+/// learns an ending *and* what kind of ending it was, and the two artifacts
+/// have deliberately different rules (ADR 0004 D5, D6).
+pub fn record_observed_runs(
+    store: Arc<Mutex<Store>>,
+    observed: ObservedRuns,
+    launch_dir: PathBuf,
+    deliveries: Deliveries,
+    launch_tokens: SharedLaunchTokens,
+) {
     std::thread::spawn(move || {
         // Ends when the last runtime that could report is gone, which for this
         // daemon means the process is ending.
         while let Some(observation) = observed.next() {
             let occurrence = observation.occurrence();
+            if let RunOccurrence::Exited { run, end, .. } = occurrence {
+                // The token goes on any ending, established or not: whatever
+                // this Run is now, it is not one whose hooks may still speak
+                // for the Session (ADR 0004 D5). Announced rather than done
+                // here, so it lands behind the events that Run already
+                // delivered instead of racing them — and announced *before*
+                // the store lock is taken below, so a consumer waiting on that
+                // lock can never be what this waits behind.
+                //
+                // The file goes only on an established exit — destroying it
+                // needs ownership evidence as strong as the destruction, and an
+                // unverifiable end is not that (grill Q10).
+                // A Run that never minted one has nothing to retire, and
+                // announcing anyway would spend the queue's wait on a no-op —
+                // on the single thread every durable ending goes through. Raw
+                // `corral new -- <command>` sessions are most of these.
+                if launch_tokens.holds_run(run) {
+                    // Whatever the queue did with it, an unretired token is
+                    // the one outcome not on the table: a token outliving its
+                    // Run is what lets a process that outlived its episode
+                    // contest the identity of the one that replaced it, and
+                    // contested is monotonic with no way to clear it
+                    // (ADR 0004 D5, D8). Retiring it here costs the ordering —
+                    // events of this Run still waiting resolve to nothing —
+                    // which is the far smaller harm.
+                    match deliveries.run_ended(run) {
+                        Retirement::Taken => {}
+                        Retirement::QueueFull => {
+                            warn!(
+                                %run,
+                                "a run's launch token was retired out of order: the evidence \
+                                 queue would not take the ending",
+                            );
+                            launch_tokens.forget_run(run);
+                        }
+                        // Not a fault: this is what the ordinary way out looks
+                        // like from here, and a daemon still serving would
+                        // have logged its own reason for losing the consumer.
+                        Retirement::QueueGone => {
+                            debug!(%run, "a run's launch token was retired without the queue");
+                            launch_tokens.forget_run(run);
+                        }
+                    }
+                }
+                if matches!(end, RunEnd::Exited(_)) {
+                    InjectedSettings::remove_for(&launch_dir, run);
+                }
+            }
             // Only a fact the daemon must be able to account for ends the
             // accounting. An attachment the store would not take costs a line
             // of history and nothing else: attachment activity is advisory,

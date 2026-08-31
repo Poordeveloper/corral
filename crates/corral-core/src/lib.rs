@@ -29,7 +29,8 @@ pub use attention::{
     NeedsInputContext, NeedsInputRequest,
 };
 pub use binding::{
-    Binding, BindingKey, BindingKind, ControlEligibility, Provenance, ReservedNamespaceMisuse,
+    Binding, BindingKey, BindingKind, ControlEligibility, IdentityStatus, NativeResumeEligibility,
+    Provenance, ReservedNamespaceMisuse,
 };
 pub use command::{
     Command, CommandFingerprint, CommandFingerprintBuilder, CommandId, CommandKind, CommandOutcome,

@@ -39,6 +39,24 @@ pub enum ErrorCode {
     /// do about it is the opposite: retrying is what `busy` invites and what
     /// this forbids — the same id will never mean this command.
     CommandIdConflict,
+    /// The agent a client asked to start is not one this daemon integrates.
+    ///
+    /// Its own code because what a surface does about it is its own: the
+    /// daemon names the agents it knows, and only the surface knows how a
+    /// person asks it for a plain command instead. Matching the daemon's
+    /// sentence would make that hint drift with the wording.
+    UnknownProvider,
+    /// The Session named refuses the continuation, on its own state rather
+    /// than on anything about the request.
+    ///
+    /// Its own code because `invalid_params` would send a client looking for a
+    /// mistake in its request that is not there: the parameters were fine.
+    /// Deliberately not a claim about permanence — one of the states it
+    /// carries is a Run that is still live, which stops being true when that
+    /// process exits, while others (a contested identity) never change in this
+    /// phase. Which state it is stays in the message; a client that must tell
+    /// them apart is what would earn the next code, and nothing does yet.
+    SessionNotContinuable,
     Unknown(String),
 }
 
@@ -60,6 +78,8 @@ impl ErrorCode {
             Self::ProtocolViolation => "protocol_violation",
             Self::Busy => "busy",
             Self::CommandIdConflict => "command_id_conflict",
+            Self::UnknownProvider => "unknown_provider",
+            Self::SessionNotContinuable => "session_not_continuable",
             Self::Unknown(raw) => raw,
         }
     }
@@ -74,6 +94,8 @@ impl From<String> for ErrorCode {
             "protocol_violation" => Self::ProtocolViolation,
             "busy" => Self::Busy,
             "command_id_conflict" => Self::CommandIdConflict,
+            "unknown_provider" => Self::UnknownProvider,
+            "session_not_continuable" => Self::SessionNotContinuable,
             _ => Self::Unknown(raw),
         }
     }

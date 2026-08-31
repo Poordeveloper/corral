@@ -20,7 +20,7 @@ use crate::error::{FatalState, StateError};
 /// No migration exists yet: `STORAGE_EPOCH` is `dev`, development databases
 /// are disposable, and the first migration is written by the change that
 /// needs one. A store at any other version is refused rather than guessed at.
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 
 /// How long an operation waits for another writer before giving up.
 ///
@@ -75,6 +75,11 @@ CREATE TABLE bindings (
     external_id     TEXT NOT NULL,
     provenance      TEXT NOT NULL,
     assurance       TEXT NOT NULL,
+    -- Whether Corral still stands behind the identity this edge names. A
+    -- column rather than a payload field: it is derived from the log —
+    -- `binding-added` writes `confirmed`, `binding-contested` writes
+    -- `contested` — so a replay reproduces it exactly (ADR 0004 D8).
+    identity_status TEXT NOT NULL,
     evidence_source TEXT NOT NULL,
     observed_at_ms  INTEGER NOT NULL,
     created_at_ms   INTEGER NOT NULL,
@@ -111,7 +116,12 @@ CREATE TABLE command_receipts (
     command_id     TEXT PRIMARY KEY,
     fingerprint    TEXT NOT NULL,
     outcome_kind   TEXT NOT NULL,
+    -- The Session every outcome names. Which Session a command acted on is the
+    -- one thing both kinds of receipt answer.
     outcome_target TEXT NOT NULL,
+    -- The Run a continuation produced, and NULL for an outcome that names no
+    -- Run. Absence here is the kind saying so, never a Run that was lost.
+    outcome_run    TEXT,
     accepted_at_ms INTEGER NOT NULL
 ) STRICT;
 ";

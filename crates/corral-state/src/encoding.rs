@@ -8,8 +8,8 @@
 use std::time::{Duration, SystemTime};
 
 use corral_core::{
-    Assurance, BindingKind, CommandOutcome, EvidenceSource, ExitCause, MalformedId, Provenance,
-    RunEnd,
+    Assurance, BindingKind, CommandOutcome, EvidenceSource, ExitCause, IdentityStatus, MalformedId,
+    Provenance, RunEnd,
 };
 
 use crate::error::FatalState;
@@ -57,6 +57,27 @@ pub(crate) fn evidence_source_from_token(token: &str) -> Result<EvidenceSource, 
         "correlation" => Ok(EvidenceSource::Correlation),
         "user-assertion" => Ok(EvidenceSource::UserAssertion),
         other => Err(unreadable("an evidence source", other)),
+    }
+}
+
+/// Whether Corral still stands behind the identity a binding names.
+///
+/// A projection column rather than a payload field of `BindingAdded`: a
+/// binding is always born `Confirmed`, and a log able to spell a
+/// born-contested edge would let a fact exist that nothing can produce
+/// (ADR 0004 D8).
+pub(crate) fn identity_status_token(status: IdentityStatus) -> &'static str {
+    match status {
+        IdentityStatus::Confirmed => "confirmed",
+        IdentityStatus::Contested => "contested",
+    }
+}
+
+pub(crate) fn identity_status_from_token(token: &str) -> Result<IdentityStatus, FatalState> {
+    match token {
+        "confirmed" => Ok(IdentityStatus::Confirmed),
+        "contested" => Ok(IdentityStatus::Contested),
+        other => Err(unreadable("an identity status", other)),
     }
 }
 
@@ -127,14 +148,26 @@ pub(crate) fn run_end_from_token(token: &str) -> Result<RunEnd, FatalState> {
 pub(crate) fn command_outcome_token(outcome: CommandOutcome) -> &'static str {
     match outcome {
         CommandOutcome::SessionCreated(_) => "created-session",
+        CommandOutcome::RunStarted { .. } => "started-run",
     }
 }
 
-pub(crate) fn command_outcome_is(token: &str) -> Result<(), FatalState> {
-    if token == "created-session" {
-        Ok(())
-    } else {
-        Err(unreadable("a command outcome", token))
+/// Which kind of thing a stored receipt names.
+///
+/// The two carry different targets, so reading one back is two questions and
+/// not one: an unreadable token stops the read rather than defaulting to the
+/// older kind, which would silently answer a continuation's retry with a
+/// Session's first Run.
+pub(crate) enum StoredOutcome {
+    SessionCreated,
+    RunStarted,
+}
+
+pub(crate) fn command_outcome_from_token(token: &str) -> Result<StoredOutcome, FatalState> {
+    match token {
+        "created-session" => Ok(StoredOutcome::SessionCreated),
+        "started-run" => Ok(StoredOutcome::RunStarted),
+        other => Err(unreadable("a command outcome", other)),
     }
 }
 

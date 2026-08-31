@@ -34,6 +34,22 @@ pub struct ClientHello {
     pub role: Option<ConnectionRole>,
 }
 
+/// Feature contracts a peer may advertise.
+///
+/// The mechanism the `capabilities` field exists for: a name means "this build
+/// serves that contract", never a protocol version. A client asks before it
+/// offers a person an action the daemon may not serve, so an older daemon is
+/// reported as older rather than as having refused the request.
+pub mod capability {
+    /// `session.resume`, and `session.new` naming a provider rather than a
+    /// command: the managed-agent surface PR5 added.
+    ///
+    /// One name for both because they are one contract — a daemon that
+    /// composes a managed launch is the same daemon that can continue one, and
+    /// two names would let a client believe in half of it.
+    pub const MANAGED_SESSIONS: &str = "managed-sessions";
+}
+
 /// What a connection is for.
 ///
 /// An unknown kind decodes into `Unknown` rather than failing, so a client

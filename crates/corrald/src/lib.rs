@@ -14,10 +14,19 @@
 //! new `corrald` reconstructs nothing from its predecessor's runtime.
 
 mod connection;
+mod hook_endpoint;
+mod hook_evidence;
 mod in_flight;
 mod lifecycle;
+mod managed_launch;
 mod platform;
 mod policy;
+/// Coding-agent knowledge: launch and resume composition, hook ingress
+/// interpretation, and the artifacts a managed launch leaves behind. Public
+/// for the same reason `runtime` is — the scenarios this crate owes are
+/// integration tests, and an integration test reaches only what the library
+/// exposes.
+pub mod provider;
 mod run_lifecycle;
 /// The managed runtime. Public because the lifecycle scenarios this crate owes
 /// — detach, disconnect, restart, crash, unverifiable exit — are integration
@@ -99,8 +108,16 @@ fn start() -> Result<ExitCode, StartupError> {
     // Before the endpoint exists, not after: a daemon that answered a hello and
     // then found its registry unusable would already have told a client it can
     // be relied on.
-    paths.ensure_state_dir().map_err(StartupError::Rendezvous)?;
-    let state = Arc::new(DaemonState::open(paths.registry()).map_err(StartupError::State)?);
+    // One call: the launch directory sits inside the durable-state tree, and
+    // ensuring it ensures the tree. Asking for both walked and re-checked the
+    // same two directories twice, and gave the ownership question two callers
+    // to drift about.
+    paths
+        .ensure_launch_dir()
+        .map_err(StartupError::Rendezvous)?;
+    let state = Arc::new(
+        DaemonState::open(paths.registry(), paths.launch_dir()).map_err(StartupError::State)?,
+    );
 
     // Before the endpoint is bound, and only by the daemon holding the claim.
     // Every managed episode still open belongs to a daemon that is gone, and a
@@ -114,12 +131,25 @@ fn start() -> Result<ExitCode, StartupError> {
         info!(%run, "a managed run from a previous corrald is recorded as unverifiable");
     }
 
+    // After reconciliation, because reconciliation is what turns a departed
+    // daemon's open episodes into recorded endings — and only a recorded
+    // ending is evidence strong enough to destroy the artifact that named it.
+    // Nothing here removes a file whose Run's fate is unestablished: losing
+    // Corral's ownership is not proof the provider process is dead (grill Q10).
+    let swept = Arc::clone(&state);
+    provider::sweep_launch_dir(paths.launch_dir(), move |run| swept.exit_established(run));
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(StartupError::Runtime)?;
     runtime
-        .block_on(server::serve(paths.socket(), policy, Arc::clone(&state)))
+        .block_on(server::serve(
+            paths.socket(),
+            paths.hook_socket(),
+            policy,
+            Arc::clone(&state),
+        ))
         .map_err(StartupError::Serve)?;
 
     // Order matters and is stated rather than left to drop order: the runtime
@@ -137,7 +167,14 @@ fn start() -> Result<ExitCode, StartupError> {
     }
     // Best effort: the next claim winner owns whatever an abrupt death leaves
     // behind, so failing to unlink here costs nothing.
+    //
+    // Both pathnames, here, because dropping the runtime cancels the hook
+    // endpoint's task wherever it was parked — its own cleanup runs only when
+    // the loop exits on its own, which a cancelled task never does. A daemon
+    // that left its hook socket behind would be a departed daemon that still
+    // looks present to anything reading the path.
     let _ = std::fs::remove_file(paths.socket());
+    let _ = std::fs::remove_file(paths.hook_socket());
     drop(claim);
 
     // A daemon that stopped because it could not trust its own durable state

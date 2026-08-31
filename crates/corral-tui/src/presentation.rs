@@ -11,7 +11,9 @@
 //! > Execution state may establish `Exited`, or secondary runtime truth. It
 //! > must never manufacture Working / Needs You / Ready.
 
-use corral_protocol::method::{SessionListItem, TerminalAccess};
+use std::time::{Duration, SystemTime};
+
+use corral_protocol::method::{AgentEvent, AgentEventKind, SessionListItem, TerminalAccess};
 
 /// The main state, spelled as `PRODUCT.md` §4 spells it.
 const UNKNOWN: &str = "Status unknown";
@@ -43,7 +45,7 @@ pub enum MainState {
 }
 
 /// One session as every surface should show it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionPresentation {
     /// The main state. Never derived from anything but the daemon's own words.
     pub state: MainState,
@@ -53,10 +55,32 @@ pub struct SessionPresentation {
     /// and the whole reason Open is refused before the keystroke rather than
     /// after it.
     pub screen: Option<&'static str>,
+    /// The latest still-relevant fact the agent reported about itself, in the
+    /// past tense with its provenance and its age.
+    ///
+    /// A report, never a claim about now. It never becomes a main state, an
+    /// attention item, a badge, or a notification: those need semantic
+    /// evidence nothing produces before PR8, and this is the provider saying
+    /// what happened, not Corral saying what is (ADR 0004 D7).
+    ///
+    /// Supersession is the daemon's: it sends the latest fact, so a newer one
+    /// retires the older and an `awaiting_input` is not still here after a
+    /// turn started.
+    pub agent: Option<String>,
 }
 
 /// What a surface may say about one listed session.
 pub fn present(item: &SessionListItem) -> SessionPresentation {
+    present_at(item, SystemTime::now())
+}
+
+/// The same, against a stated instant.
+///
+/// The age of a reported fact is the one thing here that is not a pure
+/// function of what the daemon said, so the clock is a parameter rather than
+/// something reached for — otherwise the only way to check the wording would
+/// be to wait.
+pub fn present_at(item: &SessionListItem, now: SystemTime) -> SessionPresentation {
     let (state, runtime) = match item.execution_state.as_str() {
         // Reliably knowing the runtime ended is enough for Exited, and nothing
         // else about the session's status is claimed alongside it.
@@ -80,6 +104,75 @@ pub fn present(item: &SessionListItem) -> SessionPresentation {
             // answer comes back (`AGENTS.md` §Protocol).
             Some(TerminalAccess::Available) | None => None,
         },
+        agent: agent_line(item, now),
+    }
+}
+
+/// What the agent reported, as a person reads it.
+///
+/// Absent unless every part of the sentence is known: which agent said it,
+/// what it said, and how long ago. A fact this build has no word for renders
+/// nothing at all — the client states no claim it cannot name
+/// (`AGENTS.md` §Protocol).
+fn agent_line(item: &SessionListItem, now: SystemTime) -> Option<String> {
+    let event = item.agent_event.as_ref()?;
+    let provider = item.provider.as_ref()?;
+    let reported = reported_phrase(&event.kind)?;
+    Some(format!(
+        "{} reported {reported} · {} ago",
+        product(&provider.name),
+        age(event, now),
+    ))
+}
+
+/// Past tense, and only what the provider actually said.
+///
+/// `turn_started` is deliberately not "working" and `awaiting_input` is
+/// deliberately not "needs you": both are main states, both need evidence this
+/// phase does not have, and the wording is where that discipline is either
+/// kept or quietly lost (`PRODUCT.md` §4).
+fn reported_phrase(kind: &AgentEventKind) -> Option<&'static str> {
+    match kind {
+        AgentEventKind::SessionStarted => Some("starting"),
+        AgentEventKind::TurnStarted => Some("starting a turn"),
+        AgentEventKind::TurnEnded => Some("finishing a turn"),
+        AgentEventKind::AwaitingInput => Some("waiting for input"),
+        AgentEventKind::SessionEnded => Some("ending"),
+        // A kind a newer daemon named. Rendering the raw spelling would put
+        // provider vocabulary in front of a person, and guessing at it would
+        // be worse.
+        AgentEventKind::Unknown(_) => None,
+    }
+}
+
+/// The provider as a person writes it.
+///
+/// The wire name is a lowercase identifier; a sentence starts with a capital.
+/// Nothing else about it is changed, because Corral does not maintain a table
+/// of product names it might get wrong.
+fn product(name: &str) -> String {
+    let mut characters = name.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
+        None => String::new(),
+    }
+}
+
+/// How long ago a fact was reported, at the coarseness a person reads.
+///
+/// A clock that puts the report in the future reads as no time at all rather
+/// than as a negative age: the two clocks disagree, which says nothing about
+/// the fact.
+fn age(event: &AgentEvent, now: SystemTime) -> String {
+    let elapsed = now
+        .duration_since(event.observed_at())
+        .unwrap_or(Duration::ZERO);
+    let seconds = elapsed.as_secs();
+    match seconds {
+        ..60 => format!("{seconds}s"),
+        60..3_600 => format!("{}m", seconds / 60),
+        3_600..172_800 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
     }
 }
 
@@ -97,6 +190,19 @@ impl SessionPresentation {
         }
     }
 
+    /// The lines beneath the state, in the order every surface prints them.
+    ///
+    /// One list rather than two fields each surface arranges: what the CLI and
+    /// the list must agree on is the words *and* their order, and two
+    /// arrangements of the same facts are two surfaces contradicting each
+    /// other about which one matters (grill Q2).
+    pub fn beneath(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        lines.extend(self.screen.map(str::to_owned));
+        lines.extend(self.agent.clone());
+        lines
+    }
+
     /// Why Open is refused before the person presses it, when it is.
     ///
     /// The same line the row already shows, because a refusal should repeat
@@ -105,6 +211,18 @@ impl SessionPresentation {
     /// untouched: what is refused is Corral's ability to show the screen.
     pub fn refuses_open(&self) -> Option<&'static str> {
         self.screen
+    }
+
+    /// Why Continue is refused before the person presses it, when it is.
+    ///
+    /// The live case only, and only because it is the one this surface is
+    /// already rendering: a running session has nothing to continue, and the
+    /// row says so. Every other reason a continuation can be refused — a
+    /// contested identity, an ending Corral cannot verify, a daemon that did
+    /// not launch it — rests on facts only the daemon holds, and it states
+    /// those in words this surface shows unchanged.
+    pub fn refuses_continue(&self) -> Option<&'static str> {
+        (self.runtime == Some(RUNNING)).then_some(RUNNING)
     }
 }
 

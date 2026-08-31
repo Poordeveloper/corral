@@ -1,4 +1,7 @@
+use std::time::{Duration, SystemTime};
+
 use super::*;
+use crate::ErrorCode;
 use serde_json::json;
 
 #[test]
@@ -148,9 +151,243 @@ fn an_unknown_terminal_access_is_left_off_the_wire() {
         title: "sh".to_owned(),
         execution_state: "running".to_owned(),
         terminal_access: None,
+        provider: None,
+        agent_event: None,
     };
 
     let encoded = serde_json::to_value(&item).expect("encode");
 
     assert!(encoded.get("terminal_access").is_none(), "{encoded}");
+}
+
+/// A session with no provider facts leaves both fields off the wire. Absence
+/// is unknown, and a client must not have to know a spelled-out "unknown".
+#[test]
+fn absent_provider_facts_are_left_off_the_wire() {
+    let item = SessionListItem {
+        session_id: "s1".to_owned(),
+        title: "sh".to_owned(),
+        execution_state: "running".to_owned(),
+        terminal_access: None,
+        provider: None,
+        agent_event: None,
+    };
+
+    let encoded = serde_json::to_value(&item).expect("encode");
+
+    assert!(encoded.get("provider").is_none(), "{encoded}");
+    assert!(encoded.get("agent_event").is_none(), "{encoded}");
+}
+
+/// An older peer meets a list a newer daemon extended, and keeps reading it.
+#[test]
+fn a_list_item_without_the_new_fields_still_decodes() {
+    let item = json!({
+        "session_id": "s1",
+        "title": "sh",
+        "execution_state": "running",
+    });
+
+    let decoded: SessionListItem = serde_json::from_value(item).expect("decode");
+
+    assert!(decoded.provider.is_none());
+    assert!(decoded.agent_event.is_none());
+}
+
+/// The identity Corral currently stands behind. Withdrawn after a contest, and
+/// absence means not currently assertable — never that no id ever existed
+/// (ADR 0004 D8).
+#[test]
+fn a_provider_without_a_current_identity_still_names_the_product() {
+    let item = json!({
+        "session_id": "s1",
+        "title": "claude",
+        "execution_state": "running",
+        "provider": {"name": "claude"},
+    });
+
+    let decoded: SessionListItem = serde_json::from_value(item).expect("decode");
+
+    let provider = decoded.provider.expect("a provider");
+    assert_eq!(provider.name, "claude");
+    assert_eq!(provider.external_id, None);
+}
+
+/// Future input: an agent-event kind a newer daemon named decodes rather than
+/// failing the item, and keeps its spelling for a diagnostic.
+#[test]
+fn an_unknown_agent_event_kind_decodes_as_unknown() {
+    let item = json!({
+        "session_id": "s1",
+        "title": "claude",
+        "execution_state": "running",
+        "agent_event": {"kind": "compacted_context", "at_ms": 1_700_000_000_000_i64},
+    });
+
+    let decoded: SessionListItem = serde_json::from_value(item).expect("decode");
+
+    let event = decoded.agent_event.expect("an event");
+    assert_eq!(
+        event.kind,
+        AgentEventKind::Unknown("compacted_context".to_owned()),
+    );
+    assert_eq!(event.at_ms, 1_700_000_000_000);
+}
+
+#[test]
+fn every_agent_event_kind_survives_the_wire() {
+    for kind in [
+        AgentEventKind::SessionStarted,
+        AgentEventKind::TurnStarted,
+        AgentEventKind::TurnEnded,
+        AgentEventKind::AwaitingInput,
+        AgentEventKind::SessionEnded,
+    ] {
+        let encoded = serde_json::to_value(&kind).expect("encode");
+        let spelling = encoded.as_str().expect("a string");
+        assert_eq!(AgentEventKind::from_wire(spelling), kind);
+    }
+}
+
+/// `provider` and `argv` are mutually exclusive on the wire, and neither is
+/// required — an older peer's request, which always carries `argv`, still
+/// means exactly what it always meant.
+#[test]
+fn session_new_still_decodes_an_older_peers_request() {
+    let params = json!({
+        "command_id": "c1",
+        "argv": ["bash", "-l"],
+    });
+
+    let decoded: SessionNewParams = serde_json::from_value(params).expect("decode");
+
+    assert_eq!(decoded.argv, vec!["bash".to_owned(), "-l".to_owned()]);
+    assert_eq!(decoded.provider, None);
+    assert!(decoded.args.is_empty());
+}
+
+#[test]
+fn session_new_decodes_the_provider_form() {
+    let params = json!({
+        "command_id": "c1",
+        "provider": "claude",
+        "args": ["--model", "opus"],
+    });
+
+    let decoded: SessionNewParams = serde_json::from_value(params).expect("decode");
+
+    assert!(decoded.argv.is_empty());
+    assert_eq!(decoded.provider.as_deref(), Some("claude"));
+    assert_eq!(decoded.args, vec!["--model".to_owned(), "opus".to_owned()]);
+}
+
+/// A continuation names the Session, never the provider identity: a caller
+/// able to name the provider id would be a caller able to resume an identity
+/// Corral does not stand behind.
+#[test]
+fn session_resume_names_only_a_command_and_a_session() {
+    let params = SessionResumeParams {
+        command_id: "c1".to_owned(),
+        session_id: "s1".to_owned(),
+    };
+
+    let encoded = serde_json::to_value(&params).expect("encode");
+
+    assert_eq!(encoded, json!({"command_id": "c1", "session_id": "s1"}),);
+}
+
+/// Future input: a `session.resume` from a newer peer decodes past fields
+/// this build has not learned, on both sides of the exchange.
+#[test]
+fn session_resume_decodes_past_unknown_fields() {
+    let params = json!({"command_id": "c1", "session_id": "s1", "detach": true});
+    let decoded: SessionResumeParams = serde_json::from_value(params).expect("params decode");
+    assert_eq!(decoded.command_id, "c1");
+    assert_eq!(decoded.session_id, "s1");
+
+    let result = json!({"session_id": "s1", "run_id": "r2", "resumed_at_ms": 0});
+    let decoded: SessionResumeResult = serde_json::from_value(result).expect("result decode");
+    assert_eq!(decoded.session_id, "s1");
+    assert_eq!(decoded.run_id, "r2");
+}
+
+/// A secondary fact may not take the row down. The row's promises are its
+/// identity, its label, and its execution state; a provider fact is decoration
+/// beside them, so a shape this build cannot read degrades that fact to
+/// unknown rather than dropping the session out of the list
+/// (`AGENTS.md` §Protocol).
+#[test]
+fn a_secondary_fact_this_build_cannot_read_does_not_lose_the_row() {
+    let unreadable = [
+        json!({"kind": "turn_ended", "at_ms": 1.5}),
+        json!({"kind": 7, "at_ms": 1}),
+        json!("turn_ended"),
+        json!([]),
+    ];
+    for carried in unreadable {
+        let item = json!({
+            "session_id": "s1",
+            "title": "claude",
+            "execution_state": "running",
+            "agent_event": carried,
+        });
+
+        let decoded: SessionListItem =
+            serde_json::from_value(item).unwrap_or_else(|error| panic!("{carried}: {error}"));
+
+        assert_eq!(decoded.session_id, "s1", "{carried}");
+        assert_eq!(decoded.execution_state, "running", "{carried}");
+        assert!(decoded.agent_event.is_none(), "{carried}");
+    }
+}
+
+#[test]
+fn a_provider_block_this_build_cannot_read_does_not_lose_the_row() {
+    let item = json!({
+        "session_id": "s1",
+        "title": "claude",
+        "execution_state": "running",
+        "provider": {"name": ["claude"]},
+    });
+
+    let decoded: SessionListItem = serde_json::from_value(item).expect("decode");
+
+    assert_eq!(decoded.session_id, "s1");
+    assert!(decoded.provider.is_none());
+}
+
+/// A code this build does not know keeps its spelling rather than failing the
+/// response, and a code it does know is what behaviour hangs off.
+#[test]
+fn the_unknown_provider_code_survives_the_wire() {
+    let encoded = serde_json::to_value(ErrorCode::UnknownProvider).expect("encode");
+    assert_eq!(encoded, json!("unknown_provider"));
+    assert_eq!(
+        serde_json::from_value::<ErrorCode>(encoded).expect("decode"),
+        ErrorCode::UnknownProvider,
+    );
+}
+
+/// The encoder and the decoder of `at_ms` are one owner, so the sign
+/// convention cannot be changed in half of it.
+#[test]
+fn an_agent_event_survives_its_own_round_trip() {
+    for at in [
+        SystemTime::UNIX_EPOCH,
+        SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_000_000),
+        SystemTime::UNIX_EPOCH - Duration::from_millis(86_400_000),
+    ] {
+        let event = AgentEvent::at(AgentEventKind::TurnEnded, at).expect("a representable instant");
+
+        assert_eq!(event.observed_at(), at, "{at:?}");
+    }
+}
+
+/// A clock too far out to describe an age omits the fact rather than
+/// saturating into a confident lie.
+#[test]
+fn an_unrepresentable_instant_produces_no_event() {
+    let far = SystemTime::UNIX_EPOCH + Duration::from_secs(u64::MAX / 1_000);
+
+    assert!(AgentEvent::at(AgentEventKind::TurnEnded, far).is_none());
 }

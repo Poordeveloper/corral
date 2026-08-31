@@ -17,6 +17,7 @@ compile_error!(
 );
 
 pub mod corpus;
+pub mod provider;
 pub mod pty;
 pub mod wire;
 
@@ -30,6 +31,10 @@ use std::time::{Duration, Instant};
 
 /// Built by cargo alongside this test binary.
 pub const CORRAL_BINARY: &str = env!("CARGO_BIN_EXE_corral");
+
+/// The scripted stand-in a managed provider launch actually runs. No test
+/// calls a real provider (`AGENTS.md` §Tests).
+pub const MOCK_PROVIDER_BINARY: &str = env!("CARGO_BIN_EXE_corral-mock-provider");
 
 /// How long a test waits for a condition it expects to become true.
 pub const SETTLE: Duration = Duration::from_secs(10);
@@ -85,6 +90,13 @@ pub struct TestAccount {
     idle_grace: Duration,
     pre_hello_deadline: Duration,
     activation_deadline: Duration,
+    /// A directory placed at the front of the daemon's `PATH`, holding the
+    /// stand-in a provider launch resolves to.
+    ///
+    /// The daemon resolves the provider's program through `PATH`, exactly as a
+    /// person's own shell would: Corral integrates the agent the user
+    /// installed. A test substitutes the agent rather than the resolution.
+    provider_path: Option<PathBuf>,
 }
 
 impl TestAccount {
@@ -111,7 +123,19 @@ impl TestAccount {
             idle_grace: Duration::from_secs(3),
             pre_hello_deadline: Duration::from_secs(5),
             activation_deadline: Duration::from_secs(10),
+            provider_path: None,
         }
+    }
+
+    /// Put the scripted stand-in where a managed provider launch will find it.
+    pub fn with_mock_provider(mut self, provider: &str) -> Self {
+        let bin = self.base.join("bin");
+        create_private_dir_all(&bin);
+        let stand_in = bin.join(provider);
+        let _ = std::fs::remove_file(&stand_in);
+        std::fs::copy(MOCK_PROVIDER_BINARY, &stand_in).expect("place the stand-in provider");
+        self.provider_path = Some(bin);
+        self
     }
 
     pub fn with_idle_grace(mut self, idle_grace: Duration) -> Self {
@@ -205,7 +229,7 @@ impl TestAccount {
     /// it. One list, so a surface started on a pty and one started as an
     /// ordinary child cannot end up in different accounts.
     fn environment(&self) -> Vec<(&'static str, String)> {
-        vec![
+        let mut environment = vec![
             (
                 "CORRAL_TEST_ROOT",
                 self.corral_root.to_string_lossy().into_owned(),
@@ -219,20 +243,43 @@ impl TestAccount {
                 "CORRAL_TEST_ACTIVATION_DEADLINE_MS",
                 millis(self.activation_deadline),
             ),
-        ]
+        ];
+        if let Some(bin) = &self.provider_path {
+            let inherited = std::env::var("PATH").unwrap_or_default();
+            environment.push(("PATH", format!("{}:{inherited}", bin.to_string_lossy())));
+        }
+        environment
     }
 
     /// Start a daemon directly and wait until it is serving.
     pub fn start_daemon(&self) -> DaemonProcess {
-        let child = self
-            .corrald()
+        self.start_daemon_with(&[])
+    }
+
+    /// The same, carrying extra environment into the daemon.
+    ///
+    /// A managed provider launch is spawned by the daemon, so what the
+    /// stand-in provider reads has to be in the daemon's environment: putting
+    /// it on the client would script a process that never runs the provider.
+    pub fn start_daemon_with(&self, extra: &[(&str, String)]) -> DaemonProcess {
+        let mut command = self.corrald();
+        for (name, value) in extra {
+            command.env(name, value);
+        }
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .expect("start corrald");
         let daemon = DaemonProcess { child };
-        wait_until(SETTLE, || self.socket().exists());
+        // Connectable, not merely present. A restart passes through a window
+        // where the pathname is the departed daemon's artifact and nothing is
+        // listening on it, and a harness that waited on the path alone would
+        // hand that window to whatever connected next.
+        wait_until(SETTLE, || {
+            std::os::unix::net::UnixStream::connect(self.socket()).is_ok()
+        });
         daemon
     }
 }

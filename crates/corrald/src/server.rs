@@ -2,7 +2,7 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
@@ -13,16 +13,18 @@ use crate::lifecycle::{Lifecycle, Phase, ShutdownReason, watch_idle};
 use crate::policy::DaemonPolicy;
 use crate::state::DaemonState;
 
-/// Keeps a failing accept from spinning the CPU while the cause persists.
-const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
-
 /// Bind, serve, and return once shutdown has run to completion.
 ///
 /// The caller still holds the singleton claim when this returns, so the window
 /// between the last client closing and the process exiting still reads as
 /// "owner present" to anyone probing — which is what stops a second daemon
 /// from starting into a half-dismantled rendezvous.
-pub async fn serve(socket: &Path, policy: DaemonPolicy, state: Arc<DaemonState>) -> io::Result<()> {
+pub async fn serve(
+    socket: &Path,
+    hook_socket: &Path,
+    policy: DaemonPolicy,
+    state: Arc<DaemonState>,
+) -> io::Result<()> {
     let listener = UnixListener::bind(socket)?;
     // The run directory is already user-private; the socket says so too rather
     // than inheriting whatever the umask happened to be.
@@ -43,6 +45,34 @@ pub async fn serve(socket: &Path, policy: DaemonPolicy, state: Arc<DaemonState>)
         state.observations().watch_integrity(),
     ));
 
+    // One task interprets every delivered hook event, in the order they
+    // arrived. Serial on purpose: two drainers would let two events race to
+    // establish one Session's first provider identity (ADR 0004 D5).
+    if let Some(incoming) = state.take_deliveries() {
+        tokio::spawn(crate::hook_evidence::ingest(Arc::clone(&state), incoming));
+    }
+    // A hook endpoint that will not bind costs awareness, never the daemon:
+    // the sessions this process owns keep running, and every relay that cannot
+    // reach it fails open in milliseconds. What it does cost is the ability to
+    // start a *managed* session — one whose hooks deliver here — so the answer
+    // is recorded rather than only logged, and bound here rather than inside
+    // the task so no client can ask before it is known.
+    let hook_socket = hook_socket.to_path_buf();
+    match crate::hook_endpoint::bind(&hook_socket) {
+        Ok(hook_listener) => {
+            let deliveries = state.deliveries();
+            let hook_shutdown = lifecycle.subscribe();
+            tokio::spawn(async move {
+                crate::hook_endpoint::serve(&hook_socket, hook_listener, deliveries, hook_shutdown)
+                    .await;
+            });
+        }
+        Err(source) => {
+            error!(%source, endpoint = %hook_socket.display(), "the hook endpoint could not serve");
+            state.hook_endpoint_unavailable();
+        }
+    }
+
     info!(endpoint = %socket.display(), "corrald is serving");
 
     loop {
@@ -60,7 +90,7 @@ pub async fn serve(socket: &Path, policy: DaemonPolicy, state: Arc<DaemonState>)
                 }
                 Err(source) => {
                     error!(%source, "accept failed");
-                    tokio::time::sleep(ACCEPT_BACKOFF).await;
+                    tokio::time::sleep(crate::policy::ACCEPT_BACKOFF).await;
                 }
             },
         }

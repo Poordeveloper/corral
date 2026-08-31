@@ -163,6 +163,7 @@ dependencies = [
  "clap",
  "corral-client",
  "corral-protocol",
+ "corral-rendezvous",
  "corral-tui",
  "portable-pty",
  "rusqlite",

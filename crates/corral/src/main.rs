@@ -7,8 +7,11 @@
 //! decides on the user's behalf to upgrade, downgrade, or stop a daemon.
 
 use std::process::ExitCode;
+use std::time::SystemTime;
 
 use clap::{Parser, Subcommand};
+
+mod relay;
 use corral_client::{ActivationError, ClientActivationPolicy, Connection, RequestError, activate};
 use corral_protocol::method::SessionListItem;
 use corral_tui::LocalKeys;
@@ -31,10 +34,35 @@ enum Command {
     /// List the sessions corrald knows about.
     List,
     /// Start a session and attach to it.
+    ///
+    /// Provider-first: `corral new claude` starts a managed Claude session,
+    /// and `corral new -- bash` runs a raw command. An unknown first word is
+    /// refused by name rather than guessed at, so the two namespaces stay
+    /// distinct (grill Q6).
+    ///
+    /// An agent's own arguments need the separator here, where the list's
+    /// prompt takes them with or without it. The stricter shape is not a
+    /// preference: the separator is the only thing that tells a provider from
+    /// a raw command, and a parser that let it be optional after the provider
+    /// would have to be given the separator to see — which clap never does, it
+    /// consumes it. `corral new -- bash` and `corral new bash` would become
+    /// the same words, and the two namespaces grill Q6 kept apart would
+    /// collapse into whichever the daemon guessed. A person who types the
+    /// shorter form is told the exact fix by the parser.
     New {
-        /// The command to run. Everything after `--` is the command's own.
-        #[arg(last = true, required = true)]
-        argv: Vec<String>,
+        /// The agent to start, or nothing when a command follows `--`.
+        provider: Option<String>,
+        /// Arguments after `--`: the agent's own, or the command to run.
+        #[arg(last = true)]
+        rest: Vec<String>,
+    },
+    /// Continue a session as a new run, and attach to it.
+    ///
+    /// "Continue", not "resume": the product verb a person reads is Continue
+    /// in Corral (`PRODUCT.md` §5).
+    Continue {
+        /// The session's id, or enough of its start to be unambiguous.
+        session: String,
     },
     /// Attach to a session corrald is already running.
     Attach {
@@ -45,9 +73,53 @@ enum Command {
     Tui,
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> ExitCode {
+/// Synchronous, and that is for the relay's sake.
+///
+/// `#[tokio::main]` would build a reactor before this body ran and tear one
+/// down after it returned — on every hook invocation, several per agent turn,
+/// for a program that is entirely synchronous and uses none of it. Worse, the
+/// construction would sit *outside* the interference budget below while the
+/// user's agent waited for it, so the number would understate what a hook
+/// actually costs (ADR 0004 D4). Everything that does need a reactor gets one
+/// after the relay has been answered.
+fn main() -> ExitCode {
+    // Before the command line is even read: the relay's budget is the
+    // interference one hook invocation costs the user's agent, and reading the
+    // arguments is part of the invocation (ADR 0004 D4).
+    let started = std::time::Instant::now();
+
+    // Before the parser, before activation, and before a reactor exists.
+    //
+    // Before the parser because a parser answers a command line it does not
+    // understand by writing usage to standard error and exiting non-zero,
+    // which Claude Code reads as a blocking hook decision — so an injected
+    // settings file naming a flag this build does not know would let the shim
+    // steer the agent by failing to recognise itself. Skew is normal: that
+    // file is written at launch and invokes whatever is installed when an
+    // event fires (ADR 0004 D3).
+    //
+    // Before activation because shims never start `corrald`: one that could
+    // would delay the user's agent by however long a cold start takes
+    // (ADR 0004 D1).
+    if let Some(relay) = relay::invocation(std::env::args_os()) {
+        return relay::deliver(&relay.token, &relay.provider, started);
+    }
+
     let cli = Cli::parse();
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(source) => {
+            eprintln!("corral: this surface could not start: {source}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(serve(cli))
+}
+
+async fn serve(cli: Cli) -> ExitCode {
     let policy = ClientActivationPolicy::resolve();
 
     let mut connection = match activate(&policy).await {
@@ -58,7 +130,8 @@ async fn main() -> ExitCode {
     match cli.command {
         Command::Ping => ping(&mut connection).await,
         Command::List => list(&mut connection).await,
-        Command::New { argv } => new_session(&mut connection, argv).await,
+        Command::New { provider, rest } => new_session(&mut connection, provider, rest).await,
+        Command::Continue { session } => continue_session(&mut connection, &session).await,
         Command::Attach { session } => attach(&mut connection, &session).await,
         Command::Tui => session_list(&policy, connection).await,
     }
@@ -80,16 +153,77 @@ async fn session_list(policy: &ClientActivationPolicy, connection: Connection) -
 }
 
 /// Start a session and attach to it.
-async fn new_session(connection: &mut Connection, argv: Vec<String>) -> ExitCode {
-    let started = match corral_tui::start_session(connection, argv).await {
+async fn new_session(
+    connection: &mut Connection,
+    provider: Option<String>,
+    rest: Vec<String>,
+) -> ExitCode {
+    let requested = match provider {
+        Some(name) => corral_tui::Requested::Provider {
+            name: name.clone(),
+            args: rest,
+        },
+        None if rest.is_empty() => {
+            eprintln!("corral: new needs an agent or a command");
+            eprintln!("  corral new claude");
+            eprintln!("  corral new -- bash");
+            return ExitCode::FAILURE;
+        }
+        None => corral_tui::Requested::Command(rest),
+    };
+    // Kept for the hint below: an unknown agent is refused by the daemon, and
+    // the fix is a command-line form only this surface knows.
+    let named = match &requested {
+        corral_tui::Requested::Provider { name, .. } => Some(name.clone()),
+        corral_tui::Requested::Command(_) => None,
+    };
+
+    let started = match corral_tui::start_session(connection, requested).await {
         Ok(started) => started,
-        Err(error) => return report_request_failure(&error),
+        Err(error) => {
+            let code = report_request_failure(&error);
+            // The daemon names the agents it knows; the form for a plain
+            // command is this surface's own syntax, so this surface is what
+            // states it — and only for the refusal it answers. Printed after
+            // any other failure it would send a person to start an *unmanaged*
+            // session, which is the opposite of what they asked for.
+            if let (Some(named), true) = (named, unknown_agent(&error)) {
+                eprintln!("For a plain command, use: corral new -- {named}");
+            }
+            return code;
+        }
     };
 
     // Standard error, because standard output belongs to the session from the
     // moment the terminal opens.
     eprintln!("session {}", started.session_id);
     attach(connection, &started.session_id).await
+}
+
+/// Whether the daemon refused because it does not integrate that agent.
+///
+/// Read off the code rather than the sentence: behaviour hangs off the code
+/// alone, and a hint matched against prose would drift the first time the
+/// prose did.
+fn unknown_agent(error: &RequestError) -> bool {
+    matches!(
+        error,
+        RequestError::Refused(refusal) if refusal.code == corral_protocol::ErrorCode::UnknownProvider
+    )
+}
+
+/// Continue a session as a new run, and attach to it.
+async fn continue_session(connection: &mut Connection, session: &str) -> ExitCode {
+    let resolved = match resolve_session(connection, session).await {
+        Ok(resolved) => resolved,
+        Err(code) => return code,
+    };
+    let continued = match corral_tui::continue_session(connection, &resolved).await {
+        Ok(continued) => continued,
+        Err(error) => return report_request_failure(&error),
+    };
+    eprintln!("session {}", continued.session_id);
+    attach(connection, &continued.session_id).await
 }
 
 /// Attach to a running session until the person detaches.
@@ -208,11 +342,15 @@ async fn list(connection: &mut Connection) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // One instant for the whole listing. A row that read the clock for itself
+    // would let two facts observed at the same moment print two different
+    // ages, which is a listing disagreeing with itself.
+    let now = SystemTime::now();
     let mut unrenderable = 0;
     for session in &sessions.sessions {
         match serde_json::from_value::<SessionListItem>(session.clone()) {
             Ok(item) => {
-                for row in session_rows(&item) {
+                for row in session_rows(&item, now) {
                     println!("{row}");
                 }
             }
@@ -241,22 +379,25 @@ const STATE_COLUMN: usize = 36;
 /// What `corral list` prints for one session.
 ///
 /// One line, because a list read at a glance should stay one line per session,
-/// plus the capability line when there is one. Every word of it comes from the
+/// plus whatever secondary lines the projection allows. Every word of it comes from the
 /// shared projection: this surface and the session list say the same thing
 /// about the same session or one of them is lying (grill Q2).
-fn session_rows(item: &SessionListItem) -> Vec<String> {
-    let presented = corral_tui::present(item);
+fn session_rows(item: &SessionListItem, now: SystemTime) -> Vec<String> {
+    let presented = corral_tui::present_at(item, now);
     let mut rows = vec![format!(
         "{:<ID_COLUMN$}{:<STATE_COLUMN$}{}",
         corral_tui::short_id(&item.session_id),
         presented.state_line(),
         item.title
     )];
-    // Indented under the state it qualifies rather than beside the id.
+    // Indented under the state they qualify rather than beside the id, and in
+    // the projection's order: what the two surfaces must agree on is the words
+    // and where they sit relative to each other (grill Q2).
     rows.extend(
         presented
-            .screen
-            .map(|screen| format!("{:ID_COLUMN$}{screen}", "")),
+            .beneath()
+            .into_iter()
+            .map(|line| format!("{:ID_COLUMN$}{line}", "")),
     );
     rows
 }

@@ -12,9 +12,22 @@ const RUN_DIR: &str = "run";
 const LOG_DIR: &str = "log";
 const STATE_DIR: &str = "state";
 const SOCKET_FILE: &str = "corrald.sock";
+/// The hook endpoint's pathname.
+///
+/// Shorter than the canonical socket's, deliberately: the canonical one is
+/// already length-checked at construction, so a name no longer than it cannot
+/// be the one that overflows `sun_path` on a root the canonical socket fits in.
+const HOOK_SOCKET_FILE: &str = "hook.sock";
 const LOCK_FILE: &str = "corrald.lock";
 const LOG_FILE: &str = "corrald.log";
 const REGISTRY_FILE: &str = "registry.sqlite3";
+/// Where per-launch provider configuration Corral owns is written.
+///
+/// Under the durable-state tree rather than the runtime one because a launch
+/// outlives neither a daemon nor a reboot cleanly: these files are cleaned on
+/// ownership evidence, never by being found in a directory somebody sweeps
+/// (ADR 0004 D6; PR5 plan design 8).
+const LAUNCH_DIR: &str = "launch";
 
 /// Runtime and log directories are user-private: the flock and these modes are
 /// a transport fence, deliberately not a security boundary (ADR 0001).
@@ -31,11 +44,13 @@ pub struct RendezvousPaths {
     root: PathBuf,
     run_dir: PathBuf,
     socket: PathBuf,
+    hook_socket: PathBuf,
     lock: PathBuf,
     log_dir: PathBuf,
     log_file: PathBuf,
     state_dir: PathBuf,
     registry: PathBuf,
+    launch_dir: PathBuf,
 }
 
 impl RendezvousPaths {
@@ -61,8 +76,10 @@ impl RendezvousPaths {
 
         Ok(Self {
             lock: run_dir.join(LOCK_FILE),
+            hook_socket: run_dir.join(HOOK_SOCKET_FILE),
             log_file: log_dir.join(LOG_FILE),
             registry: state_dir.join(REGISTRY_FILE),
+            launch_dir: state_dir.join(LAUNCH_DIR),
             root: root.to_path_buf(),
             socket,
             run_dir,
@@ -78,6 +95,21 @@ impl RendezvousPaths {
 
     pub fn socket(&self) -> &Path {
         &self.socket
+    }
+
+    /// Where provider hook events reach this account's daemon.
+    ///
+    /// A second local socket beside the canonical one, created and removed by
+    /// the daemon alone. Separate rather than multiplexed so that
+    /// evidence-only is a structural fact: no session method and no control
+    /// surface is reachable from it (ADR 0004 D2).
+    ///
+    /// Not a singleton artifact. The canonical socket is the meeting place the
+    /// claim protects; this one exists for as long as the daemon holding that
+    /// claim is serving, and nothing probes it to decide whether a daemon
+    /// exists.
+    pub fn hook_socket(&self) -> &Path {
+        &self.hook_socket
     }
 
     pub fn lock(&self) -> &Path {
@@ -106,6 +138,12 @@ impl RendezvousPaths {
         &self.state_dir
     }
 
+    /// The directory holding the per-launch provider configuration Corral
+    /// writes for a managed session.
+    pub fn launch_dir(&self) -> &Path {
+        &self.launch_dir
+    }
+
     /// Create the user-private runtime directory. Idempotent.
     pub fn ensure_run_dir(&self) -> Result<(), RendezvousError> {
         self.ensure_private_tree(&self.run_dir)
@@ -119,6 +157,12 @@ impl RendezvousPaths {
     /// Create the user-private durable-state directory. Idempotent.
     pub fn ensure_state_dir(&self) -> Result<(), RendezvousError> {
         self.ensure_private_tree(&self.state_dir)
+    }
+
+    /// Create the user-private per-launch configuration directory. Idempotent.
+    pub fn ensure_launch_dir(&self) -> Result<(), RendezvousError> {
+        self.ensure_private_tree(&self.state_dir)?;
+        ensure_private_dir(&self.launch_dir)
     }
 
     /// Check every directory Corral owns on the way down, not just the leaf.

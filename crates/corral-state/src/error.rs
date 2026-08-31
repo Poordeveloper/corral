@@ -56,6 +56,25 @@ pub enum Refusal {
         binding: BindingId,
         assurance: Assurance,
     },
+    /// Contradictory identity evidence was offered against a binding that is
+    /// not a provider-session binding. Only a provider-session binding carries
+    /// a claim about which provider conversation a Session names; a managed
+    /// runtime's identity is Corral-minted and nothing a provider says can
+    /// contradict it (ADR 0008 D2).
+    NotAProviderSessionBinding(BindingId),
+    /// Evidence that cannot assert a durable fact is not a contest. Contested
+    /// is monotonic and nothing in this phase clears it, so recording one from
+    /// a guess would revoke resume for good on evidence that never earned it.
+    UnsupportedContest {
+        binding: BindingId,
+        assurance: Assurance,
+    },
+    /// The identity offered as conflicting is the one the binding already
+    /// holds, so nothing was contradicted. A contest recorded here would
+    /// revoke a Session's continuation permanently over an agreement.
+    IdentityDoesNotConflict {
+        binding: BindingId,
+    },
     /// The log already holds this Run, so its start is not a fact still
     /// waiting to be appended.
     RunAlreadyRecorded(RunId),
@@ -85,6 +104,10 @@ pub enum Refusal {
     /// A Run's association is its runtime binding; no other kind of binding
     /// can carry one.
     NotARuntimeBinding(BindingId),
+    /// A Session with no control-capable runtime binding has nothing to file
+    /// another Run's association under. Minting a second one here would break
+    /// the at-most-one rule from the other side (ADR 0008 D2).
+    NoManagedRuntimeBinding(CorralSessionId),
     /// A process episode ends once. A second end would overwrite a recorded
     /// outcome rather than add a fact.
     RunAlreadyEnded(RunId),
@@ -113,6 +136,13 @@ pub enum Refusal {
     /// event yet, so the second acquisition fails closed rather than quietly
     /// displacing the first.
     ControlCapableRuntimeBindingExists {
+        session: CorralSessionId,
+        existing: BindingId,
+    },
+    /// The Session already has a provider identity, and this is a different
+    /// one. One Session is one conversation: a second identity is the contest
+    /// ADR 0004 D8 rules on, not a second fact to hold alongside the first.
+    ProviderSessionBindingExists {
         session: CorralSessionId,
         existing: BindingId,
     },
@@ -232,6 +262,17 @@ impl fmt::Display for Refusal {
                 f,
                 "{assurance:?} evidence does not confirm binding {binding}"
             ),
+            Self::NotAProviderSessionBinding(binding) => {
+                write!(f, "binding {binding} is not a provider-session binding")
+            }
+            Self::UnsupportedContest { binding, assurance } => write!(
+                f,
+                "{assurance:?} evidence does not contest binding {binding}"
+            ),
+            Self::IdentityDoesNotConflict { binding } => write!(
+                f,
+                "binding {binding} already names that identity, so nothing contradicts it"
+            ),
             Self::RunAlreadyRecorded(run) => write!(f, "run {run} is already recorded"),
             Self::RunClaimsAnotherSession {
                 run,
@@ -256,6 +297,10 @@ impl fmt::Display for Refusal {
             Self::NotARuntimeBinding(binding) => {
                 write!(f, "binding {binding} is not a runtime binding")
             }
+            Self::NoManagedRuntimeBinding(session) => write!(
+                f,
+                "session {session} has no runtime binding another run could belong to"
+            ),
             Self::RunAlreadyEnded(run) => write!(f, "run {run} has already ended"),
             Self::RunAlreadyLive { binding, run } => write!(
                 f,
@@ -273,6 +318,10 @@ impl fmt::Display for Refusal {
             Self::ControlCapableRuntimeBindingExists { session, existing } => write!(
                 f,
                 "session {session} already has the control-capable runtime binding {existing}"
+            ),
+            Self::ProviderSessionBindingExists { session, existing } => write!(
+                f,
+                "session {session} already has the provider-session binding {existing}"
             ),
             Self::ReservedProviderNamespace { binding, misuse } => match misuse {
                 ReservedNamespaceMisuse::ManagedRuntimeWithoutIt => write!(

@@ -187,7 +187,9 @@ fn a_command_typed_at_the_prompt_starts_a_session_and_opens_it() {
 
     terminal.typed(b"n");
     terminal.wait_for("new session: ");
-    terminal.typed(b"/bin/sleep 30\r");
+    // The separator is what tells a raw command from an agent, and it is the
+    // same separator the command line uses (grill Q6).
+    terminal.typed(b"-- /bin/sleep 30\r");
     // The daemon is what says the session exists; the surface is inside it by
     // then, which is why the next keystroke detaches rather than navigates.
     let mut id = 1;

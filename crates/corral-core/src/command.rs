@@ -3,7 +3,7 @@ use std::fmt;
 use std::time::SystemTime;
 
 use crate::external_name::hides_or_reorders;
-use crate::id::CorralSessionId;
+use crate::id::{CorralSessionId, RunId};
 
 /// A client-supplied id for one mutating command.
 ///
@@ -153,9 +153,29 @@ impl Command {
 
 /// What a command did, recorded so that a retry can be answered without doing
 /// it again.
+///
+/// A variant per kind of thing a command produces, because a retry has to be
+/// answered with what the first attempt made. A continuation makes no Session
+/// — it makes another Run of one that already existed — and answering it with
+/// the Session's first Run would hand a retry the wrong episode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandOutcome {
     SessionCreated(CorralSessionId),
+    /// A new Run of a Session that already existed.
+    RunStarted {
+        session: CorralSessionId,
+        run: RunId,
+    },
+}
+
+impl CommandOutcome {
+    /// The Session this command acted on or created.
+    #[must_use]
+    pub fn session(self) -> CorralSessionId {
+        match self {
+            Self::SessionCreated(session) | Self::RunStarted { session, .. } => session,
+        }
+    }
 }
 
 /// The durable record that a command was accepted and what it produced.
