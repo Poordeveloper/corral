@@ -72,7 +72,7 @@ where
         // The command never ran, so no Run exists to report. Saying otherwise
         // would record a runtime occurrence that never happened.
         Err(error) => {
-            abandon_injection(state, injected).await;
+            abandon_injection(state, injected);
             return Committed::NotSpawned(error);
         }
     };
@@ -97,7 +97,7 @@ where
             // and no ending is reported: with no durable start there is no Run
             // to end (grill Q9).
             abandon(pending);
-            abandon_injection(state, injected).await;
+            abandon_injection(state, injected);
             return Committed::StoreRefused(error);
         }
     };
@@ -108,7 +108,7 @@ where
     // still never leave a second process running.
     if !started.executed() {
         abandon(pending);
-        abandon_injection(state, injected).await;
+        abandon_injection(state, injected);
         return Committed::Replayed {
             session: started.session(),
             run: started.run(),
@@ -457,8 +457,11 @@ pub(crate) async fn compose_provider_launch(
             }),
         )),
         Err(refusal) => {
-            provider::launch::removed_off_the_reactor(state.launch_dir(), run).await;
+            // The token first. What it authorises is correlation of evidence
+            // to a Run, and this is the moment that Run stops existing; the
+            // file it named is an artifact nobody reads after startup.
             forget(state);
+            provider::launch::removed_without_waiting(state.launch_dir(), run);
             Err(refusal.to_string())
         }
     }
@@ -499,15 +502,20 @@ pub(crate) struct Injected {
 /// The file is removed here rather than left for the startup sweep, because
 /// this is the moment its owner is known not to exist. The token goes with it:
 /// it names a Session and Run nothing can ever present.
-pub(crate) async fn abandon_injection(state: &Arc<DaemonState>, injected: Option<Injected>) {
+pub(crate) fn abandon_injection(state: &Arc<DaemonState>, injected: Option<Injected>) {
     let Some(injected) = injected else {
         return;
     };
-    provider::launch::removed_off_the_reactor(state.launch_dir(), injected.run).await;
+    // The token stops resolving before anything else, and before this function
+    // can yield. A caller reaching here on the store-refusal path has already
+    // spawned a child and hung it up without waiting — a process may take its
+    // time dying, and one that fires a hook on the way out must not find a
+    // token still naming a Run the daemon has decided never happened.
     state.forget_launch_token(injected.token);
     if injected.ownership == SessionOwnership::CreatedHere {
         state.with_runtime(|runtime| runtime.reported.forget(injected.session));
     }
+    provider::launch::removed_without_waiting(state.launch_dir(), injected.run);
 }
 
 #[cfg(test)]
