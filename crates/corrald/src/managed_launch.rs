@@ -16,7 +16,8 @@ use corral_state::{StartedManagedSession, StateError};
 use tracing::error;
 
 use crate::provider::{
-    self, InjectedSettings, InjectionFailed, KnownProvider, LaunchScope, LaunchToken,
+    self, InjectedSettings, InjectionFailed, KnownProvider, LaunchIntent, LaunchScope, LaunchToken,
+    RelayInvocation,
 };
 use crate::runtime::{ExecutionState, LaunchRequest, PendingSession, PtyGeometry};
 use crate::state::DaemonState;
@@ -367,15 +368,17 @@ impl std::fmt::Display for ResumeRefused {
 /// the argv that names it.
 ///
 /// One function for both a fresh launch and a continuation, because the two
-/// differ in exactly one thing — the arguments — and everything the order
-/// above protects is the same for both. `argv` receives the injected file's
-/// path and returns the provider's command line.
+/// differ in exactly one thing — the intent — and everything the order above
+/// protects is the same for both. What that intent composes into is the
+/// provider's, including whether it needs anything written at all: this knows
+/// only that a launch may leave an artifact behind and that an artifact that
+/// exists has to be undone (ADR 0009 D1).
 ///
-/// The file is written on the blocking pool. Locating the relay stats a path
-/// and publishing the settings ends in an `fsync`, which on a loaded or
-/// network-backed filesystem is tens to hundreds of milliseconds — and this
-/// daemon has one reactor thread. Spending it here would stop every other
-/// request, stop the hook endpoint accepting, and push relays past their
+/// Composition runs on the blocking pool. Locating the relay stats a path, and
+/// a provider that publishes a settings file ends in an `fsync`, which on a
+/// loaded or network-backed filesystem is tens to hundreds of milliseconds —
+/// and this daemon has one reactor thread. Spending it here would stop every
+/// other request, stop the hook endpoint accepting, and push relays past their
 /// interference budget, which is the same reason the spawn and every store
 /// call are already moved off it.
 pub(crate) async fn compose_provider_launch(
@@ -385,7 +388,7 @@ pub(crate) async fn compose_provider_launch(
     provider: KnownProvider,
     ownership: SessionOwnership,
     working_directory: &std::path::Path,
-    argv: impl FnOnce(&std::path::Path) -> Vec<std::ffi::OsString>,
+    intent: LaunchIntent,
 ) -> Result<(LaunchRequest, Option<Injected>), String> {
     // Asked before anything is minted or written. A managed session's whole
     // point is that it reports; if nothing is listening for what it reports,
@@ -427,15 +430,15 @@ pub(crate) async fn compose_provider_launch(
     };
 
     let launch_dir = state.launch_dir().to_path_buf();
-    let written = tokio::task::spawn_blocking(move || {
-        provider::launch::relay_command(provider, token)
-            .and_then(|relay| InjectedSettings::write(&launch_dir, run, provider, &relay))
+    let composed = tokio::task::spawn_blocking(move || {
+        RelayInvocation::compose(provider, token)
+            .and_then(|relay| provider::compose_launch(provider, &intent, &relay, &launch_dir, run))
             .map_err(|failed| failed.to_string())
     })
     .await
     .unwrap_or_else(|_| Err("the launch could not be prepared".to_owned()));
-    let settings = match written {
-        Ok(settings) => settings,
+    let composed = match composed {
+        Ok(composed) => composed,
         Err(failed) => {
             forget(state);
             return Err(failed);
@@ -444,7 +447,7 @@ pub(crate) async fn compose_provider_launch(
 
     match LaunchRequest::new(
         provider::program(provider),
-        argv(settings.path()),
+        composed.argv,
         working_directory,
     ) {
         Ok(launch) => Ok((
@@ -452,16 +455,19 @@ pub(crate) async fn compose_provider_launch(
             Some(Injected {
                 token,
                 session,
-                run,
                 ownership,
+                artifact: composed.artifact,
             }),
         )),
         Err(refusal) => {
             // The token first. What it authorises is correlation of evidence
             // to a Run, and this is the moment that Run stops existing; the
-            // file it named is an artifact nobody reads after startup.
+            // file it named, if this provider took one, is an artifact nobody
+            // reads after startup.
             forget(state);
-            provider::launch::removed_without_waiting(state.launch_dir(), run);
+            if let Some(artifact) = &composed.artifact {
+                provider::launch::removed_without_waiting(artifact);
+            }
             Err(refusal.to_string())
         }
     }
@@ -489,19 +495,24 @@ pub(crate) enum SessionOwnership {
 pub(crate) struct Injected {
     token: LaunchToken,
     session: CorralSessionId,
-    /// The Run whose file this is. Carried rather than passed beside it: the
-    /// undo below deletes a live launch's settings file if the two ever
-    /// disagree, and a caller that cannot name the wrong Run cannot make that
-    /// mistake.
-    run: RunId,
     ownership: SessionOwnership,
+    /// What this launch wrote, when its provider writes anything.
+    ///
+    /// The artifact itself rather than the Run that names it: the undo below
+    /// deletes exactly the file this launch published, so a caller that cannot
+    /// name another launch's file cannot delete one. `None` is a provider
+    /// whose injection rides its argv, not a launch that failed to write —
+    /// there is nothing on disk to undo, and a lifecycle that ran anyway would
+    /// be deleting a file it never created (ADR 0009 D1).
+    artifact: Option<InjectedSettings>,
 }
 
 /// Undo a launch that never became one.
 ///
-/// The file is removed here rather than left for the startup sweep, because
-/// this is the moment its owner is known not to exist. The token goes with it:
-/// it names a Session and Run nothing can ever present.
+/// The file, where there is one, is removed here rather than left for the
+/// startup sweep, because this is the moment its owner is known not to exist.
+/// The token goes with it: it names a Session and Run nothing can ever
+/// present.
 pub(crate) fn abandon_injection(state: &Arc<DaemonState>, injected: Option<Injected>) {
     let Some(injected) = injected else {
         return;
@@ -515,7 +526,9 @@ pub(crate) fn abandon_injection(state: &Arc<DaemonState>, injected: Option<Injec
     if injected.ownership == SessionOwnership::CreatedHere {
         state.with_runtime(|runtime| runtime.reported.forget(injected.session));
     }
-    provider::launch::removed_without_waiting(state.launch_dir(), injected.run);
+    if let Some(artifact) = &injected.artifact {
+        provider::launch::removed_without_waiting(artifact);
+    }
 }
 
 #[cfg(test)]

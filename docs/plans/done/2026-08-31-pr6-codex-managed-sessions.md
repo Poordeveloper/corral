@@ -1,7 +1,7 @@
 ---
-status: active
+status: done
 class: C
-writes: [corrald, corral, corral-protocol]
+writes: [corrald, corral, corral-protocol, corral-tui]
 reads: [docs/adr/0009-codex-notify-delivery.md, docs/decisions/2026-08-31-pr6-codex-notify-grill.md, docs/references/2026-08-31-codex-0.145.0-notify-spike.md, docs/adr/0004-hook-delivery.md, docs/adr/0006-provider-hook-integration-policy.md, docs/adr/0007-managed-session-lifetime.md, docs/adr/0008-managed-runtime-binding-identity.md, docs/references/2026-08-22-s2-session-identity-verification.md, docs/references/2026-08-27-pr5-claude-code-hook-matrix.md, ARCHITECTURE.md, ROADMAP.md]
 ---
 
@@ -209,6 +209,34 @@ behavior, re-asserted for Codex where the tests are cheap.
   noun; notify, token, and binding never appear in rendered strings.
 - Plan moves to `done/`; `STORAGE_EPOCH` untouched.
 
+## What implementation changed about this plan
+
+Two things the writing did not foresee, recorded here rather than merged
+quietly.
+
+**The confirmation rule was Claude-shaped, and the second provider exposed
+it.** Design 4 and ADR 0009 D3 both say re-observation of the same thread-id
+records `BindingConfirmed`. The existing code wrote one only for a session
+start — Codex reports none, so a rule kept as written would have left every
+Codex Run confirming nothing, and a literal reading would have written one per
+turn, which the same function already rejects as a fact per prompt that records
+nothing new. The rule is now the union of the two ways a report can observe an
+identity anew: a provider-reported session start, or the first identity report
+of a Run. The Run half is a Corral-owned fact, because Corral spawned the Run.
+
+That is a Claude behavior change, small and disclosed rather than smuggled: a
+continuation whose `SessionStart` delivery is lost now confirms on the next
+identity-bearing event instead of not at all. It repairs an inconsistency —
+`establish` already refuses to hinge on one event arriving, because delivery is
+at-most-once — and it is pinned by its own test
+(`a_run_that_reports_no_start_still_confirms_the_identity_it_re_observes`).
+Nothing about contested, uniqueness, or eligibility moved.
+
+**`ArgumentRefused` moved up to the seam.** It was Claude's type in a
+provider-neutral signature, the same shape as the settings path design 3
+repairs. The refusal reason and its sentence are provider-neutral; what each
+provider refuses is not.
+
 ## Follow-ups
 
 - Feed grill Q8's invariant into the open PR5 handshake question: any
@@ -223,6 +251,16 @@ behavior, re-asserted for Codex where the tests are cheap.
 - Codex TUI terminal notifications / OSC signaling: a candidate evidence
   source for the attention phase to investigate — no more than that
   (grill Q2).
+- A caller subcommand — `corral new codex -- exec …` — is not refused, because
+  it does not defeat the injection: `exec` fires notify too (matrix scenario 2,
+  S2). What it does is put a surface outside M1's managed scope under a Corral
+  PTY. Whether the provider namespace should refuse a surface as well as an
+  argument is its own question, and ADR 0009 D1 scoped the support claim
+  without answering it.
+- `codex --remote` is unmeasured and unrefused (matrix limits). A managed
+  launch against a remote app server may learn nothing, which degrades to an
+  identity that never binds. If dogfood meets it, the question is whether a
+  surface that cannot report should be refused rather than degraded.
 
 ## Plan size justification
 

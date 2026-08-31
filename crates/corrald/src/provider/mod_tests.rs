@@ -8,7 +8,11 @@ fn an_unknown_product_is_not_a_provider() {
         KnownProvider::from_name("claude"),
         Some(KnownProvider::Claude)
     );
-    for name in ["bash", "Claude", "claude-code", "", "codex"] {
+    assert_eq!(
+        KnownProvider::from_name("codex"),
+        Some(KnownProvider::Codex)
+    );
+    for name in ["bash", "Claude", "claude-code", "", "Codex", "codex-cli"] {
         assert_eq!(KnownProvider::from_name(name), None, "{name}");
     }
 }
@@ -66,6 +70,7 @@ fn no_wire_spelling_is_a_provider_event_name() {
         "Stop",
         "Notification",
         "SessionEnd",
+        "agent-turn-complete",
     ];
     for kind in [
         AgentFactKind::SessionStarted,
@@ -90,5 +95,24 @@ fn interpretation_dispatches_on_the_launch_provider() {
     assert_eq!(
         interpret(KnownProvider::Claude, "{\"type\":\"agent-turn-complete\"}"),
         Err(Uninterpretable::Malformed),
+    );
+    assert_eq!(
+        interpret(KnownProvider::Codex, "{\"hook_event_name\":\"Stop\"}"),
+        Err(Uninterpretable::Malformed),
+    );
+}
+
+/// How a provider hands over a payload is a measured fact about that provider,
+/// and it is what the relay is told (ADR 0009 D2). A provider whose delivery
+/// this got wrong would fire hooks a relay waits for on the wrong channel.
+#[test]
+fn each_provider_declares_where_its_payload_arrives() {
+    assert_eq!(
+        KnownProvider::Claude.payload_delivery(),
+        PayloadDelivery::Stdin
+    );
+    assert_eq!(
+        KnownProvider::Codex.payload_delivery(),
+        PayloadDelivery::FinalArgument
     );
 }

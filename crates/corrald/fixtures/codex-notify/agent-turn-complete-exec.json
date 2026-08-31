@@ -1,0 +1,11 @@
+{
+  "type": "agent-turn-complete",
+  "thread-id": "01a057a3-f2f8-76f2-b505-5225da397872",
+  "turn-id": "01a057a3-f39f-7d32-9e8a-506e75974958",
+  "cwd": "/work/demo",
+  "client": "codex_exec",
+  "input-messages": [
+    "Reply with exactly: ok"
+  ],
+  "last-assistant-message": "ok"
+}

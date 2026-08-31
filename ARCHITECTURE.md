@@ -381,11 +381,12 @@ Provider-native hooks are authoritative for provider session identity and
 native resume, and are one weighted evidence source for agent state.
 
 ```text
-Managed sessions (PR4/PR5)      launch-scoped hook injection; per-launch
-                                settings/env pointing at corrald;
+Managed sessions (PR4/PR5/PR6)  launch-scoped hook injection: a per-launch
+                                settings file or config override pointing at
+                                corrald;
                                 NO mutation of global agent configuration
 
-Externally launched (PR6)       managed global hook configuration:
+Externally launched (PR7)       managed global hook configuration:
                                 install / version / merge / uninstall with
                                 lock and owner identity; if safe coexistence
                                 with the user's existing hooks cannot be

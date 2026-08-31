@@ -1,7 +1,8 @@
 //! Scripting the stand-in provider, and reading what a managed session became.
 //!
-//! The payloads are the shapes Claude Code actually produces — the same ones
-//! `crates/corrald/fixtures/claude-hooks` holds — so a test drives the daemon
+//! The payloads are the shapes the providers actually produce — the same ones
+//! `crates/corrald/fixtures/claude-hooks` and
+//! `crates/corrald/fixtures/codex-notify` hold — so a test drives the daemon
 //! with the format rather than with a shape a test author imagined.
 
 #![allow(dead_code)]
@@ -12,6 +13,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::TestAccount;
+use super::wire::RawClient;
 
 /// One scripted run of the stand-in provider.
 pub struct Script {
@@ -135,6 +137,22 @@ pub fn session_end(session_id: &str) -> Value {
     })
 }
 
+/// An `agent-turn-complete` notification, in the shape Codex writes it.
+///
+/// `client` is the interactive TUI's, which is the whole managed surface
+/// (ADR 0009 D1).
+pub fn turn_complete(thread_id: &str) -> Value {
+    json!({
+        "type": "agent-turn-complete",
+        "thread-id": thread_id,
+        "turn-id": "01a05770-2763-74e0-a44c-e6156a0f8cc3",
+        "cwd": "/work/demo",
+        "client": "codex-tui",
+        "input-messages": ["say hello"],
+        "last-assistant-message": "hello",
+    })
+}
+
 fn transcript(session_id: &str) -> String {
     format!("/home/example/.claude/projects/-work-demo/{session_id}.jsonl")
 }
@@ -175,6 +193,33 @@ pub fn hook_socket(account: &TestAccount) -> PathBuf {
         .expect("a usable rendezvous layout")
         .hook_socket()
         .to_path_buf()
+}
+
+/// Every session the daemon lists.
+pub fn sessions(client: &mut RawClient, id: u64) -> Vec<Value> {
+    let answer = client
+        .request(id, "session.list", None)
+        .expect("session.list answered");
+    answer["outcome"]["result"]["sessions"]
+        .as_array()
+        .expect("a list")
+        .clone()
+}
+
+/// Every durable fact the log holds, oldest first.
+///
+/// Reading what the daemon wrote is the point, and going through SQLite is how
+/// a fact becomes visible.
+pub fn recorded_kinds(registry: &Path) -> Vec<String> {
+    #[allow(clippy::disallowed_methods)]
+    let connection = rusqlite::Connection::open(registry).expect("open the registry");
+    let mut statement = connection
+        .prepare("SELECT kind FROM session_events ORDER BY global_seq")
+        .expect("prepare");
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query");
+    rows.map(|row| row.expect("a kind")).collect()
 }
 
 /// One session out of a `session.list` answer, by id.

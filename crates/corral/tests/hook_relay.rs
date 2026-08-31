@@ -179,3 +179,45 @@ fn a_delivered_event_is_answered_and_still_silent() {
     failed_open(&output, elapsed, "delivered");
     drop(daemon);
 }
+
+/// The other delivery shape, and the same poverty.
+///
+/// Codex appends its payload as one final argument and writes nothing to
+/// standard input (ADR 0009 D2), so this invocation must complete without
+/// anything ever arriving there. Standard input is left open and empty on
+/// purpose: a relay that consulted it would be waiting on a pipe the provider
+/// never opened, once per event.
+///
+/// That the bytes reach the daemon intact is proven end to end in
+/// `managed_codex`, over a real launch token; what this owns is the contract
+/// every path here owns — silence, success, and no activation.
+#[test]
+fn an_argv_payload_invocation_needs_nothing_on_standard_input() {
+    let account = TestAccount::new("relay-argv");
+    let payload =
+        r#"{"type":"agent-turn-complete","thread-id":"01a0576f-0ecc-7b21-9719-f38f9e4ef933"}"#;
+
+    let mut child = account
+        .corral()
+        .arg("hook-relay")
+        .arg("--provider")
+        .arg("codex")
+        .arg("--token")
+        .arg("0123456789abcdef0123456789abcdef")
+        .arg("--payload-argv")
+        .arg(payload)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the relay");
+    let started = Instant::now();
+    // Held open and never written to for as long as the relay runs: the pipe
+    // outlives the child only because this handle is dropped after it exits.
+    let held = child.stdin.take().expect("stdin");
+    let output = child.wait_with_output().expect("the relay returned");
+    drop(held);
+
+    failed_open(&output, started.elapsed(), "argv payload");
+    assert!(!lock_is_held(&account.lock()), "the relay started a daemon");
+}

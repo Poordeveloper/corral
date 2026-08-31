@@ -19,10 +19,10 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use support::provider::{
-    self, Script, agent_event_kind, external_id, launch_files, listed, provider_name, session_end,
-    session_start,
+    self, Script, agent_event_kind, external_id, launch_files, listed, provider_name,
+    recorded_kinds, session_end, session_start, sessions,
 };
-use support::wire::{RawClient, error_code};
+use support::wire::{RawClient, error_code, refused_with};
 use support::{DaemonProcess, SETTLE, TestAccount, wait_until};
 
 const FIRST: &str = "11111111-1111-4111-8111-111111111111";
@@ -65,16 +65,6 @@ fn new_claude(account: &TestAccount) -> String {
         .to_owned()
 }
 
-fn sessions(client: &mut RawClient, id: u64) -> Vec<Value> {
-    let answer = client
-        .request(id, "session.list", None)
-        .expect("session.list answered");
-    answer["outcome"]["result"]["sessions"]
-        .as_array()
-        .expect("a list")
-        .clone()
-}
-
 /// The Runs of the only Session the log holds, oldest first.
 fn recorded_runs(registry: &Path) -> Vec<(String, Option<String>)> {
     // Reading what the daemon wrote is the point, and going through SQLite is
@@ -90,19 +80,6 @@ fn recorded_runs(registry: &Path) -> Vec<(String, Option<String>)> {
         })
         .expect("query");
     rows.map(|row| row.expect("a run")).collect()
-}
-
-/// Every durable fact the log holds, oldest first.
-fn recorded_kinds(registry: &Path) -> Vec<String> {
-    #[allow(clippy::disallowed_methods)]
-    let connection = rusqlite::Connection::open(registry).expect("open the registry");
-    let mut statement = connection
-        .prepare("SELECT kind FROM session_events ORDER BY global_seq")
-        .expect("prepare");
-    let rows = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .expect("query");
-    rows.map(|row| row.expect("a kind")).collect()
 }
 
 /// A launch, its `SessionStart`, and the Attested binding that follows: the
@@ -227,6 +204,62 @@ fn the_same_identity_reported_twice_stays_one_binding() {
     assert_eq!(
         listed(&sessions(&mut client, 1), &session).and_then(external_id),
         Some(FIRST),
+    );
+
+    drop(daemon);
+}
+
+/// A confirmation does not hinge on one event arriving.
+///
+/// Delivery is at-most-once by construction — a full queue drops, a relay past
+/// its budget fails open — so a rule that only a session start could confirm
+/// an identity would turn one lost delivery into a Run that re-observed the
+/// conversation and recorded nothing. The first identity report of a Run is
+/// the re-observation whichever event carries it, which is the same reasoning
+/// `establish` already ran on (ADR 0004 D7).
+#[test]
+fn a_run_that_reports_no_start_still_confirms_the_identity_it_re_observes() {
+    let account = account("confirm-without-start");
+    // Only a `Stop`, in both Runs: identity arrives, and no start ever does.
+    let script = Script::new(&account, "confirm-without-start").fires(&provider::stop(FIRST));
+    let daemon = daemon_running(&account, &script);
+    let session = new_claude(&account);
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    wait_until(provider::DELIVERED, || {
+        listed(&sessions(&mut client, 1), &session).is_some_and(|listed| {
+            external_id(listed) == Some(FIRST) && listed["execution_state"] == "exited"
+        })
+    });
+    assert!(
+        !recorded_kinds(&account.registry())
+            .iter()
+            .any(|kind| kind == "binding-confirmed"),
+        "the Run that learned the identity did not re-observe it",
+    );
+
+    client
+        .request(
+            2,
+            "session.resume",
+            Some(json!({"command_id": "resume-1", "session_id": session})),
+        )
+        .expect("session.resume answered");
+
+    wait_until(provider::DELIVERED, || {
+        recorded_kinds(&account.registry())
+            .iter()
+            .any(|kind| kind == "binding-confirmed")
+    });
+    let kinds = recorded_kinds(&account.registry());
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| *kind == "binding-confirmed")
+            .count(),
+        1,
+        "{kinds:?}",
     );
 
     drop(daemon);
@@ -1213,14 +1246,6 @@ fn a_failed_continuation_leaves_the_sessions_provider_facts_standing() {
     );
 
     drop(daemon);
-}
-
-/// The refusal a client was given, as a person would read it.
-fn refused_with(frame: &Value) -> String {
-    frame["outcome"]["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned()
 }
 
 /// Deliver one hook message by hand, the way a relay would.

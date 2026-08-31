@@ -9,10 +9,14 @@
 //! agent would prove the same thing while adding a network, a model, and an
 //! account to every run.
 //!
-//! It behaves the way the payload fixtures say Claude Code behaves: it reads
-//! the injected `--settings` file, finds the hook command Corral wrote into
-//! it, and runs that command once per scripted event with the event's payload
-//! on standard input. It never knows what a launch token is.
+//! It behaves the way the payload fixtures say each provider behaves, and it
+//! finds its own injection rather than being told where it is — that coupling
+//! is the thing under test. As Claude Code it reads the injected `--settings`
+//! file and runs the hook command inside it with the payload on standard
+//! input; as Codex it reads the `-c notify=[…]` override off its own command
+//! line and runs that program with the payload appended as one final argument
+//! and nothing on standard input (ADR 0009 D2). It never knows what a launch
+//! token is.
 //!
 //! Driven entirely by the environment, so one binary serves every scenario:
 //!
@@ -31,10 +35,18 @@ fn main() {
         record(&path, &argv.join(" "));
     }
 
-    if let Some(relay) = relay_command(&argv) {
-        for payload in scripted_events() {
-            fire(&relay, &payload);
+    match injection(&argv) {
+        Some(Injection::Settings(command)) => {
+            for payload in scripted_events() {
+                fire_through_a_shell(&command, &payload);
+            }
         }
+        Some(Injection::Notify(program)) => {
+            for payload in scripted_events() {
+                fire_with_the_payload_appended(&program, &payload);
+            }
+        }
+        None => {}
     }
 
     // A run that holds keeps its Session in the daemon's list as `running`;
@@ -46,12 +58,29 @@ fn main() {
     }
 }
 
-/// The hook command Corral wrote into the settings file this launch was given.
+/// How this launch was told to report, in the shape its provider uses.
+enum Injection {
+    /// A hook command line inside the settings file `--settings` names, run
+    /// through a shell with the payload on standard input.
+    Settings(String),
+    /// A notify program named by the `-c notify=[…]` override, run with the
+    /// payload appended as its final argument.
+    Notify(Vec<String>),
+}
+
+/// Find this launch's injection on its own command line.
 ///
-/// Read out of the file rather than passed in, because that is the coupling
-/// under test: if Corral stops writing a command a provider can run, this
-/// finds nothing and the events never arrive.
-fn relay_command(argv: &[String]) -> Option<String> {
+/// Read out of the argv (and, for Claude, out of the file the argv names)
+/// rather than passed in, because that is the coupling under test: if Corral
+/// stops writing something a provider can run, this finds nothing and the
+/// events never arrive.
+fn injection(argv: &[String]) -> Option<Injection> {
+    settings_command(argv)
+        .map(Injection::Settings)
+        .or_else(|| notify_program(argv).map(Injection::Notify))
+}
+
+fn settings_command(argv: &[String]) -> Option<String> {
     // The *last* one, because that is what Claude Code does with a repeated
     // flag (matrix scenario 8) and it is the reason a caller's own `--settings`
     // is refused outright. A stand-in that took the first would keep passing a
@@ -75,6 +104,24 @@ fn relay_command(argv: &[String]) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The notify program the `-c notify=[…]` override names.
+///
+/// The last override wins, the way the real CLI resolves a repeated flag
+/// (spike scenario 5). The array is decoded as JSON: the escape vocabulary
+/// Corral emits is the part TOML basic strings and JSON strings spell
+/// identically, so this reads the value with a parser rather than with a
+/// hand-written unescape. That the real TOML parser accepts it is the version
+/// matrix's to prove, not a stand-in's.
+fn notify_program(argv: &[String]) -> Option<Vec<String>> {
+    let assignment = argv
+        .windows(2)
+        .rfind(|pair| pair[0] == "-c" && pair[1].starts_with("notify="))
+        .map(|pair| pair[1].clone())?;
+    let array = assignment.strip_prefix("notify=")?;
+    let program: Vec<String> = serde_json::from_str(array).ok()?;
+    (!program.is_empty()).then_some(program)
+}
+
 fn scripted_events() -> Vec<String> {
     let Ok(path) = std::env::var("CORRAL_MOCK_PROVIDER_EVENTS") else {
         return Vec::new();
@@ -89,9 +136,24 @@ fn scripted_events() -> Vec<String> {
         .collect()
 }
 
-/// Run one hook, the way a provider does: through a shell, with the payload on
+/// Run one notify program the way Codex does: the configured words, then the
+/// notification as exactly one more argument, and nothing on standard input.
+fn fire_with_the_payload_appended(program: &[String], payload: &str) {
+    let Some((command, configured)) = program.split_first() else {
+        return;
+    };
+    let _ = Command::new(command)
+        .args(configured)
+        .arg(payload)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Run one hook, the way Claude Code does: through a shell, with the payload on
 /// standard input, and with whatever it says on stdout ignored here.
-fn fire(relay: &str, payload: &str) {
+fn fire_through_a_shell(relay: &str, payload: &str) {
     let Ok(mut child) = Command::new("sh")
         .arg("-c")
         .arg(relay)

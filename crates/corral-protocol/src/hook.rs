@@ -37,6 +37,21 @@ pub const RELAY_SUBCOMMAND: &str = "hook-relay";
 pub const RELAY_PROVIDER_FLAG: &str = "--provider";
 pub const RELAY_TOKEN_FLAG: &str = "--token";
 
+/// How a provider that delivers its payload as a process argument invokes the
+/// relay.
+///
+/// Codex appends the notification JSON as one final argument and writes
+/// nothing to stdin (ADR 0009 D2), so the relay is told where to read rather
+/// than left to guess: a reader that fell back to stdin on an empty argument
+/// would park on a pipe nobody writes until its deadline, spending the
+/// interference budget of every event on discovering the same thing.
+///
+/// Skew law applies unchanged and in both directions. An older relay meeting
+/// this flag ignores it, reads an stdin that ends at once, and delivers
+/// nothing; the daemon drops that delivery with diagnostics. Fail-open is
+/// never conditional on being understood.
+pub const RELAY_PAYLOAD_ARGV_FLAG: &str = "--payload-argv";
+
 /// The largest provider payload this channel carries.
 ///
 /// A payload past it is dropped **whole** and marked, never truncated: a
