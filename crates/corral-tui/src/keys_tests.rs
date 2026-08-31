@@ -259,12 +259,105 @@ fn a_reported_click_in_any_encoding_types_nothing() {
     }
 }
 
-/// Paste markers are sequences like any other, and what a person pasted is
-/// what they typed.
+/// The markers are consumed and what they wrap is pasted, not typed.
+///
+/// This surface maps single characters to actions, so the difference is the
+/// difference between inserting text and performing it.
 #[test]
-fn bracketed_paste_markers_are_not_typed() {
+fn bracketed_paste_arrives_as_pasted_characters() {
     assert_eq!(
         decode(b"\x1b[200~ab\x1b[201~"),
-        vec![Key::Unknown, Key::Typed('a'), Key::Typed('b'), Key::Unknown,]
+        vec![Key::Pasted('a'), Key::Pasted('b')]
     );
+}
+
+/// The newline a clipboard entry ends with is data, never Enter.
+///
+/// Enter is what starts the command in the New prompt, so a pasted trailing
+/// newline arriving as `Key::Enter` would run a command the person had not
+/// confirmed — the whole reason this decoder tracks paste state.
+#[test]
+fn a_pasted_newline_is_never_enter() {
+    for payload in [
+        &b"\x1b[200~echo hi\r\x1b[201~"[..],
+        &b"\x1b[200~echo hi\n\x1b[201~"[..],
+    ] {
+        let keys = decode(payload);
+
+        assert!(
+            !keys.contains(&Key::Enter),
+            "{payload:?} produced Enter: {keys:?}",
+        );
+        assert_eq!(keys.last(), Some(&Key::Pasted('\n')), "{keys:?}");
+    }
+}
+
+/// A shortcut inside a paste is a character, and the list acts on none of it.
+#[test]
+fn a_pasted_shortcut_is_not_a_shortcut() {
+    assert_eq!(
+        decode(b"\x1b[200~q\x1b[201~"),
+        vec![Key::Pasted('q')],
+        "a pasted q must not be the q that quits",
+    );
+}
+
+/// Keys before and after a paste are ordinary keys. The state ends where the
+/// terminal said it ends.
+#[test]
+fn paste_state_does_not_outlive_its_markers() {
+    assert_eq!(
+        decode(b"a\x1b[200~b\x1b[201~c\r"),
+        vec![
+            Key::Typed('a'),
+            Key::Pasted('b'),
+            Key::Typed('c'),
+            Key::Enter,
+        ],
+    );
+}
+
+/// A paste split across reads is still one paste: the markers and the payload
+/// arrive in whatever pieces the link delivers them in.
+#[test]
+fn a_paste_survives_a_read_boundary() {
+    let mut keyboard = Keyboard::default();
+    keyboard.add(b"\x1b[20");
+    assert_eq!(keyboard.next(), None, "half a marker is not a key yet");
+    keyboard.add(b"0~q\r");
+    assert_eq!(keyboard.next(), Some(Key::Pasted('q')));
+    assert_eq!(keyboard.next(), Some(Key::Pasted('\n')));
+    keyboard.add(b"\x1b[201~q");
+    assert_eq!(keyboard.next(), Some(Key::Typed('q')), "the paste ended");
+}
+
+/// A start marker whose end never comes must not take the keyboard with it.
+///
+/// The mode is only ever on because a session left it on, and a session killed
+/// mid-paste can leave a start with no end. Without a bound every later key
+/// would be data — including the one that leaves.
+#[test]
+fn an_unterminated_paste_gives_the_keyboard_back() {
+    let mut keyboard = Keyboard::default();
+    keyboard.add(b"\x1b[200~");
+    keyboard.add(&vec![b'x'; 64 * 1024]);
+    while keyboard.next().is_some() {}
+
+    keyboard.add(b"q");
+
+    assert_eq!(keyboard.next(), Some(Key::Typed('q')));
+}
+
+/// A paste handed over with the terminal is not still in progress when it
+/// comes back. Those bytes were typed for the session, not for this list.
+#[test]
+fn handing_the_terminal_over_ends_a_paste() {
+    let mut keyboard = Keyboard::default();
+    keyboard.add(b"\x1b[200~ab");
+    assert_eq!(keyboard.next(), Some(Key::Pasted('a')));
+
+    assert_eq!(keyboard.unread(), b"b");
+    keyboard.add(b"q");
+
+    assert_eq!(keyboard.next(), Some(Key::Typed('q')));
 }

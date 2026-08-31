@@ -146,6 +146,53 @@ fn a_command_typed_after_the_separator_becomes_the_program_and_its_arguments() {
     }
 }
 
+/// A pasted command waits for the person to confirm it.
+///
+/// The whole path, from the bytes a terminal delivers to what the list does
+/// with them: a clipboard entry ending in a newline is the ordinary shape, and
+/// starting a session the moment one arrives would be an action performed
+/// because of what was on a clipboard rather than because anybody asked.
+#[test]
+fn a_pasted_command_does_not_start_until_enter() {
+    let mut list = SessionList::default();
+    list.act(Key::Typed('n'));
+
+    for key in crate::keys::decode(b"\x1b[200~-- /bin/sh -c sleep\r\x1b[201~") {
+        assert!(
+            list.act(key).is_none(),
+            "a paste started something: {key:?}"
+        );
+    }
+
+    // And the person's own Enter runs exactly what they pasted.
+    match list.act(Key::Enter) {
+        Some(Chosen::New(crate::launch::Requested::Command(argv))) => {
+            assert_eq!(argv, ["/bin/sh", "-c", "sleep"]);
+        }
+        other => panic!("{}", other.map_or("nothing", |_| "something else")),
+    }
+}
+
+/// On the list itself a paste is inert. `q` quits, `n` opens the prompt and
+/// `c` continues a session; none of them may happen because a clipboard held
+/// the letter.
+#[test]
+fn a_paste_on_the_list_performs_nothing() {
+    let mut list = SessionList::default();
+
+    for key in crate::keys::decode(b"\x1b[200~qnc\r\x1b[201~") {
+        assert!(
+            list.act(key).is_none(),
+            "a paste acted on the list: {key:?}"
+        );
+    }
+
+    assert!(
+        matches!(list.act(Key::Typed('q')), Some(Chosen::Quit)),
+        "the list still quits when the person types it",
+    );
+}
+
 #[test]
 fn an_agent_typed_at_the_prompt_becomes_a_provider_request() {
     match typed(b"claude") {

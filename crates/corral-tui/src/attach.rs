@@ -340,8 +340,15 @@ fn read_local(input: &mut impl Read, buffer: &mut [u8]) -> Option<Vec<u8>> {
 }
 
 impl Geometry {
-    pub fn of(stdin: &std::io::Stdin) -> Option<Self> {
-        local_geometry(stdin.as_fd())
+    /// The size of the terminal behind this descriptor.
+    ///
+    /// Any descriptor, because the answer belongs to whichever end of the
+    /// terminal is being asked about: a surface that renders to standard
+    /// output sizes itself by that, and one that reads keys sizes itself by
+    /// standard input. They are the same terminal when both are one, and when
+    /// they are not, the one being drawn on is the honest answer.
+    pub fn of(terminal: impl AsFd) -> Option<Self> {
+        local_geometry(terminal.as_fd())
     }
 }
 
@@ -453,7 +460,7 @@ pub async fn run(
                 // (`docs/decisions/2026-08-24-pr3-plan-grill.md` Q6). On a
                 // tick rather than only on a keystroke: a person who resizes
                 // and then just watches still needs a correct screen.
-                let now = Geometry::of(&std::io::stdin());
+                let now = Geometry::of(std::io::stdin());
                 if now != local {
                     if let Some(geometry) = now
                         && let Ok(frame) = resize_frame(epoch, geometry).encode()

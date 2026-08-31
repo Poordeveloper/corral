@@ -182,6 +182,40 @@ and whatever the daemon answers is reported.
   Evidence do not appear.
 - The plan moves to `done/`, and the epoch advance is *not* part of this PR.
 
+## Follow-ups
+
+Found by external review of the merged PR, and repaired on
+`task/pr4-paste-and-output-terminal` rather than here:
+
+- Bracketed paste delivered its payload as ordinary keys, so a pasted
+  newline was `Enter` and started a command nobody confirmed.
+- `corral tui` checked only standard input for a terminal while rendering
+  to standard output.
+
+Still open:
+
+- `Ctrl-\` detachment recognises only the literal byte `0x1c`. A terminal
+  in Kitty's enhanced keyboard protocol encodes modified keys as CSI-u
+  sequences instead, so an attached application that enables that protocol
+  can leave the documented detach chord unreachable. Inherited rather than
+  introduced by this PR: the chord and its decoding predate it.
+
+  Not a second byte comparison. `split_at_detach` is stateless over reads on
+  purpose — it scans one burst and forwards the rest untouched — and a
+  `CSI 92;5u` can land across a read boundary, so recognising it means
+  holding the person's keystrokes while deciding whether they are the chord.
+  That is the attach path becoming a decoder of what somebody types at their
+  agent, which `ARCHITECTURE.md` §3 says it is not. The decision to take is
+  what Corral does about an input protocol a session turns on underneath it
+  — the same class of question `screen::claim` answers for output modes.
+- Nothing turns bracketed paste *on*. A terminal that is not in the mode
+  delivers a paste as bare bytes with no markers at all, which no decoder
+  can tell from typing. The repair above covers the case where the terminal
+  says it is a paste — which, after a takeover, is the case that exists,
+  because the mode is left on by whatever set it. Turning it on here would
+  hand the mode to the next session along with the screen, which is the
+  regression `screen::claim` records having already made once.
+
 ## Plan size justification
 
 One surface, one loop: see the list, open a session, come back. Every design

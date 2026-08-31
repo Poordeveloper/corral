@@ -58,6 +58,17 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
             "the session list needs a terminal on standard input",
         ));
     };
+    // The other end of the same question. Raw mode is about the terminal keys
+    // come from; every frame goes to standard output, and `corral tui >file`
+    // has a terminal on one and a file on the other — which would put this
+    // terminal in raw mode, consume the person's keystrokes, and write the
+    // list into the file where nobody can see it. Refused before the screen is
+    // taken, so nothing has to be given back.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        return Err(std::io::Error::other(
+            "the session list needs a terminal on standard output",
+        ));
+    }
     let Some(mut keys) = LocalKeys::start() else {
         return Err(std::io::Error::other(
             "something is already reading this terminal",
@@ -495,6 +506,11 @@ impl SessionList {
                 None
             }
             Key::Typed('q') | Key::Interrupt => Some(Chosen::Quit),
+            // Clipboard contents are not commands here. A paste that reached
+            // this arm carries `q`, `n`, or a newline as ordinary characters,
+            // and there is nothing on this screen for them to mean: the list
+            // has no text field of its own.
+            Key::Pasted(_) => None,
             _ => None,
         }
     }
@@ -541,6 +557,20 @@ impl SessionList {
         match key {
             Key::Typed(character) => {
                 typed.push(character);
+                None
+            }
+            // Pasted text is inserted and never submitted: a clipboard entry
+            // ending in a newline is the ordinary shape, and running it the
+            // instant it arrives would start a session the person never
+            // confirmed. A newline inside a command line is what it is between
+            // two words — a separator — and the line is split on whitespace
+            // below anyway.
+            Key::Pasted(character) => {
+                typed.push(if character.is_control() {
+                    ' '
+                } else {
+                    character
+                });
                 None
             }
             Key::Backspace => {
