@@ -171,6 +171,55 @@ fn a_session_that_completes_no_turn_never_binds_and_says_so() {
     drop(daemon);
 }
 
+/// A fresh managed session may not be a native resume in disguise.
+///
+/// `codex resume <id>` attaches to a conversation that may already have a
+/// Corral-managed process on it, and `session.resume` is the path that holds a
+/// per-Session continuation claim precisely so two processes cannot drive one
+/// conversation. Reaching that through `session.new` would walk around the
+/// claim, and binding uniqueness cannot repair it: that check runs when the
+/// second process reports a completed turn, which is after both have been
+/// writing (ADR 0009 D1, grill Q7).
+///
+/// Refused before anything is minted, written, or spawned.
+#[test]
+fn a_fresh_session_may_not_be_a_native_resume() {
+    let account = account("codex-no-native-resume");
+    let script = Script::new(&account, "codex-no-native-resume");
+    let daemon = daemon_running(&account, &script);
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    let refusal = client
+        .request(
+            1,
+            "session.new",
+            Some(json!({
+                "command_id": "new-1",
+                "provider": "codex",
+                "args": ["resume", FIRST],
+                "cwd": provider::workdir(&account).to_string_lossy(),
+            })),
+        )
+        .expect("session.new answered");
+
+    assert_eq!(error_code(&refusal), Some("invalid_params"), "{refusal}");
+    assert!(
+        refused_with(&refusal).contains("resume"),
+        "the refusal names what the person wrote: {}",
+        refused_with(&refusal),
+    );
+    // Nothing ran, and no Session exists to have run it.
+    assert!(script.launches().is_empty(), "{:?}", script.launches());
+    assert!(
+        sessions(&mut client, 2).is_empty(),
+        "{:?}",
+        sessions(&mut client, 2)
+    );
+
+    drop(daemon);
+}
+
 /// Codex's way of starting over inside one runtime is a second thread, and a
 /// second thread over one launch token is the existing contested path — now
 /// exercised on a second provider, with nothing added to its semantics

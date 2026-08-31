@@ -10,6 +10,14 @@
 //! Managed Codex is the interactive TUI under a Corral-owned PTY, and that is
 //! the whole supported surface (ADR 0009 D1, grill Q7).
 //!
+//! One consequence of that delivery is a boundary Corral cannot move. A single
+//! argv string is capped by the operating system — about 128 KiB on Linux,
+//! well under Corral's own 256 KiB payload cap — and past it the provider's
+//! `execve` of the relay fails before the relay exists. The completed turn is
+//! lost with no marker and no diagnostics, because nothing arrived to
+//! diagnose. It is the known blind spot of this channel, recorded rather than
+//! papered over (`corral_protocol::hook::MAX_HOOK_PAYLOAD_BYTES`).
+//!
 //! Behaviour verified first-party against codex-cli 0.145.0; the evidence and
 //! its limits are `docs/references/2026-08-31-pr6-codex-notify-matrix.md`. A
 //! version outside that record is not gated — launch proceeds, evidence is
@@ -58,6 +66,93 @@ const NOTIFY_KEY: &str = "notify";
 /// The verb the provider itself prints on exit: `To continue this session, run
 /// codex resume <thread-id>` (spike scenario 2).
 const RESUME_VERB: &str = "resume";
+
+/// The word after which this CLI stops reading options.
+///
+/// Measured, not assumed: `codex -- exec hi` answers `unexpected argument
+/// 'hi'` against `codex [OPTIONS] [PROMPT]`, which is the root command
+/// refusing a second positional rather than `exec` running (matrix scenario
+/// 12). Everything after it is prompt text, including a word that looks like a
+/// flag or a subcommand.
+const SEPARATOR: &str = "--";
+
+/// Every subcommand this CLI dispatches on, aliases included.
+///
+/// A managed Codex session is the interactive TUI under a Corral-owned PTY and
+/// nothing else (ADR 0009 D1, grill Q7). Each of these starts a different
+/// program: a different lifecycle, interaction, approval, and output model
+/// that no part of this build was written against.
+///
+/// Two of them are worse than unsupported. `resume` and `fork` attach to a
+/// conversation that may already have a Corral-managed process on it, and
+/// `session.resume` is the path that holds a per-Session continuation claim
+/// precisely so two processes cannot drive one conversation. A fresh launch
+/// carrying one of these would walk around that claim, and binding uniqueness
+/// cannot repair it: that check runs when the second process reports a
+/// completed turn, which is after both have been writing.
+///
+/// Version-sensitive by nature, exactly as the notify refusals are — this is a
+/// claim about one release's command line, held against the version the matrix
+/// records. A subcommand a later release adds is one this list does not know.
+const SUBCOMMANDS: [&str; 27] = [
+    "exec",
+    "e",
+    "review",
+    "login",
+    "logout",
+    "mcp",
+    "plugin",
+    "mcp-server",
+    "app-server",
+    "remote-control",
+    "app",
+    "completion",
+    "update",
+    "doctor",
+    "sandbox",
+    "debug",
+    "apply",
+    "a",
+    "resume",
+    "archive",
+    "delete",
+    "unarchive",
+    "fork",
+    "cloud",
+    "exec-server",
+    "features",
+    "help",
+];
+
+/// The flags that take a separate value.
+///
+/// Held only so a **value** is never mistaken for a subcommand: `-C app` names
+/// a directory and `--profile review` names a profile, and refusing those
+/// would be Corral deciding how somebody's agent runs over a name collision.
+/// A flag this list does not know is treated as taking no value, which is the
+/// safe direction — the word after it is examined rather than waved through.
+/// Boolean flags stay off it deliberately: listing one would skip the word
+/// after it, and `--oss resume <id>` would walk straight past the subcommand.
+const VALUE_FLAGS: [&str; 18] = [
+    "-i",
+    "--image",
+    "-m",
+    "--model",
+    "-p",
+    "--profile",
+    "-s",
+    "--sandbox",
+    "-C",
+    "--cd",
+    "-a",
+    "--ask-for-approval",
+    "--add-dir",
+    "--enable",
+    "--disable",
+    "--remote",
+    "--remote-auth-token-env",
+    "--local-provider",
+];
 
 /// The notify type this build has a word for, and what it means in Corral's
 /// vocabulary.
@@ -168,10 +263,15 @@ fn toml_string(raw: &str) -> String {
 
 /// Refuse the provider arguments Corral cannot honour.
 ///
-/// One reason, in every spelling this CLI accepts for it: a caller's own
-/// `notify` override displaces Corral's, because the last one on the
-/// invocation is the one that takes effect (spike scenario 5). That leaves a
-/// launch Corral believes it is watching and is not.
+/// Two reasons. A caller's own `notify` override displaces Corral's, in every
+/// spelling this CLI accepts for it, because the last one on the invocation is
+/// the one that takes effect (spike scenario 5) — that leaves a launch Corral
+/// believes it is watching and is not. And a subcommand starts something other
+/// than the interactive session Corral manages, which for `resume` and `fork`
+/// means a second process on a conversation Corral may already be running.
+///
+/// Read the way this CLI reads its own command line: options and their values
+/// until `--`, and nothing after it.
 ///
 /// The value half is never inspected. `-c notify=[]` disables the notifier,
 /// `-c notify=["…"]` replaces it, and a spelling this build has not thought of
@@ -186,15 +286,23 @@ fn toml_string(raw: &str) -> String {
 pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
     let mut args = args.iter().peekable();
     while let Some(argument) = args.next() {
+        // Everything after it is the prompt positional, so nothing there is a
+        // notify override or a subcommand, and nothing there can reach the
+        // override Corral put ahead of every caller word. There is nothing
+        // left to refuse.
+        if argument == SEPARATOR {
+            return Ok(());
+        }
         // Separated from its value, which is the ordinary spelling: the flag
         // says nothing on its own, so the argument named in the refusal is the
         // assignment the person actually wrote.
         if argument == CONFIG_FLAG || argument == CONFIG_FLAG_LONG {
             if let Some(assignment) = args.peek().filter(|next| names_notify(next)) {
-                return Err(ArgumentRefused {
-                    argument: (*assignment).clone(),
-                });
+                return Err(ArgumentRefused::CompetesWithInjection(
+                    (*assignment).clone(),
+                ));
             }
+            args.next();
             continue;
         }
         // Joined to it, in each of the forms this CLI's parser accepts:
@@ -204,9 +312,16 @@ pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
             .or_else(|| argument.strip_prefix(CONFIG_FLAG))
             .map(|rest| rest.strip_prefix('=').unwrap_or(rest));
         if joined.is_some_and(names_notify) {
-            return Err(ArgumentRefused {
-                argument: argument.clone(),
-            });
+            return Err(ArgumentRefused::CompetesWithInjection(argument.clone()));
+        }
+        if VALUE_FLAGS.contains(&argument.as_str()) {
+            args.next();
+            continue;
+        }
+        // A word that is not a flag is where this CLI reads a subcommand —
+        // after any number of options, not only first.
+        if !argument.starts_with('-') && SUBCOMMANDS.contains(&argument.as_str()) {
+            return Err(ArgumentRefused::OutsideTheManagedSession(argument.clone()));
         }
     }
     Ok(())

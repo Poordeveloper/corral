@@ -19,7 +19,7 @@
 | | |
 |---|---|
 | codex-cli | **0.145.0** (`codex --version`), installed at `~/.local/node/bin/codex` (npm global) |
-| OS | macOS, Darwin 25.5.0, arm64 |
+| OS | macOS, Darwin 25.5.0, arm64 — **the only platform exercised**; see scenario 11 for what that leaves open on Linux |
 | Corral commit | `8b570b4` (branch `task/pr6-codex-managed-sessions`, before the implementation landed) |
 | Date | 2026-08-31 |
 
@@ -180,16 +180,64 @@ The trust prompt itself appeared in the pane and was answered there: under
 Corral it will appear the same way, through the PTY, and answering it stays the
 user's act and Codex's write.
 
-### 11. An oversize payload in argv — **pass on Corral's side**
+### 11. An oversize payload in argv — **pass on macOS; a known ceiling on Linux**
 
 Command: the real `corral hook-relay --provider codex --token … --payload-argv`
 with a 300 KiB payload, past the 256 KiB channel cap.
 
-Observed: exit 0, nothing on stdout or stderr, returned in 14 ms. `ARG_MAX` on
-this machine is 1 MiB, so a payload of that size reaches the relay as an
-argument at all. The cap itself is applied provider-neutrally in
-`corral_protocol::hook` and is covered by its own tests; what this adds is that
-the argv path does not fail differently at size.
+Observed on this machine: exit 0, nothing on stdout or stderr, returned in
+14 ms. Probing further, the largest single argv string that `execve` accepts
+here is ~1020 KiB — macOS bounds the *total* (`ARG_MAX` 1 MiB) and imposes no
+per-string cap. So on macOS Corral's 256 KiB cap is the binding one and its
+oversize marker is reachable.
+
+**It is not reachable on Linux, and Linux is in scope** (ADR 0005). Linux caps
+each individual argv or environment string at `MAX_ARG_STRLEN` — 32 pages,
+about 128 KiB with 4 KiB pages — and `execve` fails with `E2BIG`
+([execve(2)](https://man7.org/linux/man-pages/man2/execve.2.html)). That
+failure happens inside Codex, before `corral hook-relay` exists, so for a
+notify payload past roughly 128 KiB there:
+
+- the completed turn is never delivered;
+- no `payload_omitted="oversize"` marker is produced either, because the marker
+  is written by a relay that never ran;
+- Corral sees nothing at all, and degrades exactly as it does for any
+  undelivered event — the fact goes stale, and if it was the first turn the
+  session stays unbound until a smaller one completes.
+
+This is a property of Codex's notify transport, not of the relay: Corral cannot
+mark what never reaches it, and lowering its own cap would not change where the
+failure happens. It is recorded at
+`corral_protocol::hook::MAX_HOOK_PAYLOAD_BYTES`, at `PayloadDelivery::FinalArgument`,
+and in the adapter, so the cap is not read as a guarantee it cannot make here.
+
+**Not measured on this machine.** The Linux figure is from `execve(2)`, not
+from a run: no Linux host was available while writing this. Measuring it — a
+container that execs a program with a 150 KiB argument and reports `E2BIG` — is
+the named follow-up, and it needs no model turn and no Codex account.
+
+### 12. `--` ends option parsing, and a subcommand can hide after any option — **pass**
+
+Two questions the implementation turned on, both free to answer — neither needs
+a completed turn.
+
+```text
+codex resume --help        → prints resume's help          (a subcommand)
+codex -- exec hi           → error: unexpected argument 'hi' found
+                             Usage: codex [OPTIONS] [PROMPT]
+```
+
+The second is the decisive one: after `--`, `exec` became the prompt positional
+and `hi` was a second positional the root command has no room for. Had `exec`
+dispatched, `hi` would have been its prompt. So a word after `--` is text, not
+a subcommand and not an option — which is why `refuse_arguments` stops reading
+there, and why refusing `-- --config=notify=[]` would have been Corral refusing
+somebody's prompt.
+
+Before `--`, a subcommand may follow any number of options (`codex -m … resume
+<id>`), so the first word is not the only place one can hide. `resume` and
+`fork` are the two that matter most: they attach to an existing conversation,
+which is what `session.resume`'s continuation claim exists to serialize.
 
 ## Limits
 
@@ -218,3 +266,7 @@ the argv path does not fail differently at size.
 - Oversize payloads were not generated *by Codex*; producing a 256 KiB
   assistant message costs real model output for a property that is Corral's,
   not the provider's.
+- **No Linux host was exercised.** Everything above is macOS, and scenario 11's
+  Linux ceiling is read off `execve(2)` rather than measured. That is the
+  weakest evidence in this document and the one with a consequence on a
+  supported platform, so it is named twice rather than buried.

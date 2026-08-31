@@ -211,6 +211,84 @@ fn a_caller_may_not_override_notify_in_any_spelling() {
     }
 }
 
+/// A managed Codex session is the interactive TUI and nothing else
+/// (ADR 0009 D1, grill Q7). A subcommand starts a different program, and two
+/// of them — `resume` and `fork` — attach a second process to a conversation
+/// Corral may already be running, which is exactly what `session.resume`'s
+/// continuation claim exists to prevent.
+#[test]
+fn a_caller_may_not_start_a_surface_corral_does_not_manage() {
+    for outside in [
+        vec!["resume", "01a0576f-0ecc-7b21-9719-f38f9e4ef933"],
+        vec!["resume", "--last"],
+        vec!["fork", "--last"],
+        vec!["exec", "do a thing"],
+        vec!["e", "do a thing"],
+        vec!["app-server"],
+        vec!["mcp-server"],
+        vec!["login"],
+        vec!["delete", "01a0576f-0ecc-7b21-9719-f38f9e4ef933"],
+        // Options may precede the subcommand, so the first word is not the
+        // only place one can hide.
+        vec![
+            "-m",
+            "gpt-5",
+            "resume",
+            "01a0576f-0ecc-7b21-9719-f38f9e4ef933",
+        ],
+        vec!["--search", "exec", "do a thing"],
+        // A boolean flag takes no value, so the word after it is still the
+        // subcommand. Listing one as value-taking would wave this through.
+        vec!["--oss", "resume", "01a0576f-0ecc-7b21-9719-f38f9e4ef933"],
+        vec!["--no-alt-screen", "fork"],
+    ] {
+        let args: Vec<String> = outside.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_err(), "{outside:?}");
+    }
+}
+
+/// Codex's own `--` ends its option parsing: what follows is the prompt
+/// positional, and a word that looks like a flag or a subcommand there is
+/// text. Measured, not assumed — `codex -- exec hi` answers
+/// `unexpected argument 'hi'` against `codex [OPTIONS] [PROMPT]`, which is the
+/// root command refusing a second positional rather than `exec` running
+/// (matrix scenario 12).
+///
+/// Nothing after it can reach Corral's own override, which sits ahead of every
+/// caller word, so there is nothing left to refuse.
+#[test]
+fn the_separator_hands_the_rest_to_the_agent_as_text() {
+    for theirs in [
+        vec!["--", "--config=notify=[]"],
+        vec!["--", "-c", "notify=[]"],
+        vec!["--", "resume", "01a0576f-0ecc-7b21-9719-f38f9e4ef933"],
+        vec!["--", "exec"],
+        vec!["-m", "gpt-5", "--", "fork"],
+    ] {
+        let args: Vec<String> = theirs.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_ok(), "{theirs:?}");
+    }
+}
+
+/// A word that names a subcommand is only a subcommand where Codex would read
+/// one. The value of a value-taking flag is a value — a directory called
+/// `app`, a profile called `review` — and refusing those would be Corral
+/// deciding how somebody's agent runs over a name collision.
+#[test]
+fn a_value_that_happens_to_name_a_subcommand_is_still_a_value() {
+    for allowed in [
+        vec!["-C", "app"],
+        vec!["--cd", "debug"],
+        vec!["--add-dir", "sandbox"],
+        vec!["--profile", "review"],
+        vec!["-m", "e"],
+        vec!["-c", "model=\"gpt-5\"", "--profile", "apply"],
+    ] {
+        let args: Vec<String> = allowed.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_ok(), "{allowed:?}");
+    }
+}
+
 /// Everything else a person may want to pass to their own agent is theirs,
 /// including other configuration overrides, a profile, and the separator.
 #[test]
@@ -237,6 +315,6 @@ fn a_refusal_names_the_argument_it_refused() {
     let args = vec!["-c".to_owned(), "notify=[]".to_owned()];
     let refused = refuse_arguments(&args).expect_err("a refusal");
 
-    assert_eq!(refused.argument, "notify=[]");
+    assert_eq!(refused.argument(), "notify=[]");
     assert!(refused.to_string().contains("notify=[]"));
 }

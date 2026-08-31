@@ -136,9 +136,7 @@ pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
         *argument == SETTINGS_FLAG || argument.starts_with(&equals) || *argument == SAFE_MODE_FLAG
     };
     match args.iter().find(competing) {
-        Some(argument) => Err(ArgumentRefused {
-            argument: argument.clone(),
-        }),
+        Some(argument) => Err(ArgumentRefused::CompetesWithInjection(argument.clone())),
         None => Ok(()),
     }
 }

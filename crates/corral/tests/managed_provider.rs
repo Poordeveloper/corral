@@ -627,15 +627,21 @@ fn continuing_a_session_runs_it_again_under_the_same_identity() {
         runs.iter().any(|(id, _)| *id == resumed_run),
         "{runs:?} does not hold {resumed_run}",
     );
+    // The re-observation rides the same real path every other fact does —
+    // stand-in, relay, endpoint, ingestion, store — and lands after the Run it
+    // belongs to is recorded. Waited for rather than read at whatever moment
+    // the Run's own start reached the log, which is a race this assertion lost
+    // often enough to matter.
+    wait_until(provider::DELIVERED, || {
+        recorded_kinds(&account.registry())
+            .iter()
+            .any(|kind| kind == "binding-confirmed")
+    });
     let kinds = recorded_kinds(&account.registry());
     assert_eq!(
         kinds.iter().filter(|kind| *kind == "binding-added").count(),
         2,
         "a continuation reuses the managed runtime binding: {kinds:?}",
-    );
-    assert!(
-        kinds.iter().any(|kind| kind == "binding-confirmed"),
-        "the re-observed identity is confirmed: {kinds:?}",
     );
 
     // Retried under the same id, it replays the Run it made rather than

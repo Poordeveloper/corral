@@ -118,6 +118,11 @@ impl KnownProvider {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PayloadDelivery {
     Stdin,
+    /// The provider appends the payload to the invocation it execs.
+    ///
+    /// Carries an operating-system ceiling below Corral's own payload cap on
+    /// Linux, past which an event is lost with no marker and nothing Corral
+    /// can do about it (`corral_protocol::hook::MAX_HOOK_PAYLOAD_BYTES`).
     FinalArgument,
 }
 
@@ -306,26 +311,56 @@ pub fn interpret(
 
 /// Why a caller's provider arguments cannot be passed through.
 ///
-/// One reason, because there is one: an argument that would defeat the
-/// injection Corral is about to make. Everything else a person may want to
-/// pass to their own agent is theirs, and what counts as defeating it is each
-/// provider's own answer against its own command line.
+/// Two reasons, and they are different failures. One argument would defeat the
+/// injection Corral is about to make, leaving a launch Corral believes it is
+/// watching and is not. Another would start something other than the session
+/// Corral manages — a different program under a Corral PTY, or a second
+/// process on a conversation Corral may already be running, which is what
+/// `managed_launch`'s continuation claim exists to prevent and which no
+/// after-the-fact binding check can undo.
+///
+/// What counts as either is each provider's own answer against its own command
+/// line. Everything else a person may want to pass to their own agent is
+/// theirs.
 ///
 /// Refused rather than dropped. Silently discarding an argument a person asked
 /// for would be Corral deciding how their agent runs, and silently honouring
-/// it would leave a launch Corral believes it is watching and is not.
+/// it would be one of the two launches above.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ArgumentRefused {
-    pub argument: String,
+pub enum ArgumentRefused {
+    /// It would displace or disable Corral's own injection.
+    CompetesWithInjection(String),
+    /// It starts something other than the session Corral manages.
+    OutsideTheManagedSession(String),
+}
+
+impl ArgumentRefused {
+    /// The word the person wrote, so they can find it in their own command
+    /// line.
+    pub fn argument(&self) -> &str {
+        match self {
+            Self::CompetesWithInjection(argument) | Self::OutsideTheManagedSession(argument) => {
+                argument
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for ArgumentRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} is Corral's to pass: it is how Corral watches the session it starts for you",
-            self.argument,
-        )
+        match self {
+            Self::CompetesWithInjection(argument) => write!(
+                f,
+                "{argument} is Corral's to pass: it is how Corral watches the session it starts \
+                 for you",
+            ),
+            Self::OutsideTheManagedSession(argument) => write!(
+                f,
+                "{argument} starts something other than the session Corral manages: Corral runs \
+                 the agent's own interactive session, and continues one it already knows rather \
+                 than starting a second agent on it",
+            ),
+        }
     }
 }
 

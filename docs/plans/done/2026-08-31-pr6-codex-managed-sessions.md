@@ -232,6 +232,22 @@ at-most-once — and it is pinned by its own test
 (`a_run_that_reports_no_start_still_confirms_the_identity_it_re_observes`).
 Nothing about contested, uniqueness, or eligibility moved.
 
+**Review found a native-resume bypass, and it is fixed here.** A caller could
+pass `resume <thread-id>` as a provider argument to `session.new`, and the
+fresh-launch composition passed it straight through: Corral would start
+`codex -c notify=[…] resume <id>` as a *new* Session, walking around the
+per-Session continuation claim and the eligibility ladder that exist so two
+processes cannot drive one conversation. Binding uniqueness cannot repair it —
+it answers when the second process reports a completed turn, which is after
+both have been writing. `refuse_arguments` now reads the command line the way
+the CLI does — options and their values until `--`, nothing after it — and
+refuses every Codex subcommand before it, which also makes the adapter's
+declared interactive-TUI-only surface mechanical instead of only stated.
+
+The same review found that scanning past `--` refused a flag-looking *prompt*.
+Both fall out of one repair. The plan had recorded the subcommand pass-through
+as a follow-up; that was the wrong call and the follow-up is now the fix.
+
 **`ArgumentRefused` moved up to the seam.** It was Claude's type in a
 provider-neutral signature, the same shape as the settings path design 3
 repairs. The refusal reason and its sentence are provider-neutral; what each
@@ -251,12 +267,21 @@ provider refuses is not.
 - Codex TUI terminal notifications / OSC signaling: a candidate evidence
   source for the attention phase to investigate — no more than that
   (grill Q2).
-- A caller subcommand — `corral new codex -- exec …` — is not refused, because
-  it does not defeat the injection: `exec` fires notify too (matrix scenario 2,
-  S2). What it does is put a surface outside M1's managed scope under a Corral
-  PTY. Whether the provider namespace should refuse a surface as well as an
-  argument is its own question, and ADR 0009 D1 scoped the support claim
-  without answering it.
+- Claude has the same native-resume exposure this PR closed for Codex:
+  `corral new claude -- --resume <id>` reaches the provider's own resume
+  without the continuation claim, because PR5's refusal list is deliberately
+  "one reason, because there is one". Left alone here — it is a user-visible
+  behaviour change to a provider this PR was not meant to change — and it
+  should be the next thing after it, not an eventual one.
+- Measure the Linux single-argument ceiling rather than citing `execve(2)`: a
+  container that execs a program with a ~150 KiB argument and reports `E2BIG`.
+  No model turn, no provider account, and it turns this PR's weakest evidence
+  into a measurement.
+- Decide what the support contract says about a Codex turn whose notify payload
+  exceeds that ceiling on Linux. It is delivered nowhere and marked nowhere;
+  ADR 0009 D2's "the 256 KiB cap with the oversize marker" reads as a
+  guarantee the transport cannot keep there, and whether that wants an ADR
+  amendment is the founder's call.
 - `codex --remote` is unmeasured and unrefused (matrix limits). A managed
   launch against a remote app server may learn nothing, which degrades to an
   identity that never binds. If dogfood meets it, the question is whether a
