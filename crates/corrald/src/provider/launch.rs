@@ -314,6 +314,10 @@ impl InjectedSettings {
     ///
     /// Best-effort: a file that will not go away costs a stale artifact, and
     /// nothing about a Run's ending depends on it.
+    ///
+    /// **Blocking.** Its one synchronous caller is the run lifecycle recorder,
+    /// which is a thread of its own. Anything on the reactor goes through
+    /// `removed_off_the_reactor`.
     pub fn remove_for(launch_dir: &Path, run: RunId) {
         let path = Self::path_for(launch_dir, run);
         match std::fs::remove_file(&path) {
@@ -322,6 +326,19 @@ impl InjectedSettings {
             Err(source) => warn!(%run, %source, "an injected settings file could not be removed"),
         }
     }
+}
+
+/// Remove that file from a task that must not block.
+///
+/// The daemon serves everything on one reactor thread, so a filesystem call
+/// made from it is a window in which nothing else is served — the same cost
+/// the write side of this file already goes out of its way to avoid. An
+/// unlink is short until the directory is on something that is not, and the
+/// paths that reach here are launch failures, where nobody is waiting.
+pub async fn removed_off_the_reactor(launch_dir: &Path, run: RunId) {
+    let launch_dir = launch_dir.to_path_buf();
+    let _ =
+        tokio::task::spawn_blocking(move || InjectedSettings::remove_for(&launch_dir, run)).await;
 }
 
 /// The injected hook command line, quoted for the shell a provider runs it in.

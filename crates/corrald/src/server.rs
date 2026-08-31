@@ -6,12 +6,68 @@ use std::time::Instant;
 
 use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::watch;
 use tracing::{debug, error, info};
 
 use crate::connection;
 use crate::lifecycle::{Lifecycle, Phase, ShutdownReason, watch_idle};
 use crate::policy::DaemonPolicy;
 use crate::state::DaemonState;
+
+/// Accept connections until shutdown, serving each one and no more than
+/// `CONCURRENT_CONNECTIONS` of them at a time.
+///
+/// One loop for both of this daemon's listeners. They had the same shape and
+/// the same two decisions — what to do about a failing accept, and how many
+/// connections may be in flight — and two copies of a decision is how the two
+/// come to differ. What differs is only what a connection *is*, which is the
+/// argument.
+///
+/// The bound is held by a permit the serving task owns, so a slot frees when
+/// the connection ends however it ends. While none is free this stops calling
+/// `accept`, which leaves the pending connections in the kernel's backlog
+/// rather than answering them with a close.
+pub(crate) async fn accept_until_shutdown<Serve, Serving>(
+    listener: &UnixListener,
+    shutdown: &mut watch::Receiver<bool>,
+    what: &'static str,
+    serve_one: Serve,
+) where
+    Serve: Fn(tokio::net::UnixStream) -> Serving,
+    Serving: std::future::Future<Output = ()> + Send + 'static,
+{
+    let slots = Arc::new(tokio::sync::Semaphore::new(
+        crate::policy::CONCURRENT_CONNECTIONS,
+    ));
+    loop {
+        // Taken before the accept, so a daemon at its bound waits here rather
+        // than accepting a connection it has nowhere to serve.
+        let slot = tokio::select! {
+            _ = shutdown.changed() => break,
+            slot = Arc::clone(&slots).acquire_owned() => match slot {
+                Ok(slot) => slot,
+                // Only a closed semaphore, which nothing here does.
+                Err(_) => break,
+            },
+        };
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _address)) => {
+                    let serving = serve_one(stream);
+                    tokio::spawn(async move {
+                        let _slot = slot;
+                        serving.await;
+                    });
+                }
+                Err(source) => {
+                    error!(%source, "accepting {what} failed");
+                    tokio::time::sleep(crate::policy::ACCEPT_BACKOFF).await;
+                }
+            },
+        }
+    }
+}
 
 /// Bind, serve, and return once shutdown has run to completion.
 ///
@@ -75,26 +131,18 @@ pub async fn serve(
 
     info!(endpoint = %socket.display(), "corrald is serving");
 
-    loop {
-        tokio::select! {
-            _ = shutdown.changed() => break,
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _address)) => {
-                    tokio::spawn(connection::serve(
-                        stream,
-                        Arc::clone(&lifecycle),
-                        Arc::clone(&state),
-                        policy,
-                        lifecycle.subscribe(),
-                    ));
-                }
-                Err(source) => {
-                    error!(%source, "accept failed");
-                    tokio::time::sleep(crate::policy::ACCEPT_BACKOFF).await;
-                }
-            },
-        }
-    }
+    let accepting = Arc::clone(&lifecycle);
+    let served = Arc::clone(&state);
+    accept_until_shutdown(&listener, &mut shutdown, "a client", move |stream| {
+        connection::serve(
+            stream,
+            Arc::clone(&accepting),
+            Arc::clone(&served),
+            policy,
+            accepting.subscribe(),
+        )
+    })
+    .await;
 
     // Committed: stop accepting first, so nothing new can arrive while the
     // established connections are being closed.

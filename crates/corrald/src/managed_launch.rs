@@ -72,7 +72,7 @@ where
         // The command never ran, so no Run exists to report. Saying otherwise
         // would record a runtime occurrence that never happened.
         Err(error) => {
-            abandon_injection(state, injected);
+            abandon_injection(state, injected).await;
             return Committed::NotSpawned(error);
         }
     };
@@ -97,7 +97,7 @@ where
             // and no ending is reported: with no durable start there is no Run
             // to end (grill Q9).
             abandon(pending);
-            abandon_injection(state, injected);
+            abandon_injection(state, injected).await;
             return Committed::StoreRefused(error);
         }
     };
@@ -108,7 +108,7 @@ where
     // still never leave a second process running.
     if !started.executed() {
         abandon(pending);
-        abandon_injection(state, injected);
+        abandon_injection(state, injected).await;
         return Committed::Replayed {
             session: started.session(),
             run: started.run(),
@@ -457,7 +457,7 @@ pub(crate) async fn compose_provider_launch(
             }),
         )),
         Err(refusal) => {
-            InjectedSettings::remove_for(state.launch_dir(), run);
+            provider::launch::removed_off_the_reactor(state.launch_dir(), run).await;
             forget(state);
             Err(refusal.to_string())
         }
@@ -499,11 +499,11 @@ pub(crate) struct Injected {
 /// The file is removed here rather than left for the startup sweep, because
 /// this is the moment its owner is known not to exist. The token goes with it:
 /// it names a Session and Run nothing can ever present.
-pub(crate) fn abandon_injection(state: &Arc<DaemonState>, injected: Option<Injected>) {
+pub(crate) async fn abandon_injection(state: &Arc<DaemonState>, injected: Option<Injected>) {
     let Some(injected) = injected else {
         return;
     };
-    InjectedSettings::remove_for(state.launch_dir(), injected.run);
+    provider::launch::removed_off_the_reactor(state.launch_dir(), injected.run).await;
     state.forget_launch_token(injected.token);
     if injected.ownership == SessionOwnership::CreatedHere {
         state.with_runtime(|runtime| runtime.reported.forget(injected.session));

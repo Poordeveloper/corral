@@ -52,9 +52,13 @@ fn main() {
 /// under test: if Corral stops writing a command a provider can run, this
 /// finds nothing and the events never arrive.
 fn relay_command(argv: &[String]) -> Option<String> {
+    // The *last* one, because that is what Claude Code does with a repeated
+    // flag (matrix scenario 8) and it is the reason a caller's own `--settings`
+    // is refused outright. A stand-in that took the first would keep passing a
+    // launch where the real provider had loaded somebody else's file.
     let settings = argv
         .windows(2)
-        .find(|pair| pair[0] == "--settings")
+        .rfind(|pair| pair[0] == "--settings")
         .map(|pair| pair[1].clone())?;
     let document: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(settings).ok()?).ok()?;

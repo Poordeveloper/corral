@@ -28,6 +28,40 @@ fn a_hello_is_the_only_legal_first_message() {
     );
 }
 
+/// A connection that ends gives its slot back.
+///
+/// The accept loop serves a bounded number of connections at once, and the
+/// bound is held by a permit the serving task owns. A permit that outlived its
+/// connection would not fail anything at first: the daemon would answer
+/// normally until it had accepted the bound, and then stop accepting forever,
+/// with no error anywhere. So what is asserted is that many connections'
+/// worth of slots come back.
+#[test]
+fn slots_come_back_when_connections_end() {
+    let account = TestAccount::new("accept-slots");
+    let _daemon = account.start_daemon();
+
+    // Past the daemon's bound, sequentially, each closed before the next
+    // opens. The number is written out rather than read from
+    // `corrald::policy::CONCURRENT_CONNECTIONS`: a client crate depending on
+    // the daemon would hand every surface a path to `corral-core`, which is
+    // the one edge `check-dependency-direction` exists to refuse. The
+    // constant's own doc names this test, so the two move together.
+    for _ in 0..200 {
+        let mut client = RawClient::connect(&account.socket());
+        client.establish();
+    }
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    let answered = client.request(1, "session.list", None);
+
+    assert!(
+        answered.is_some(),
+        "the daemon stopped accepting after its own bound",
+    );
+}
+
 #[test]
 fn a_hello_missing_its_identity_is_malformed_rather_than_old() {
     let account = TestAccount::new("hello-malformed");

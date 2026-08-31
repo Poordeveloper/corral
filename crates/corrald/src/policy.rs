@@ -21,6 +21,26 @@ pub const SINGLETON_CLAIM_WAIT: Duration = Duration::from_secs(5);
 /// decision is how they come to differ.
 pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 
+/// How many accepted connections one listener may be serving at once.
+///
+/// One number for both, for the same reason as the backoff above. Generous
+/// next to what an account's own surfaces open — a desktop, a TUI, a tray, and
+/// a hook shim per event, each of which is one connection that ends — and a
+/// bound at all because a task spawned per accept with no cap turns a process
+/// that opens connections faster than it closes them into a daemon with no
+/// memory left for the sessions it is watching.
+///
+/// Reaching it stops the loop accepting rather than refusing what it accepted:
+/// the kernel holds the pending connections, and a shim that waits a moment is
+/// a shim inside its budget where one handed a closed socket is a lost event.
+///
+/// `handshake::slots_come_back_when_connections_end` opens more connections
+/// than this to prove a served connection frees its slot. It cannot read this
+/// number — a client crate depending on the daemon would hand every surface a
+/// path to `corral-core` — so raising this past the count that test opens
+/// leaves it asserting nothing. Move them together.
+pub const CONCURRENT_CONNECTIONS: usize = 128;
+
 /// Timing the daemon runs under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DaemonPolicy {
