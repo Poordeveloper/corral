@@ -244,6 +244,17 @@ fn a_caller_may_not_start_a_surface_corral_does_not_manage() {
         // A multi-value flag stops collecting at the first word that opens
         // with a dash, so what follows that word is a subcommand again.
         vec!["-i", "shot.png", "--search", "resume"],
+        // An occurrence that carries its own value collects nothing further —
+        // measured, and the opposite of what the separated form does. The
+        // word after it is a positional, which is where this CLI reads a
+        // subcommand (matrix scenario 13).
+        vec![
+            "--image=a.png",
+            "resume",
+            "01a0576f-0ecc-7b21-9719-f38f9e4ef933",
+        ],
+        vec!["-ia.png", "resume"],
+        vec!["-i=a.png", "fork"],
     ] {
         let args: Vec<String> = outside.iter().map(|word| (*word).to_owned()).collect();
         assert!(refuse_arguments(&args).is_err(), "{outside:?}");
@@ -325,8 +336,17 @@ fn the_desktop_subcommand_is_refused_only_where_it_exists() {
 /// The same shape as `-C app` one test below, with variable arity — and the
 /// reason a value table without arity is a validator that mis-measures the
 /// command line it is judging.
+///
+/// Only the **separated** spelling collects. An occurrence carrying its own
+/// value is the sibling case, tested with the refusals above: measured,
+/// `codex --image=a exec hi` and `codex -ia exec hi` both reach `exec`'s own
+/// "not inside a trusted directory", exactly as bare `codex exec hi` does,
+/// while the separated `codex --image a exec hi` swallows both words and lands
+/// in the TUI (matrix scenario 13). Reading the joined forms as collecting
+/// would swallow a `resume` this CLI dispatches — a false acceptance, and the
+/// native-resume bypass again.
 #[test]
-fn a_multi_value_flag_swallows_the_words_after_it() {
+fn only_the_separated_spelling_of_a_multi_value_flag_collects() {
     for allowed in [
         vec!["--image", "foo", "resume"],
         vec![
@@ -338,6 +358,11 @@ fn a_multi_value_flag_swallows_the_words_after_it() {
         ],
         // The separator still ends the run, because it opens with a dash.
         vec!["-i", "a.png", "--", "resume"],
+        // A joined occurrence takes its own value and nothing more, so an
+        // ordinary word after it is an ordinary word.
+        vec!["--image=a.png", "hello"],
+        vec!["-ia.png"],
+        vec!["--image"],
     ] {
         let args: Vec<String> = allowed.iter().map(|word| (*word).to_owned()).collect();
         assert!(refuse_arguments(&args).is_ok(), "{allowed:?}");

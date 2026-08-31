@@ -156,6 +156,15 @@ fn names_a_subcommand(word: &str) -> bool {
 /// `--image foo resume` hands both words to the flag and leaves no subcommand
 /// behind. Measured per flag on 0.145.0 (matrix scenario 13), not read off the
 /// help's punctuation.
+///
+/// It describes the **separated** occurrence only, and that is a measured
+/// distinction rather than an oversight. `--image=a`, `-ia`, and `-i=a` each
+/// carry one value inside the word and collect nothing further:
+/// `codex --image=a exec hi` reaches `exec`'s own error exactly as bare
+/// `codex exec hi` does, while separated `codex --image a exec hi` swallows
+/// both words and lands in the TUI. So a joined occurrence needs no arity walk
+/// — and giving it one would swallow a `resume` this CLI dispatches, which is
+/// the native-resume bypass wearing a filename.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Values {
     One,
@@ -375,6 +384,11 @@ pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
             }
             continue;
         }
+        // Anything still opening with a dash is a flag whose value, if it has
+        // one, is inside the word — `--image=a`, `-ia`, `--profile=review` —
+        // or a flag that takes none. Either way there is nothing after it to
+        // account for, and the next word stands on its own.
+        //
         // A word that is not a flag is where this CLI reads a subcommand —
         // after any number of options, not only first.
         if !argument.starts_with('-') && names_a_subcommand(argument) {

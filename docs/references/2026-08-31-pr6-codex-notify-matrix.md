@@ -291,6 +291,30 @@ subcommand behind, and a validator that skipped exactly one word after every
 value flag would refuse a filename — the same parser-shadowing mistake as
 treating `-C app` as a subcommand, one arity further out.
 
+**Only the separated spelling collects, and this is the direction it would be
+dangerous to guess at.** An occurrence carrying its own value takes that value
+and stops:
+
+```text
+codex exec hi              → Not inside a trusted directory …   (exec ran)
+codex --image=a exec hi    → Not inside a trusted directory …   (exec ran)
+codex -ia exec hi          → Not inside a trusted directory …   (exec ran)
+codex --image a exec hi    → Error: stdin is not a terminal     (both swallowed; the TUI)
+```
+
+The `--last` probe agrees from the other side: `codex --image=a resume --last`,
+`codex -ia resume --last`, and `codex -i=a resume --last` all reach the resume
+picker, where `--last` is a flag it owns — whereas the separated
+`codex --image a resume --last` fails at the root with
+`unexpected argument '--last'`, because `resume` had been eaten and the root
+has no such flag.
+
+So a validator that let a joined occurrence keep collecting would swallow a
+`resume` this CLI actually dispatches: a false acceptance, and the
+native-resume bypass again in a spelling nobody would look at. The
+implementation treats a joined occurrence as what it is — a flag carrying its
+own value — and the words after it as words.
+
 ## Limits
 
 - **This is 0.145.0.** 0.151.0 exists and was declined in-session; the record
