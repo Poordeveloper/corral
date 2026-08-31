@@ -457,8 +457,11 @@ pub(crate) async fn compose_provider_launch(
             }),
         )),
         Err(refusal) => {
-            InjectedSettings::remove_for(state.launch_dir(), run);
+            // The token first. What it authorises is correlation of evidence
+            // to a Run, and this is the moment that Run stops existing; the
+            // file it named is an artifact nobody reads after startup.
             forget(state);
+            provider::launch::removed_without_waiting(state.launch_dir(), run);
             Err(refusal.to_string())
         }
     }
@@ -503,11 +506,16 @@ pub(crate) fn abandon_injection(state: &Arc<DaemonState>, injected: Option<Injec
     let Some(injected) = injected else {
         return;
     };
-    InjectedSettings::remove_for(state.launch_dir(), injected.run);
+    // The token stops resolving before anything else, and before this function
+    // can yield. A caller reaching here on the store-refusal path has already
+    // spawned a child and hung it up without waiting — a process may take its
+    // time dying, and one that fires a hook on the way out must not find a
+    // token still naming a Run the daemon has decided never happened.
     state.forget_launch_token(injected.token);
     if injected.ownership == SessionOwnership::CreatedHere {
         state.with_runtime(|runtime| runtime.reported.forget(injected.session));
     }
+    provider::launch::removed_without_waiting(state.launch_dir(), injected.run);
 }
 
 #[cfg(test)]

@@ -314,6 +314,10 @@ impl InjectedSettings {
     ///
     /// Best-effort: a file that will not go away costs a stale artifact, and
     /// nothing about a Run's ending depends on it.
+    ///
+    /// **Blocking.** Its one synchronous caller is the run lifecycle recorder,
+    /// which is a thread of its own. Anything on the reactor goes through
+    /// `removed_without_waiting`.
     pub fn remove_for(launch_dir: &Path, run: RunId) {
         let path = Self::path_for(launch_dir, run);
         match std::fs::remove_file(&path) {
@@ -322,6 +326,26 @@ impl InjectedSettings {
             Err(source) => warn!(%run, %source, "an injected settings file could not be removed"),
         }
     }
+}
+
+/// Remove that file without holding anything up.
+///
+/// A plain thread rather than the blocking pool, and deliberately not waited
+/// on — the same shape and the same reasoning as `managed_launch::abandon`.
+/// The daemon serves everything on one reactor thread, so a filesystem call
+/// made from it is a window in which nothing else is served; but a
+/// `spawn_blocking` that has started cannot be aborted and dropping the
+/// runtime waits for it, so a state directory on something that has stopped
+/// answering would hold the daemon's exit instead. Nobody is waiting for this
+/// file to go away.
+///
+/// Not awaiting also keeps the caller free of a scheduling point. The paths
+/// that reach here have just decided a launch never happened and retire its
+/// token in the same breath; an `await` between those two would let hook
+/// ingestion resolve a token naming a Run the daemon had already given up on.
+pub fn removed_without_waiting(launch_dir: &Path, run: RunId) {
+    let launch_dir = launch_dir.to_path_buf();
+    std::thread::spawn(move || InjectedSettings::remove_for(&launch_dir, run));
 }
 
 /// The injected hook command line, quoted for the shell a provider runs it in.

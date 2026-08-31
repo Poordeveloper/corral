@@ -1201,7 +1201,11 @@ fn a_failed_continuation_leaves_the_sessions_provider_facts_standing() {
     assert_eq!(provider_name(row), Some("claude"), "{row}");
     assert_eq!(external_id(row), Some(FIRST), "{row}");
     assert_eq!(agent_event_kind(row), Some("turn_ended"), "{row}");
-    // And what the failed launch did make is gone.
+    // And what the failed launch did make is gone. Waited for rather than
+    // asserted outright: the file is removed without anything waiting on it,
+    // so that the token stops resolving the instant the launch is given up on
+    // rather than one scheduling point later.
+    wait_until(SETTLE, || launch_files(&account).is_empty());
     assert!(
         launch_files(&account).is_empty(),
         "{:?}",

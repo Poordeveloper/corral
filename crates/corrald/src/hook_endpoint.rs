@@ -34,7 +34,7 @@ use corral_protocol::hook::{HOOK_DELIVER, HOOK_PROTOCOL_VERSION, HookAck, HookDe
 use corral_protocol::{Frame, FrameReader, FrameWriter};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::hook_evidence::{Delivered, Deliveries};
 use crate::provider::LaunchToken;
@@ -81,21 +81,10 @@ pub async fn serve(
     deliveries: Deliveries,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    loop {
-        tokio::select! {
-            _ = shutdown.changed() => break,
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _address)) => {
-                    let deliveries = deliveries.clone();
-                    tokio::spawn(async move { take_one(stream, deliveries).await });
-                }
-                Err(source) => {
-                    error!(%source, "the hook endpoint could not accept");
-                    tokio::time::sleep(crate::policy::ACCEPT_BACKOFF).await;
-                }
-            },
-        }
-    }
+    crate::server::accept_until_shutdown(&listener, &mut shutdown, "a hook delivery", |stream| {
+        take_one(stream, deliveries.clone())
+    })
+    .await;
 
     // Reached only when the loop leaves on its own. A shutdown that drops the
     // runtime cancels this task wherever it was parked, so the departing
@@ -146,11 +135,20 @@ async fn take_one(stream: UnixStream, deliveries: Deliveries) {
     // wait ends at this line, so the decode below is spent on daemon time, not
     // inside the interference budget — and a shim that waited for a verdict
     // would be a shim whose provider waits for one.
-    if let Err(source) = writer
-        .write_frame(&Frame::result(request.id, HookAck::wire_value()))
-        .await
-    {
-        debug!(%source, "a hook delivery could not be acknowledged");
+    //
+    // Under the same deadline as the read, because the same thing can go wrong
+    // at either end: a peer that stops reading parks this task on a full
+    // socket buffer exactly as a peer that stops writing parks it on an empty
+    // one. The shim gave up long ago either way — its own budget is 50 ms.
+    let acknowledged = tokio::time::timeout(
+        DELIVERY_DEADLINE,
+        writer.write_frame(&Frame::result(request.id, HookAck::wire_value())),
+    )
+    .await;
+    match acknowledged {
+        Ok(Ok(())) => {}
+        Ok(Err(source)) => debug!(%source, "a hook delivery could not be acknowledged"),
+        Err(_) => debug!("a hook delivery was not acknowledged inside its deadline"),
     }
 
     let accepted = read_delivery(request.params);

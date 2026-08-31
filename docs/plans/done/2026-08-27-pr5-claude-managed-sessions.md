@@ -325,6 +325,11 @@ discipline).
   later unlinked keeps accepting nothing without ever returning an error, so
   the only way to know is to probe — machinery this phase does not have, and
   a consecutive-failure threshold would not catch that case anyway.
+Done on `task/pr5-followups-reactor-and-deadline`: the accept bound for both
+listeners, the reactor unlink, the hook ack deadline, and the stand-in's
+`--settings` resolution. The entries below are kept because they say why each
+was left, and what changed the answer.
+
 - A concurrency bound on accepted connections, for **both** local listeners.
   The hook endpoint spawns one task per connection with no cap, and so does
   the canonical socket it was modelled on; fixing one and not the other is
