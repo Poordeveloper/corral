@@ -241,6 +241,9 @@ fn a_caller_may_not_start_a_surface_corral_does_not_manage() {
         // subcommand. Listing one as value-taking would wave this through.
         vec!["--oss", "resume", "01a0576f-0ecc-7b21-9719-f38f9e4ef933"],
         vec!["--no-alt-screen", "fork"],
+        // A multi-value flag stops collecting at the first word that opens
+        // with a dash, so what follows that word is a subcommand again.
+        vec!["-i", "shot.png", "--search", "resume"],
     ] {
         let args: Vec<String> = outside.iter().map(|word| (*word).to_owned()).collect();
         assert!(refuse_arguments(&args).is_err(), "{outside:?}");
@@ -264,9 +267,80 @@ fn the_separator_hands_the_rest_to_the_agent_as_text() {
         vec!["--", "resume", "01a0576f-0ecc-7b21-9719-f38f9e4ef933"],
         vec!["--", "exec"],
         vec!["-m", "gpt-5", "--", "fork"],
+        // A value-taking flag left without its value does not eat the
+        // separator, so what follows is still text.
+        vec!["-c", "--", "resume"],
     ] {
         let args: Vec<String> = theirs.iter().map(|word| (*word).to_owned()).collect();
         assert!(refuse_arguments(&args).is_ok(), "{theirs:?}");
+    }
+}
+
+/// `--help` does not list everything this CLI dispatches on, and a refusal
+/// built from it would leave the declared surface open at exactly the names
+/// nobody thinks to check. Each of these answers its own help on 0.145.0,
+/// where a name the parser does not know answers with the root's (matrix
+/// scenario 13).
+#[test]
+fn a_subcommand_the_help_does_not_advertise_is_still_a_subcommand() {
+    for hidden in [
+        vec!["execpolicy"],
+        vec!["responses-api-proxy"],
+        vec!["stdio-to-uds"],
+        // An alias of `cloud`, and a surface either way.
+        vec!["cloud-tasks"],
+    ] {
+        let args: Vec<String> = hidden.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_err(), "{hidden:?}");
+    }
+}
+
+/// `app` is compiled into this CLI only where the desktop app exists. On a
+/// target without it the word is an ordinary one, and refusing it there would
+/// be Corral refusing somebody's prompt over a name their machine does not
+/// have.
+#[test]
+fn the_desktop_subcommand_is_refused_only_where_it_exists() {
+    let args = vec!["app".to_owned()];
+
+    assert_eq!(
+        refuse_arguments(&args).is_err(),
+        DESKTOP_SUBCOMMAND_EXISTS,
+        "on this target the desktop subcommand {}",
+        if DESKTOP_SUBCOMMAND_EXISTS {
+            "exists"
+        } else {
+            "does not exist"
+        },
+    );
+}
+
+/// `--image` takes one value *or more*, so it keeps taking words until one
+/// opens with a dash — a subcommand name inside that run is a filename this
+/// parser already consumed. Measured, not read off the help's punctuation:
+/// `codex -i a resume --last` answers `unexpected argument '--last'`, which is
+/// the root command seeing a flag `resume` would have accepted, so `resume`
+/// never dispatched (matrix scenario 13).
+///
+/// The same shape as `-C app` one test below, with variable arity — and the
+/// reason a value table without arity is a validator that mis-measures the
+/// command line it is judging.
+#[test]
+fn a_multi_value_flag_swallows_the_words_after_it() {
+    for allowed in [
+        vec!["--image", "foo", "resume"],
+        vec![
+            "-i",
+            "a.png",
+            "b.png",
+            "resume",
+            "01a0576f-0ecc-7b21-9719-f38f9e4ef933",
+        ],
+        // The separator still ends the run, because it opens with a dash.
+        vec!["-i", "a.png", "--", "resume"],
+    ] {
+        let args: Vec<String> = allowed.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_ok(), "{allowed:?}");
     }
 }
 

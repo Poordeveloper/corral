@@ -106,6 +106,11 @@ Argument refusal: every CLI spelling that can displace or disable the
 notify override, sealed by matrix evidence, version-sensitive like
 Claude's list and documented as such.
 
+> Superseded during review. That criterion was one ground; refusal now has
+> two, and the second refuses every subcommand — see "What implementation
+> changed about this plan" below and ADR 0010 D2, which is where the decision
+> lives rather than in this paragraph.
+
 **6. Relay argv-payload mode.** One new flag constant in
 `corral-protocol::hook`; with it the payload is the final positional
 argument and stdin is never read (spike scenario 2: argv-only delivery,
@@ -190,7 +195,10 @@ behavior, re-asserted for Codex where the tests are cheap.
 - Launch composition: override first; TOML escaping round-trips a path
   with spaces and quotes; refusal list refuses each matrix-sealed
   spelling and passes everything else; no injected file is created and
-  the artifact lifecycle is a no-op for Codex.
+  the artifact lifecycle is a no-op for Codex. (Review added the second
+  ground: the refusal also refuses every subcommand, reads the argv with the
+  provider's own option arity and separator, and is covered accordingly —
+  ADR 0010 D2.)
 - Resume: argv composition; contested → no external id in any argv;
   fingerprint and idempotent replay through the existing ladder.
 - Projection: a Codex session shows only `turn_ended`; no input produces
@@ -231,6 +239,12 @@ identity-bearing event instead of not at all. It repairs an inconsistency —
 at-most-once — and it is pinned by its own test
 (`a_run_that_reports_no_start_still_confirms_the_identity_it_re_observes`).
 Nothing about contested, uniqueness, or eligibility moved.
+
+**The review turned two of these into a decision.** ADR 0010 supersedes, in
+part, ADR 0009 D2's uniform oversize guarantee and D5's single-ground refusal
+criterion; its acceptance is
+`docs/decisions/2026-08-31-pr6-review-surface-and-transport.md`. What follows
+is what the code found; what it means is recorded there.
 
 **Review found a native-resume bypass, and it is fixed here.** A caller could
 pass `resume <thread-id>` as a provider argument to `session.new`, and the
@@ -277,11 +291,10 @@ provider refuses is not.
   container that execs a program with a ~150 KiB argument and reports `E2BIG`.
   No model turn, no provider account, and it turns this PR's weakest evidence
   into a measurement.
-- Decide what the support contract says about a Codex turn whose notify payload
-  exceeds that ceiling on Linux. It is delivered nowhere and marked nowhere;
-  ADR 0009 D2's "the 256 KiB cap with the oversize marker" reads as a
-  guarantee the transport cannot keep there, and whether that wants an ADR
-  amendment is the founder's call.
+- Whether the Linux ceiling should ever gate a launch or be surfaced to a
+  person is left open by ADR 0010 D1: nothing yet shows it happening to
+  anyone, and what a person is told about missing evidence is the attention
+  phase's. Dogfood decides.
 - `codex --remote` is unmeasured and unrefused (matrix limits). A managed
   launch against a remote app server may learn nothing, which degrades to an
   identity that never binds. If dogfood meets it, the question is whether a

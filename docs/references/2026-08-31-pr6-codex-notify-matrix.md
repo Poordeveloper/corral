@@ -239,6 +239,58 @@ Before `--`, a subcommand may follow any number of options (`codex -m … resume
 `fork` are the two that matter most: they attach to an existing conversation,
 which is what `session.resume`'s continuation claim exists to serialize.
 
+### 13. What the CLI dispatches on, and how much each flag eats — **measured**
+
+The refusal in `refuse_arguments` is only as good as its reading of this
+command line, so both halves of that reading were measured rather than taken
+from `--help`. None of it needs a completed turn.
+
+**Names `--help` does not advertise.** Asking a name for its own help
+distinguishes a subcommand from an ordinary word: a real one answers with its
+own description, and one the parser does not know answers with the root's.
+
+```text
+codex execpolicy --help            → Execpolicy tooling
+codex responses-api-proxy --help   → Internal: run the responses API proxy
+codex stdio-to-uds --help          → Internal: relay stdio to a Unix domain socket
+codex cloud-tasks --help           → [EXPERIMENTAL] Browse tasks from Codex Cloud …
+codex apply-what-not --help        → Codex CLI            (the root: not a subcommand)
+```
+
+Four names the help page never lists — three hidden, one an alias of `cloud`.
+A refusal list built from `--help` would have left the declared surface open at
+exactly the names nobody thinks to check.
+
+**Not measured here: `app`.** It is compiled in under macOS and Windows only,
+so on Linux it is an ordinary word and refusing it would refuse somebody's
+prompt. That is from the founder's reading of `rust-v0.145.0`, recorded in the
+PR6 review; this machine can only confirm that `app` exists on macOS. The
+adapter gates it on the target platform accordingly.
+
+**How much each value-taking flag eats.** `codex <flag> a resume --last`
+separates a greedy flag from a single-value one: if the flag swallowed
+`resume`, then `--last` reaches the root, which has no such flag; if it took
+only `a`, then `resume` dispatched and `--last` is one of its own.
+
+```text
+--image        → error: unexpected argument '--last' found      (greedy)
+--profile      → Error: stdin is not a terminal                 (one value; resume dispatched)
+--model        → Error: stdin is not a terminal                 (one value)
+--local-provider → Error: stdin is not a terminal               (one value)
+--add-dir      → runtime error about the directory, --last accepted   (one value)
+--enable       → Error: Unknown feature flag: a                 (one value)
+--disable      → Error: Unknown feature flag: a                 (one value)
+--cd           → Error: No such file or directory               (one value)
+--remote / --remote-auth-token-env / --sandbox / --ask-for-approval
+               → value-validation errors                        (one value)
+```
+
+`--image`/`-i` is the only multi-value flag on this release, and it collects
+until a word that opens with a dash. So `--image foo resume` leaves no
+subcommand behind, and a validator that skipped exactly one word after every
+value flag would refuse a filename — the same parser-shadowing mistake as
+treating `-C app` as a subcommand, one arity further out.
+
 ## Limits
 
 - **This is 0.145.0.** 0.151.0 exists and was declined in-session; the record
@@ -254,10 +306,13 @@ which is what `session.resume`'s continuation claim exists to serialize.
   actually runs is unmeasured. It is **not** refused. A managed launch that
   learns nothing degrades to an identity that never binds, which is scenario
   8's honest outcome rather than a false one.
-- A caller passing a subcommand — `corral new codex -- exec …` — is not
-  refused either. S2 and scenario 2 both show `exec` firing notify, so it does
-  not defeat the injection; what it does is put a surface outside M1's managed
-  scope under a Corral PTY. Named as a follow-up, not decided here.
+- Subcommands **are** refused, on the second ground ADR 0010 D2 adds:
+  `corral new codex -- exec …` selects a surface Corral has declared it does
+  not manage, and `resume`/`fork` would put a second process on a conversation
+  Corral may already be running. Scenario 13 is the evidence the refusal is
+  built from. This bullet said the opposite in the first round of this PR; the
+  review that changed it is
+  `docs/decisions/2026-08-31-pr6-review-surface-and-transport.md`.
 - Codex 0.145.0 has a `hooks` feature of its own (`--dangerously-bypass-hook-trust`
   in `--help`). It was not examined: ADR 0009 decided the channel is `notify`,
   and re-opening that is a decision, not a matrix scenario.
@@ -266,6 +321,10 @@ which is what `session.resume`'s continuation claim exists to serialize.
 - Oversize payloads were not generated *by Codex*; producing a 256 KiB
   assistant message costs real model output for a property that is Corral's,
   not the provider's.
+- The subcommand list and the arity table are claims about **0.145.0 on this
+  target**. A name a later release adds is one they do not know, and the
+  failure that produces is a launch that starts a surface Corral does not
+  manage rather than one it wrongly refuses.
 - **No Linux host was exercised.** Everything above is macOS, and scenario 11's
   Linux ceiling is read off `execve(2)` rather than measured. That is the
   weakest evidence in this document and the one with a consequence on a

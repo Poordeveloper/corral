@@ -76,7 +76,7 @@ const RESUME_VERB: &str = "resume";
 /// flag or a subcommand.
 const SEPARATOR: &str = "--";
 
-/// Every subcommand this CLI dispatches on, aliases included.
+/// Every subcommand this CLI dispatches on, aliases and hidden ones included.
 ///
 /// A managed Codex session is the interactive TUI under a Corral-owned PTY and
 /// nothing else (ADR 0009 D1, grill Q7). Each of these starts a different
@@ -91,10 +91,17 @@ const SEPARATOR: &str = "--";
 /// cannot repair it: that check runs when the second process reports a
 /// completed turn, which is after both have been writing.
 ///
+/// `--help` is not the source: this CLI dispatches on names it does not
+/// advertise. `execpolicy`, `responses-api-proxy`, and `stdio-to-uds` are
+/// hidden, and `cloud-tasks` is an alias of `cloud` — each verified by asking
+/// for its help on 0.145.0, which a name the parser does not know answers with
+/// the root's (matrix scenario 13). A list built from `--help` would leave the
+/// declared surface open at exactly the names nobody thinks to check.
+///
 /// Version-sensitive by nature, exactly as the notify refusals are — this is a
 /// claim about one release's command line, held against the version the matrix
 /// records. A subcommand a later release adds is one this list does not know.
-const SUBCOMMANDS: [&str; 27] = [
+const SUBCOMMANDS: [&str; 30] = [
     "exec",
     "e",
     "review",
@@ -105,7 +112,6 @@ const SUBCOMMANDS: [&str; 27] = [
     "mcp-server",
     "app-server",
     "remote-control",
-    "app",
     "completion",
     "update",
     "doctor",
@@ -119,12 +125,44 @@ const SUBCOMMANDS: [&str; 27] = [
     "unarchive",
     "fork",
     "cloud",
+    "cloud-tasks",
     "exec-server",
     "features",
     "help",
+    "execpolicy",
+    "responses-api-proxy",
+    "stdio-to-uds",
 ];
 
-/// The flags that take a separate value.
+/// The subcommand that exists only where the desktop app does.
+///
+/// Compiled into this CLI under macOS and Windows and absent elsewhere, so on
+/// Linux `app` is an ordinary word: refusing it there would be Corral refusing
+/// somebody's prompt over a name that does not exist on their machine. The one
+/// place a target-platform difference reaches this adapter, and it is here
+/// rather than spread through the scan.
+const DESKTOP_SUBCOMMAND: &str = "app";
+const DESKTOP_SUBCOMMAND_EXISTS: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+
+/// Whether this word is a name this CLI would dispatch on.
+fn names_a_subcommand(word: &str) -> bool {
+    SUBCOMMANDS.contains(&word) || (DESKTOP_SUBCOMMAND_EXISTS && word == DESKTOP_SUBCOMMAND)
+}
+
+/// How many values a flag takes from the words after it.
+///
+/// Carried rather than assumed, because assuming one is how a validator
+/// mis-measures a command line: `--image` takes one *or more*, so
+/// `--image foo resume` hands both words to the flag and leaves no subcommand
+/// behind. Measured per flag on 0.145.0 (matrix scenario 13), not read off the
+/// help's punctuation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Values {
+    One,
+    OneOrMore,
+}
+
+/// The flags that take values, and how many.
 ///
 /// Held only so a **value** is never mistaken for a subcommand: `-C app` names
 /// a directory and `--profile review` names a profile, and refusing those
@@ -133,25 +171,25 @@ const SUBCOMMANDS: [&str; 27] = [
 /// safe direction — the word after it is examined rather than waved through.
 /// Boolean flags stay off it deliberately: listing one would skip the word
 /// after it, and `--oss resume <id>` would walk straight past the subcommand.
-const VALUE_FLAGS: [&str; 18] = [
-    "-i",
-    "--image",
-    "-m",
-    "--model",
-    "-p",
-    "--profile",
-    "-s",
-    "--sandbox",
-    "-C",
-    "--cd",
-    "-a",
-    "--ask-for-approval",
-    "--add-dir",
-    "--enable",
-    "--disable",
-    "--remote",
-    "--remote-auth-token-env",
-    "--local-provider",
+const VALUE_FLAGS: [(&str, Values); 18] = [
+    ("-i", Values::OneOrMore),
+    ("--image", Values::OneOrMore),
+    ("-m", Values::One),
+    ("--model", Values::One),
+    ("-p", Values::One),
+    ("--profile", Values::One),
+    ("-s", Values::One),
+    ("--sandbox", Values::One),
+    ("-C", Values::One),
+    ("--cd", Values::One),
+    ("-a", Values::One),
+    ("--ask-for-approval", Values::One),
+    ("--add-dir", Values::One),
+    ("--enable", Values::One),
+    ("--disable", Values::One),
+    ("--remote", Values::One),
+    ("--remote-auth-token-env", Values::One),
+    ("--local-provider", Values::One),
 ];
 
 /// The notify type this build has a word for, and what it means in Corral's
@@ -302,7 +340,14 @@ pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
                     (*assignment).clone(),
                 ));
             }
-            args.next();
+            // Its value, by the same rule every other value follows: a word
+            // that opens with a dash is not one, and the separator least of
+            // all. A flag left without its value fails the launch loudly in
+            // the provider's own parser, which is the outcome PR5 chose over
+            // degrading it silently.
+            if args.peek().is_some_and(|next| !next.starts_with('-')) {
+                args.next();
+            }
             continue;
         }
         // Joined to it, in each of the forms this CLI's parser accepts:
@@ -314,13 +359,25 @@ pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
         if joined.is_some_and(names_notify) {
             return Err(ArgumentRefused::CompetesWithInjection(argument.clone()));
         }
-        if VALUE_FLAGS.contains(&argument.as_str()) {
-            args.next();
+        if let Some((_, values)) = VALUE_FLAGS
+            .iter()
+            .find(|(flag, _)| *flag == argument.as_str())
+        {
+            // Values run until a word that opens with a dash, which is where
+            // this parser stops collecting them — so a subcommand name inside
+            // that run is a value, and `--` after one is still the separator.
+            let mut taken = 0;
+            while args.peek().is_some_and(|next| !next.starts_with('-'))
+                && (taken == 0 || *values == Values::OneOrMore)
+            {
+                args.next();
+                taken += 1;
+            }
             continue;
         }
         // A word that is not a flag is where this CLI reads a subcommand —
         // after any number of options, not only first.
-        if !argument.starts_with('-') && SUBCOMMANDS.contains(&argument.as_str()) {
+        if !argument.starts_with('-') && names_a_subcommand(argument) {
             return Err(ArgumentRefused::OutsideTheManagedSession(argument.clone()));
         }
     }

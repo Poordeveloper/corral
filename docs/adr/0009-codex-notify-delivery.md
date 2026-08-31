@@ -77,6 +77,12 @@ engine's authority order, not here.
 
 ## D2 — The payload rides argv, and the relay accepts that without parsing it
 
+> **Superseded in part by ADR 0010 D1.** The uniform "256 KiB cap with the
+> oversize marker" below is a promise about payloads the relay receives. Argv
+> delivery has an operating-system ceiling below it on Linux, past which the
+> event is lost before the relay exists and no marker is produced. The original
+> wording is kept as written; ADR 0010 D1 states what is actually guaranteed.
+
 Codex invokes the notify program with the notification JSON appended as
 exactly one final argument, and delivers nothing on stdin — measured
 (spike scenario 2), not assumed from source. The relay gains one flag:
@@ -206,6 +212,11 @@ first-party before merge. Eligibility is the existing ladder unchanged —
 sufficient assurance, Confirmed identity, no live Run, established exit —
 plus `IdentityUnknown` for the never-bound session of D3. No provider
 external id reaches an argv while contested (ADR 0004 D8).
+
+> **Superseded in part by ADR 0010 D2.** "Refuse exactly what defeats the
+> injection" is now one of two grounds; the other is an argument selecting a
+> provider surface Corral has declared it does not manage — which D1 above
+> declares for this provider. The original wording is kept as written.
 
 Caller arguments follow Claude's criterion, not Claude's list: refuse
 exactly what defeats the injection. The refusal is load-bearing, not
