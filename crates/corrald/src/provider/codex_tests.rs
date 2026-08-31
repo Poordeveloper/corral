@@ -388,10 +388,12 @@ fn a_value_that_happens_to_name_a_subcommand_is_still_a_value() {
     }
 }
 
-/// Everything else a person may want to pass to their own agent is theirs,
-/// including other configuration overrides, a profile, and the separator.
+/// An argument outside **both** grounds is the caller's: not displacing
+/// Corral's injection is no longer enough on its own to be passed through
+/// (ADR 0010 D2). Other configuration overrides, a profile, and the separator
+/// clear both.
 #[test]
-fn everything_that_does_not_defeat_the_override_is_the_callers() {
+fn arguments_outside_both_refusal_grounds_are_the_callers() {
     for allowed in [
         vec![],
         vec!["-m", "gpt-5"],
