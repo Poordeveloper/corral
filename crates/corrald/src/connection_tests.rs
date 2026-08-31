@@ -133,10 +133,12 @@ fn the_unknown_agent_refusal_exposes_no_machinery_and_no_surface() {
         said.contains("bash"),
         "{said:?} does not name what was asked for"
     );
-    assert!(
-        said.contains(crate::provider::KnownProvider::Claude.as_str()),
-        "{said:?} does not name what Corral does know",
-    );
+    for known in crate::provider::KnownProvider::ALL {
+        assert!(
+            said.contains(known.as_str()),
+            "{said:?} does not name {known}, which Corral does know",
+        );
+    }
 }
 
 /// The name came off the wire and every client renders this sentence as it
@@ -160,5 +162,5 @@ fn an_unusable_agent_name_is_not_echoed_into_the_refusal() {
 
     // An ordinary name is still named: the point is what may be shown, not
     // that a person should be told less.
-    assert!(unknown_provider("codex").contains("codex"));
+    assert!(unknown_provider("cursor").contains("cursor"));
 }

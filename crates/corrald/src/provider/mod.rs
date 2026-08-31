@@ -1,12 +1,25 @@
 //! The provider seam: the one owner of coding-agent knowledge in `corrald`.
 //!
-//! A module rather than a trait, deliberately. One implementation cannot show
-//! what two share, and a trait guessed from one would be a shape PR6 has to
-//! either satisfy or dismantle. The boundaries a trait would eventually draw
-//! are named here as functions instead — launch construction, resume
-//! construction, hook ingress interpretation, provider-specific validation —
-//! so the extraction, when it happens, moves code rather than inventing it
+//! An enum with exhaustive dispatch, and it stays one now that two real
+//! implementations have met it. The four boundaries a trait would draw are
+//! named here as functions — launch construction, resume construction, hook
+//! ingress interpretation, provider-specific validation — and the second
+//! provider found them where the first left them rather than needing new ones
 //! (grill Q5).
+//!
+//! No `dyn Provider`, and the friction is the point. A trait with defaults
+//! lets a third provider inherit answers to questions it was never asked;
+//! exhaustive matches make it face launch, evidence, identity, continuation,
+//! capabilities, and failure semantics one at a time, with a compiler error
+//! per unanswered question. That is integration review pressure, deliberately
+//! kept (grill Q4).
+//!
+//! What the two implementations do *not* share is as load-bearing as what they
+//! do. Claude is given a Corral-owned settings file its argv names; Codex is
+//! given a launch-scoped config override and nothing on disk. So a launch is a
+//! provider-owned plan — argv, plus an artifact only when that provider takes
+//! one — rather than a neutral signature carrying one provider's file
+//! (ADR 0009 D1).
 //!
 //! This is layer 2 of ADR 0004 D3. Provider-specific ingress comes in,
 //! normalized facts go out, and no provider event name is ever visible to a
@@ -21,17 +34,19 @@
 //! ```
 
 pub mod claude;
+pub mod codex;
 pub mod launch;
 pub mod reported;
 
+use std::ffi::OsString;
+use std::path::Path;
 use std::time::SystemTime;
 
-use corral_core::ExternalId;
+use corral_core::{ExternalId, RunId};
 
-pub use claude::ArgumentRefused;
 pub use launch::{
     InjectedSettings, InjectionFailed, LaunchScope, LaunchToken, LaunchTokens, NoRandomness,
-    SharedLaunchTokens, sweep_launch_dir,
+    RelayInvocation, SharedLaunchTokens, sweep_launch_dir,
 };
 pub use reported::{ReportedSession, ReportedSessions};
 
@@ -44,6 +59,14 @@ pub use reported::{ReportedSession, ReportedSessions};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KnownProvider {
     Claude,
+    /// Codex, and only the interactive TUI under a Corral-owned PTY.
+    ///
+    /// `codex exec`, headless batch, app-server orchestration, and CI-job
+    /// semantics are out of managed scope: different lifecycle, interaction,
+    /// attention, approval, and output semantics, deferred to their own phase.
+    /// This variant must never be read as "every Codex surface is supported"
+    /// (ADR 0009 D1, grill Q7).
+    Codex,
 }
 
 impl KnownProvider {
@@ -51,6 +74,7 @@ impl KnownProvider {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => claude::PROVIDER,
+            Self::Codex => codex::PROVIDER,
         }
     }
 
@@ -63,13 +87,43 @@ impl KnownProvider {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             claude::PROVIDER => Some(Self::Claude),
+            codex::PROVIDER => Some(Self::Codex),
             _ => None,
         }
     }
 
     /// Every provider this build integrates, for an error that has to name
     /// them.
-    pub const ALL: [Self; 1] = [Self::Claude];
+    pub const ALL: [Self; 2] = [Self::Claude, Self::Codex];
+
+    /// Where this provider puts the payload when it invokes the relay.
+    ///
+    /// A measured fact about each provider's own delivery design, not a
+    /// preference: Claude Code writes hook stdin, and Codex appends the
+    /// notification JSON as one final argument and writes nothing at all
+    /// (ADR 0009 D2, spike scenario 2).
+    pub fn payload_delivery(self) -> PayloadDelivery {
+        match self {
+            Self::Claude => PayloadDelivery::Stdin,
+            Self::Codex => PayloadDelivery::FinalArgument,
+        }
+    }
+}
+
+/// How a provider hands the relay a payload.
+///
+/// The relay is told which one it is (`corral_protocol::hook`), because a
+/// relay left to discover it would wait out its interference budget on a pipe
+/// the provider never opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayloadDelivery {
+    Stdin,
+    /// The provider appends the payload to the invocation it execs.
+    ///
+    /// Carries an operating-system ceiling below Corral's own payload cap on
+    /// Linux, past which an event is lost with no marker and nothing Corral
+    /// can do about it (`corral_protocol::hook::MAX_HOOK_PAYLOAD_BYTES`).
+    FinalArgument,
 }
 
 /// A fact an agent reported about itself, in Corral's own vocabulary.
@@ -179,6 +233,7 @@ pub enum Uninterpretable {
 pub fn program(provider: KnownProvider) -> &'static str {
     match provider {
         KnownProvider::Claude => claude::PROGRAM,
+        KnownProvider::Codex => codex::PROGRAM,
     }
 }
 
@@ -186,34 +241,57 @@ pub fn program(provider: KnownProvider) -> &'static str {
 ///
 /// Asked before anything is minted or written, because the answer is about the
 /// request rather than about anything Corral has built yet.
-pub fn refuse_arguments(
-    provider: KnownProvider,
-    args: &[String],
-) -> Result<(), claude::ArgumentRefused> {
+pub fn refuse_arguments(provider: KnownProvider, args: &[String]) -> Result<(), ArgumentRefused> {
     match provider {
         KnownProvider::Claude => claude::refuse_arguments(args),
+        KnownProvider::Codex => codex::refuse_arguments(args),
     }
 }
 
-/// The arguments of a fresh managed session, including its hook injection.
-pub fn launch_argv(
-    provider: KnownProvider,
-    settings: &std::path::Path,
-    args: &[String],
-) -> Vec<std::ffi::OsString> {
-    match provider {
-        KnownProvider::Claude => claude::launch_argv(settings, args),
-    }
+/// What a managed launch is meant to do.
+///
+/// One value rather than two entry points, because a provider composes both
+/// from the same injection and the two must never be able to disagree about
+/// it: a continuation that lost the override would be a Run Corral believes it
+/// is watching and is not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LaunchIntent {
+    /// A fresh session, carrying whatever arguments the caller passed.
+    Fresh { args: Vec<String> },
+    /// Continue the provider's own session as a new Run.
+    ///
+    /// No caller arguments: a continuation is Corral continuing what it
+    /// already recorded, and arguments would make one Session's Runs differ in
+    /// ways nothing recorded.
+    Continue { external_id: ExternalId },
 }
 
-/// The arguments that continue the provider's own session as a new Run.
-pub fn resume_argv(
+/// One provider's whole launch: the command line, and whatever it needed
+/// written first.
+///
+/// The artifact is `Option` because a provider having one is a provider fact.
+/// Claude takes a Corral-owned settings file its argv names; Codex takes a
+/// launch-scoped config override and nothing on disk, so its file lifecycle
+/// has nothing to own — one less artifact, not a gap (ADR 0009 D1).
+pub struct ProviderLaunch {
+    pub argv: Vec<OsString>,
+    pub artifact: Option<InjectedSettings>,
+}
+
+/// Compose one provider's launch, writing whatever it needs written.
+///
+/// **Blocking.** Publishing a settings file ends in an `fsync`; its one caller
+/// runs this off the reactor for that reason.
+pub fn compose_launch(
     provider: KnownProvider,
-    external_id: &ExternalId,
-    settings: &std::path::Path,
-) -> Vec<std::ffi::OsString> {
+    intent: &LaunchIntent,
+    relay: &RelayInvocation,
+    launch_dir: &Path,
+    run: RunId,
+) -> Result<ProviderLaunch, InjectionFailed> {
     match provider {
-        KnownProvider::Claude => claude::resume_argv(external_id, settings),
+        KnownProvider::Claude => claude::compose_launch(intent, relay, launch_dir, run),
+        KnownProvider::Codex => Ok(codex::compose_launch(intent, relay)),
     }
 }
 
@@ -227,8 +305,66 @@ pub fn interpret(
 ) -> Result<ProviderReport, Uninterpretable> {
     match provider {
         KnownProvider::Claude => claude::interpret(payload),
+        KnownProvider::Codex => codex::interpret(payload),
     }
 }
+
+/// Why a caller's provider arguments cannot be passed through.
+///
+/// Two reasons, and they are different failures. One argument would defeat the
+/// injection Corral is about to make, leaving a launch Corral believes it is
+/// watching and is not. Another would start something other than the session
+/// Corral manages — a different program under a Corral PTY, or a second
+/// process on a conversation Corral may already be running, which is what
+/// `managed_launch`'s continuation claim exists to prevent and which no
+/// after-the-fact binding check can undo.
+///
+/// What counts as either is each provider's own answer against its own command
+/// line. Everything else a person may want to pass to their own agent is
+/// theirs.
+///
+/// Refused rather than dropped. Silently discarding an argument a person asked
+/// for would be Corral deciding how their agent runs, and silently honouring
+/// it would be one of the two launches above.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArgumentRefused {
+    /// It would displace or disable Corral's own injection.
+    CompetesWithInjection(String),
+    /// It starts something other than the session Corral manages.
+    OutsideTheManagedSession(String),
+}
+
+impl ArgumentRefused {
+    /// The word the person wrote, so they can find it in their own command
+    /// line.
+    pub fn argument(&self) -> &str {
+        match self {
+            Self::CompetesWithInjection(argument) | Self::OutsideTheManagedSession(argument) => {
+                argument
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for ArgumentRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CompetesWithInjection(argument) => write!(
+                f,
+                "{argument} is Corral's to pass: it is how Corral watches the session it starts \
+                 for you",
+            ),
+            Self::OutsideTheManagedSession(argument) => write!(
+                f,
+                "{argument} starts something other than the session Corral manages: Corral runs \
+                 the agent's own interactive session, and continues one it already knows rather \
+                 than starting a second agent on it",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ArgumentRefused {}
 
 impl std::fmt::Display for KnownProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

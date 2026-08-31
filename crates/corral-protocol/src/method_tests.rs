@@ -213,6 +213,35 @@ fn a_provider_without_a_current_identity_still_names_the_product() {
     assert_eq!(provider.external_id, None);
 }
 
+/// A provider name is data on this wire, not a vocabulary. Adding a product a
+/// daemon can start is not a schema change, and a client built before that
+/// product existed decodes the name and renders it as it stands — which is
+/// what makes `provider.name` safe to extend (ADR 0009; `AGENTS.md`
+/// §Protocol).
+#[test]
+fn a_provider_name_this_build_predates_decodes_as_itself() {
+    let item = json!({
+        "session_id": "s1",
+        "title": "codex",
+        "execution_state": "running",
+        "provider": {"name": "codex", "external_id": "01a0576f-0ecc-7b21-9719-f38f9e4ef933"},
+        "agent_event": {"kind": "turn_ended", "at_ms": 1_700_000_000_000_i64},
+    });
+
+    let decoded: SessionListItem = serde_json::from_value(item).expect("decode");
+
+    let provider = decoded.provider.expect("a provider");
+    assert_eq!(provider.name, "codex");
+    assert_eq!(
+        provider.external_id.as_deref(),
+        Some("01a0576f-0ecc-7b21-9719-f38f9e4ef933"),
+    );
+    assert_eq!(
+        decoded.agent_event.expect("an event").kind,
+        AgentEventKind::TurnEnded,
+    );
+}
+
 /// Future input: an agent-event kind a newer daemon named decodes rather than
 /// failing the item, and keeps its spelling for a diagnostic.
 #[test]

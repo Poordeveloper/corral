@@ -308,26 +308,39 @@ async fn apply(
         return Ok(());
     };
 
-    // Most events say nothing new about identity: a turn started, a turn
+    // Most reports say nothing new about identity: a turn started, a turn
     // ended, the agent is waiting — each naming the same conversation Corral
-    // is already standing behind. Those write nothing durable, so asking the
-    // store would be a blocking-pool hop and a lock acquisition per prompt,
-    // serialized behind this one task, to be told what live state already
-    // knew. Live state cannot disagree with the log here: every value in it
-    // was published by this same step.
+    // is already standing behind, in the same Run that already observed it.
+    // Those write nothing durable, so asking the store would be a
+    // blocking-pool hop and a lock acquisition per prompt, serialized behind
+    // this one task, to be told what live state already knew. Live state
+    // cannot disagree with the log here: every value in it was published by
+    // this same step.
+    //
+    // What falls through is a report that observes the identity anew, and
+    // there are two ways to be one. A provider that reports its own session
+    // start says so itself, whenever it says it. A provider that reports no
+    // start — Codex reports only completed turns — says it by being the first
+    // report of a Run, which is a fact Corral owns because Corral spawned the
+    // Run. A rule written around one provider's event name would leave the
+    // other's Runs confirming nothing at all (ADR 0004 D7, ADR 0009 D3).
+    //
+    // The Run half also repairs an inconsistency the second provider exposed:
+    // `establish` already refuses to hinge on one event arriving, because
+    // delivery is at-most-once, and a confirmation that could only ride a
+    // session start was hinging on exactly that.
     //
     // The store is still the authority for everything that *does* write —
     // establishing an identity, confirming one, and contesting one — and every
     // one of those falls through.
-    let unchanged = state
+    let observed_already = state
         .with_runtime(|runtime| {
             runtime
                 .reported
-                .get(session)
-                .is_some_and(|held| held.external_id.as_ref() == Some(&reported_id))
+                .identity_observed_in(session, scope.run, &reported_id)
         })
         .unwrap_or(false);
-    if unchanged && report.fact != AgentFactKind::SessionStarted {
+    if observed_already && report.fact != AgentFactKind::SessionStarted {
         return Ok(());
     }
 
@@ -369,7 +382,7 @@ async fn apply(
             Ok(())
         }
         Some(existing) if existing.key().external_id() == &reported_id => {
-            reobserved(state, scope, &existing, report, observed_at).await
+            reobserved(state, scope, &existing, observed_at).await
         }
         Some(existing) => contest(state, scope, &existing, report, reported_id, observed_at).await,
     }
@@ -442,8 +455,11 @@ async fn establish(
             );
             let session = scope.session;
             let provider = scope.provider;
+            let run = scope.run;
             state.with_runtime(|runtime| {
-                runtime.reported.identified(session, provider, reported_id)
+                runtime
+                    .reported
+                    .identified(session, provider, run, reported_id)
             });
             Ok(())
         }
@@ -475,28 +491,33 @@ async fn establish(
     }
 }
 
-/// The same identity, seen again.
+/// The same identity, observed anew.
 ///
-/// A durable confirmation is written for a session start and nothing else. The
-/// re-observation ADR 0004 D7 names is the moment identity is observed anew —
-/// a fresh Run of the same conversation — and writing one per turn event would
-/// grow the log by one fact for every prompt without recording anything the
-/// last one did not.
+/// Every report that reaches here is one: the caller's gate has already turned
+/// away the re-reports that say nothing — the ones naming an identity this Run
+/// has already observed, from a provider that did not call this a start. So
+/// the confirmation is written without asking again what kind of report it
+/// was.
+///
+/// Not one per turn, which is the thing this must never become: that would
+/// grow the log by a fact for every prompt without recording anything the last
+/// one did not.
 async fn reobserved(
     state: &Arc<DaemonState>,
     scope: &LaunchScope,
     existing: &Binding,
-    report: &ProviderReport,
     observed_at: SystemTime,
 ) -> Result<(), StateError> {
     let session = scope.session;
     let provider = scope.provider;
+    let run = scope.run;
     let external_id = existing.key().external_id().clone();
-    state.with_runtime(|runtime| runtime.reported.identified(session, provider, external_id));
+    state.with_runtime(|runtime| {
+        runtime
+            .reported
+            .identified(session, provider, run, external_id)
+    });
 
-    if report.fact != AgentFactKind::SessionStarted {
-        return Ok(());
-    }
     let evidence = Evidence::new(
         EvidenceSource::ProviderHook,
         Assurance::Attested,

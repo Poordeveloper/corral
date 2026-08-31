@@ -1,9 +1,10 @@
 //! `corral hook-relay`: the poorest useful program in the repository, on
 //! purpose.
 //!
-//! It reads one provider hook payload from standard input, frames it, delivers
-//! it to `corrald`'s hook endpoint, takes one receipt, and exits 0. That is
-//! the whole contract, and every absence in it is deliberate (ADR 0004 D1):
+//! It reads one provider hook payload from wherever that provider delivers it,
+//! frames it, delivers it to `corrald`'s hook endpoint, takes one receipt, and
+//! exits 0. That is the whole contract, and every absence in it is deliberate
+//! (ADR 0004 D1):
 //!
 //! - it never parses the payload, so payload drift cannot break it and
 //!   semantic interpretation stays with the daemon's provider adapter;
@@ -14,14 +15,21 @@
 //!   shims do not start `corrald` (`AGENTS.md`). An absent socket means the
 //!   daemon is not running, which means fail open now.
 //!
+//! Where the payload comes from is the one thing a provider gets to differ
+//! about, and it is told rather than guessed: standard input by default, and
+//! the invocation's own last argument when the injected command line says so
+//! (ADR 0009 D2). Everything after that point is byte-for-byte the same
+//! program.
+//!
 //! And it is bounded end to end. One monotonic deadline covers every phase —
-//! reading stdin, resolving the rendezvous, connecting, delivering, and the
-//! acknowledgement — and each of the two that can block indefinitely runs on a
+//! reading the payload, resolving the rendezvous, connecting, delivering, and
+//! the acknowledgement — and each of the two that can block indefinitely runs on a
 //! thread this one stops waiting for when the budget is out. No phase resets
 //! the deadline, and a definite error fails open without waiting it out
 //! (ADR 0004 D4).
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -29,8 +37,8 @@ use std::time::{Duration, Instant};
 use std::ffi::OsString;
 
 use corral_protocol::hook::{
-    HOOK_DELIVER, HookDelivery, MAX_HOOK_PAYLOAD_BYTES, RELAY_PROVIDER_FLAG, RELAY_SUBCOMMAND,
-    RELAY_TOKEN_FLAG,
+    HOOK_DELIVER, HookDelivery, MAX_HOOK_PAYLOAD_BYTES, RELAY_PAYLOAD_ARGV_FLAG,
+    RELAY_PROVIDER_FLAG, RELAY_SUBCOMMAND, RELAY_TOKEN_FLAG,
 };
 use corral_protocol::{Frame, MAX_FRAME_BYTES, RequestId, encode_frame};
 use corral_rendezvous::RendezvousPaths;
@@ -63,6 +71,23 @@ pub const INTERFERENCE_BUDGET: Duration = Duration::from_millis(50);
 pub struct Invocation {
     pub provider: String,
     pub token: String,
+    pub payload: PayloadSource,
+}
+
+/// Where this invocation's payload is.
+///
+/// Named rather than inferred from an empty argument. A relay that fell back
+/// to standard input when the last argument did not look like a payload would
+/// spend the whole interference budget waiting on a pipe the provider never
+/// opened, once per event — and a relay that read standard input *as well*
+/// would be a second, undeclared way for a payload to arrive.
+pub enum PayloadSource {
+    /// The provider writes it to standard input and closes.
+    Stdin,
+    /// The provider appended it as the invocation's final argument
+    /// (ADR 0009 D2). Held verbatim: the bytes are the provider's, and the
+    /// relay never parses them.
+    Argument(Vec<u8>),
 }
 
 /// Read a hook delivery out of this process's own arguments, or `None` when
@@ -74,6 +99,12 @@ pub fn invocation(arguments: impl IntoIterator<Item = OsString>) -> Option<Invoc
     }
     let mut provider = String::new();
     let mut token = String::new();
+    let mut from_argument = false;
+    // The invocation's own last word, whatever it turns out to be. Kept as it
+    // goes past rather than sought afterwards, because the payload is the
+    // final argument of the *invocation* — appended by the provider after
+    // everything Corral wrote — and nothing but position identifies it.
+    let mut last = None;
     while let Some(argument) = arguments.next() {
         // A flag whose value is missing leaves the field empty. The daemon
         // refuses what it cannot place, and silence is this program's whole
@@ -93,10 +124,31 @@ pub fn invocation(arguments: impl IntoIterator<Item = OsString>) -> Option<Invoc
         match argument.to_string_lossy().as_ref() {
             RELAY_PROVIDER_FLAG => named(&mut provider),
             RELAY_TOKEN_FLAG => named(&mut token),
+            RELAY_PAYLOAD_ARGV_FLAG => from_argument = true,
             _ => {}
         }
+        last = Some(argument);
     }
-    Some(Invocation { provider, token })
+    // The flag itself as the last word is an invocation that declared an argv
+    // payload and carries none. There is nothing to deliver and nothing
+    // truthful to say about it, and standard input is not a fallback: this is
+    // the silent failure every path here ends in.
+    let payload = match (from_argument, last) {
+        (false, _) => PayloadSource::Stdin,
+        (true, Some(last)) if last != *RELAY_PAYLOAD_ARGV_FLAG => {
+            // Verbatim bytes, not a lossy string. A payload is the provider's
+            // to write and the daemon's to read; substituting U+FFFD for a
+            // byte on the way through would hand the daemon a payload no
+            // provider produced.
+            PayloadSource::Argument(last.as_bytes().to_vec())
+        }
+        (true, _) => PayloadSource::Argument(Vec::new()),
+    };
+    Some(Invocation {
+        provider,
+        token,
+        payload,
+    })
 }
 
 /// Deliver one hook event, and never do anything else.
@@ -104,18 +156,30 @@ pub fn invocation(arguments: impl IntoIterator<Item = OsString>) -> Option<Invoc
 /// `started` is taken by the caller, before the command line was even read, so
 /// the budget covers the invocation rather than the part of it this function
 /// can see.
-pub fn deliver(token: &str, provider: &str, started: Instant) -> ExitCode {
+pub fn deliver(invocation: &Invocation, started: Instant) -> ExitCode {
     // Every path below returns success. The value is built once, here, so that
     // a later edit cannot introduce a branch that reports failure to a
     // provider that would read it as a decision.
     let fail_open = ExitCode::SUCCESS;
 
-    let Some(payload) = read_payload(remaining(started)) else {
-        return fail_open;
+    let payload = match &invocation.payload {
+        // Already in hand, and read before this process was even started. The
+        // budget is untouched by it — which is the whole of what an argv
+        // payload changes.
+        PayloadSource::Argument(payload) => {
+            if payload.is_empty() {
+                return fail_open;
+            }
+            payload.clone()
+        }
+        PayloadSource::Stdin => match read_payload(remaining(started)) {
+            Some(payload) => payload,
+            None => return fail_open,
+        },
     };
     let Some(delivery) = HookDelivery::new(
-        token.to_owned(),
-        provider.to_owned(),
+        invocation.token.clone(),
+        invocation.provider.clone(),
         env!("CARGO_PKG_VERSION").to_owned(),
         &payload,
     ) else {

@@ -44,7 +44,7 @@ fn relaunching_a_session_keeps_what_it_already_learned() {
     let mut reported = ReportedSessions::new();
     let session = CorralSessionId::mint();
     reported.launched(session, KnownProvider::Claude);
-    reported.identified(session, KnownProvider::Claude, id("abc"));
+    reported.identified(session, KnownProvider::Claude, RunId::mint(), id("abc"));
 
     reported.launched(session, KnownProvider::Claude);
 
@@ -103,7 +103,7 @@ fn withdrawing_an_identity_leaves_every_other_fact_standing() {
     let mut reported = ReportedSessions::new();
     let session = CorralSessionId::mint();
     reported.launched(session, KnownProvider::Claude);
-    reported.identified(session, KnownProvider::Claude, id("first"));
+    reported.identified(session, KnownProvider::Claude, RunId::mint(), id("first"));
     reported.reported(
         session,
         KnownProvider::Claude,
@@ -133,7 +133,7 @@ fn withdrawing_an_identity_leaves_every_other_fact_standing() {
 fn a_fact_after_a_withdrawal_does_not_restore_the_identity() {
     let mut reported = ReportedSessions::new();
     let session = CorralSessionId::mint();
-    reported.identified(session, KnownProvider::Claude, id("first"));
+    reported.identified(session, KnownProvider::Claude, RunId::mint(), id("first"));
     reported.contested(session);
 
     reported.reported(
@@ -295,4 +295,32 @@ fn a_contest_is_not_weakened_to_one_identity() {
 
     assert!(reported.identity_closed(session, &id("foreign")));
     assert!(reported.identity_closed(session, &id("any-other")));
+}
+
+/// What a durable confirmation is written on: the same identity, observed in a
+/// Run that had not observed it. A provider that reports no session start has
+/// no other way to say "again" (ADR 0009 D3).
+#[test]
+fn an_identity_is_observed_per_run_and_not_once_for_all_of_them() {
+    let mut reported = ReportedSessions::new();
+    let session = CorralSessionId::mint();
+    let first = RunId::mint();
+    let second = RunId::mint();
+    reported.launched(session, KnownProvider::Codex);
+    reported.identified(session, KnownProvider::Codex, first, id("abc"));
+
+    assert!(reported.identity_observed_in(session, first, &id("abc")));
+    // A later Run of the same Session has not observed it yet, which is what
+    // makes its first report worth recording.
+    assert!(!reported.identity_observed_in(session, second, &id("abc")));
+    // Nor has this Run observed an identity it was never told about.
+    assert!(!reported.identity_observed_in(session, first, &id("xyz")));
+
+    reported.identified(session, KnownProvider::Codex, second, id("abc"));
+    assert!(reported.identity_observed_in(session, second, &id("abc")));
+
+    // A contest withdraws the claim, so there is nothing left to have been
+    // observed — a report of any id after it deserves the store's answer.
+    reported.contested(session);
+    assert!(!reported.identity_observed_in(session, second, &id("abc")));
 }

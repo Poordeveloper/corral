@@ -1,0 +1,355 @@
+# Codex notify injection and identity, re-verified first-party
+
+> Compatibility evidence for PR6 (`ROADMAP.md` §3; plan design 9). Every claim
+> below is from a run performed for this record on this machine, not from
+> documentation, from memory, from the acceptance spike, or from S2. It is
+> evidence about **this version**: `PRODUCT.md` §10's supported
+> provider/version matrix gains its Codex row here, and the follow-up that
+> automates it under `verify-release` is named in the PR5 plan and still open.
+>
+> It re-runs the acceptance spike's scenarios
+> (`docs/references/2026-08-31-codex-0.145.0-notify-spike.md`) against the
+> installed release and adds what the implementation turned out to need
+> sealed: the caller spellings that can displace the override, identity across
+> an interactive resume, the in-place new thread, the zero-turn session, and
+> whether Codex waits for its notify program.
+
+## Method
+
+| | |
+|---|---|
+| codex-cli | **0.145.0** (`codex --version`), installed at `~/.local/node/bin/codex` (npm global) |
+| OS | macOS, Darwin 25.5.0, arm64 — **the only platform exercised**; see scenario 11 for what that leaves open on Linux |
+| Corral commit | `8b570b4` (branch `task/pr6-codex-managed-sessions`, before the implementation landed) |
+| Date | 2026-08-31 |
+
+Every scenario ran under a scratch `CODEX_HOME` (auth copied, mode 0600,
+`model_reasoning_effort = "low"`, deleted afterwards) so that a user-level
+`notify`, a profile, and the directory-trust answer could all be exercised
+without touching `~/.codex`. The scratch home was confirmed in effect before
+each interactive run — its model effort is visible in the TUI header. The real
+`~/.codex/config.toml` was checked afterwards and holds no `notify` key.
+
+Interactive scenarios were driven in a tmux pane by a scripted keyboard. The
+capture program records its full argv, a bounded stdin probe, its cwd, and the
+time; its own first argument is its output path, so anything Codex appends
+follows it.
+
+The captured payloads are committed as
+`crates/corrald/fixtures/codex-notify/`, sanitized only where they carried a
+developer's own paths; the structure is exactly what Codex wrote.
+
+## Scenarios
+
+### 1. The interactive TUI fires top-level `notify` — **pass**
+
+Command: `codex -c 'notify=["<capture>","<out>"]'`, one completed turn.
+
+Expected: the notify program is invoked on turn completion, from the
+interactive client.
+
+Observed: invoked, with `client: "codex-tui"`. This is the managed surface —
+`codex exec` is not (ADR 0009 D1) — and S2 had only ever proven `exec`.
+
+### 2. The payload is the final argv item, and argv only — **pass**
+
+Observed: exactly one argument appended after the configured ones
+(`argc_after_out=1`), holding the notification JSON verbatim; the stdin probe
+read zero bytes. Payload (this run, before sanitizing):
+
+```json
+{"type":"agent-turn-complete",
+ "thread-id":"01a057b2-7f33-7f11-9bbc-16e2fa444534",
+ "turn-id":"01a057b2-bb99-7e22-b379-ded6e470f8da",
+ "cwd":"<run dir>","client":"codex-tui",
+ "input-messages":["Reply with exactly: ok"],
+ "last-assistant-message":"ok"}
+```
+
+The same shape from `codex exec` was captured in the same session
+(`client: "codex_exec"`, thread-id `01a057a3-f2f8-76f2-b505-5225da397872`,
+`argc_after_out=1`, stdin empty) and is committed beside it: the parser must
+not depend on `client` holding one value.
+
+This is what `RELAY_PAYLOAD_ARGV_FLAG` exists for. A relay left to discover the
+channel would wait out its interference budget on a pipe nobody opens.
+
+### 3. The runtime `-c notify` beats a configured `notify` — **pass**
+
+Command: scratch `CODEX_HOME` whose `config.toml` sets `notify` to a user
+capture, launched with two `-c notify=[…]` flags (a decoy and Corral's), one
+completed turn.
+
+Observed: only the **last** `-c` program fired. The configured program stayed
+silent, and so did the decoy. One run settles both halves of ADR 0009's
+override strategy: the runtime layer wins (D4), and a caller's later flag
+displaces an earlier one (D5's refusal rationale).
+
+### 4. A `--profile` that configures `notify` does not displace it — **pass**
+
+Command: `$CODEX_HOME/work.config.toml` sets `notify` to a profile capture;
+launched with `--profile work -c 'notify=[…]'`, one completed turn.
+
+Observed: the `-c` program fired; the profile's stayed silent. `--profile` is
+therefore **not** a spelling Corral has to refuse — which is the question that
+made this scenario worth running, since the spike had only measured the user
+layer.
+
+### 5. Every refused spelling is a real config-override spelling — **pass**
+
+Five spellings, each carrying `model=corral-bogus-model` so the override is
+observable for free — Codex names the model in a warning before any request is
+made, so this costs no completed turn:
+
+```text
+-c model=…            accepted
+--config model=…      accepted
+-cmodel=…             accepted
+-c=model=…            accepted
+--config=model=…      accepted
+```
+
+All five take effect. `refuse_arguments` refuses `notify` in each of them plus
+the dotted form; none of the five is a defensive guess, and scenario 3 is why
+refusing matters — the last override wins, so a caller's later one silently
+displaces Corral's.
+
+### 6. Identity is stable across an interactive `codex resume <id>` — **pass**
+
+Command: `codex -c 'notify=[…]' resume 01a057b2-7f33-7f11-9bbc-16e2fa444534`,
+one completed turn.
+
+Observed: the prior conversation was restored on screen, and the notify payload
+carried the **same** `thread-id`. S2 had verified this for `codex exec resume`;
+the interactive path is the one `session.resume` composes, and it is now
+first-party.
+
+On exit the TUI printed, unprompted:
+
+```text
+To continue this session, run codex resume 01a057b4-0d96-75e2-9735-77cc4f3fa119
+```
+
+— the resume verb Corral composes, stated by the provider itself.
+
+### 7. An in-place new thread reports a different id — **pass**
+
+Command: in the resumed session above, `/new` ("start a new chat during a
+conversation"), then one completed turn.
+
+Observed: the next notify carried `thread-id`
+`01a057b4-0d96-75e2-9735-77cc4f3fa119` — a different conversation over the same
+launch and the same token. That is ADR 0004 D8's contest, unchanged, now
+observed on a second provider: Corral withdraws the identity claim once,
+durably, and refuses `session.resume` while Open and attach stay untouched.
+
+### 8. A session that completes no turn reports nothing — **pass**
+
+Command: launch, then quit without submitting a prompt.
+
+Observed: the notify program was never invoked; no output file was created at
+all. A managed Codex session that exits before any turn completes therefore
+never binds, and `session.resume` answers `IdentityUnknown` — Corral knowing
+only that it lacks sufficient identity, asserting nothing about what Codex left
+behind (ADR 0009 D3, grill Q3).
+
+### 9. Codex does not block its interactive loop on notify — **characterized**
+
+Command: notify program that sleeps 5 s; one completed turn; keystrokes sent
+while it slept.
+
+Observed: the assistant's answer was already rendered and the composer accepted
+new input during the sleep. Codex does not wait for the notifier before
+continuing.
+
+Characterization, not a licence. The relay's 50 ms budget and its poverty
+contract stay exactly as they are: two relay contracts is a drift trap, the
+strictest consumer sets the bar, and the measurement above is about **this**
+version of one provider (ADR 0009 D2).
+
+### 10. Configuration residue — **pass, with the same attributed exception**
+
+Observed: after the runs above, the scratch `config.toml` held no `notify` key
+and no other override residue. Its bytes changed exactly once, at the moment a
+person answered Codex's own first-run directory-trust prompt, which Codex
+persisted as `[projects."…"] trust_level = "trusted"`. Every later run in the
+already-trusted directory left the file byte-identical — including the run that
+declined the TUI's own update offer (0.145.0 → 0.151.0).
+
+The trust prompt itself appeared in the pane and was answered there: under
+Corral it will appear the same way, through the PTY, and answering it stays the
+user's act and Codex's write.
+
+### 11. An oversize payload in argv — **pass on macOS; a known ceiling on Linux**
+
+Command: the real `corral hook-relay --provider codex --token … --payload-argv`
+with a 300 KiB payload, past the 256 KiB channel cap.
+
+Observed on this machine: exit 0, nothing on stdout or stderr, returned in
+14 ms. Probing further, the largest single argv string that `execve` accepts
+here is ~1020 KiB — macOS bounds the *total* (`ARG_MAX` 1 MiB) and imposes no
+per-string cap. So on macOS Corral's 256 KiB cap is the binding one and its
+oversize marker is reachable.
+
+**It is not reachable on Linux, and Linux is in scope** (ADR 0005). Linux caps
+each individual argv or environment string at `MAX_ARG_STRLEN` — 32 pages,
+about 128 KiB with 4 KiB pages — and `execve` fails with `E2BIG`
+([execve(2)](https://man7.org/linux/man-pages/man2/execve.2.html)). That
+failure happens inside Codex, before `corral hook-relay` exists, so for a
+notify payload past roughly 128 KiB there:
+
+- the completed turn is never delivered;
+- no `payload_omitted="oversize"` marker is produced either, because the marker
+  is written by a relay that never ran;
+- Corral sees nothing at all, and degrades exactly as it does for any
+  undelivered event — the fact goes stale, and if it was the first turn the
+  session stays unbound until a smaller one completes.
+
+This is a property of Codex's notify transport, not of the relay: Corral cannot
+mark what never reaches it, and lowering its own cap would not change where the
+failure happens. It is recorded at
+`corral_protocol::hook::MAX_HOOK_PAYLOAD_BYTES`, at `PayloadDelivery::FinalArgument`,
+and in the adapter, so the cap is not read as a guarantee it cannot make here.
+
+**Not measured on this machine.** The Linux figure is from `execve(2)`, not
+from a run: no Linux host was available while writing this. Measuring it — a
+container that execs a program with a 150 KiB argument and reports `E2BIG` — is
+the named follow-up, and it needs no model turn and no Codex account.
+
+### 12. `--` ends option parsing, and a subcommand can hide after any option — **pass**
+
+Two questions the implementation turned on, both free to answer — neither needs
+a completed turn.
+
+```text
+codex resume --help        → prints resume's help          (a subcommand)
+codex -- exec hi           → error: unexpected argument 'hi' found
+                             Usage: codex [OPTIONS] [PROMPT]
+```
+
+The second is the decisive one: after `--`, `exec` became the prompt positional
+and `hi` was a second positional the root command has no room for. Had `exec`
+dispatched, `hi` would have been its prompt. So a word after `--` is text, not
+a subcommand and not an option — which is why `refuse_arguments` stops reading
+there, and why refusing `-- --config=notify=[]` would have been Corral refusing
+somebody's prompt.
+
+Before `--`, a subcommand may follow any number of options (`codex -m … resume
+<id>`), so the first word is not the only place one can hide. `resume` and
+`fork` are the two that matter most: they attach to an existing conversation,
+which is what `session.resume`'s continuation claim exists to serialize.
+
+### 13. What the CLI dispatches on, and how much each flag eats — **measured**
+
+The refusal in `refuse_arguments` is only as good as its reading of this
+command line, so both halves of that reading were measured rather than taken
+from `--help`. None of it needs a completed turn.
+
+**Names `--help` does not advertise.** Asking a name for its own help
+distinguishes a subcommand from an ordinary word: a real one answers with its
+own description, and one the parser does not know answers with the root's.
+
+```text
+codex execpolicy --help            → Execpolicy tooling
+codex responses-api-proxy --help   → Internal: run the responses API proxy
+codex stdio-to-uds --help          → Internal: relay stdio to a Unix domain socket
+codex cloud-tasks --help           → [EXPERIMENTAL] Browse tasks from Codex Cloud …
+codex apply-what-not --help        → Codex CLI            (the root: not a subcommand)
+```
+
+Four names the help page never lists — three hidden, one an alias of `cloud`.
+A refusal list built from `--help` would have left the declared surface open at
+exactly the names nobody thinks to check.
+
+**Not measured here: `app`.** It is compiled in under macOS and Windows only,
+so on Linux it is an ordinary word and refusing it would refuse somebody's
+prompt. That is from the founder's reading of `rust-v0.145.0`, recorded in the
+PR6 review; this machine can only confirm that `app` exists on macOS. The
+adapter gates it on the target platform accordingly.
+
+**How much each value-taking flag eats.** `codex <flag> a resume --last`
+separates a greedy flag from a single-value one: if the flag swallowed
+`resume`, then `--last` reaches the root, which has no such flag; if it took
+only `a`, then `resume` dispatched and `--last` is one of its own.
+
+```text
+--image        → error: unexpected argument '--last' found      (greedy)
+--profile      → Error: stdin is not a terminal                 (one value; resume dispatched)
+--model        → Error: stdin is not a terminal                 (one value)
+--local-provider → Error: stdin is not a terminal               (one value)
+--add-dir      → runtime error about the directory, --last accepted   (one value)
+--enable       → Error: Unknown feature flag: a                 (one value)
+--disable      → Error: Unknown feature flag: a                 (one value)
+--cd           → Error: No such file or directory               (one value)
+--remote / --remote-auth-token-env / --sandbox / --ask-for-approval
+               → value-validation errors                        (one value)
+```
+
+`--image`/`-i` is the only multi-value flag on this release, and it collects
+until a word that opens with a dash. So `--image foo resume` leaves no
+subcommand behind, and a validator that skipped exactly one word after every
+value flag would refuse a filename — the same parser-shadowing mistake as
+treating `-C app` as a subcommand, one arity further out.
+
+**Only the separated spelling collects, and this is the direction it would be
+dangerous to guess at.** An occurrence carrying its own value takes that value
+and stops:
+
+```text
+codex exec hi              → Not inside a trusted directory …   (exec ran)
+codex --image=a exec hi    → Not inside a trusted directory …   (exec ran)
+codex -ia exec hi          → Not inside a trusted directory …   (exec ran)
+codex --image a exec hi    → Error: stdin is not a terminal     (both swallowed; the TUI)
+```
+
+The `--last` probe agrees from the other side: `codex --image=a resume --last`,
+`codex -ia resume --last`, and `codex -i=a resume --last` all reach the resume
+picker, where `--last` is a flag it owns — whereas the separated
+`codex --image a resume --last` fails at the root with
+`unexpected argument '--last'`, because `resume` had been eaten and the root
+has no such flag.
+
+So a validator that let a joined occurrence keep collecting would swallow a
+`resume` this CLI actually dispatches: a false acceptance, and the
+native-resume bypass again in a spelling nobody would look at. The
+implementation treats a joined occurrence as what it is — a flag carrying its
+own value — and the words after it as words.
+
+## Limits
+
+- **This is 0.145.0.** 0.151.0 exists and was declined in-session; the record
+  is about the version that is installed. A version outside it is not gated —
+  launch proceeds, evidence is best-effort, and unknown notify types assert
+  nothing.
+- Scenarios 3, 4, and 5 were driven through `codex exec`. They are questions
+  about the CLI's argument parsing and config layering, not about the managed
+  surface, and exec answers them for a fraction of the cost. The surface-shaped
+  scenarios — 1, 2, 6, 7, 8, 9, 10 — were all driven interactively.
+- `--remote <ADDR>` (experimental) was not driven: it connects the TUI to a
+  remote app server, and whether the override reaches wherever the turn
+  actually runs is unmeasured. It is **not** refused. A managed launch that
+  learns nothing degrades to an identity that never binds, which is scenario
+  8's honest outcome rather than a false one.
+- Subcommands **are** refused, on the second ground ADR 0010 D2 adds:
+  `corral new codex -- exec …` selects a surface Corral has declared it does
+  not manage, and `resume`/`fork` would put a second process on a conversation
+  Corral may already be running. Scenario 13 is the evidence the refusal is
+  built from. This bullet said the opposite in the first round of this PR; the
+  review that changed it is
+  `docs/decisions/2026-08-31-pr6-review-surface-and-transport.md`.
+- Codex 0.145.0 has a `hooks` feature of its own (`--dangerously-bypass-hook-trust`
+  in `--help`). It was not examined: ADR 0009 decided the channel is `notify`,
+  and re-opening that is a decision, not a matrix scenario.
+- Organization- or enterprise-managed configuration was not driven and cannot
+  be on this machine.
+- Oversize payloads were not generated *by Codex*; producing a 256 KiB
+  assistant message costs real model output for a property that is Corral's,
+  not the provider's.
+- The subcommand list and the arity table are claims about **0.145.0 on this
+  target**. A name a later release adds is one they do not know, and the
+  failure that produces is a launch that starts a surface Corral does not
+  manage rather than one it wrongly refuses.
+- **No Linux host was exercised.** Everything above is macOS, and scenario 11's
+  Linux ceiling is read off `execve(2)` rather than measured. That is the
+  weakest evidence in this document and the one with a consequence on a
+  supported platform, so it is named twice rather than buried.

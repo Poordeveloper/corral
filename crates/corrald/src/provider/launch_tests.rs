@@ -118,14 +118,16 @@ fn a_token_never_prints_itself() {
 }
 
 #[test]
-fn an_injected_file_is_private_from_creation_and_holds_the_relay_command() {
+fn an_injected_file_is_private_from_creation_and_holds_what_it_was_given() {
     let scratch = Scratch::new("write");
     let run = RunId::mint();
+    // What the document says is the provider adapter's and is tested there.
+    // What this owns is that a launch either gets the whole of it, privately,
+    // or gets none.
     let settings = InjectedSettings::write(
         scratch.path(),
         run,
-        KnownProvider::Claude,
-        "'/opt/corral' relay",
+        "{\"command\": \"'/opt/corral' relay\"}",
     )
     .expect("the settings are written");
 
@@ -164,7 +166,7 @@ fn an_injected_files_name_says_which_run_owns_it() {
 fn a_finished_runs_file_is_removed_and_removing_a_missing_one_is_quiet() {
     let scratch = Scratch::new("remove");
     let run = RunId::mint();
-    InjectedSettings::write(scratch.path(), run, KnownProvider::Claude, "relay").expect("written");
+    InjectedSettings::write(scratch.path(), run, "{}").expect("written");
     InjectedSettings::remove_for(scratch.path(), run);
     assert!(!InjectedSettings::path_for(scratch.path(), run).exists());
     // Idempotent: a Run whose ending is observed twice must not be a warning
@@ -229,8 +231,7 @@ fn a_sweep_removes_the_evidenced_files_and_leaves_the_rest() {
     let unverified = RunId::mint();
     let uncommitted = RunId::mint();
     for run in [exited, unverified, uncommitted] {
-        InjectedSettings::write(scratch.path(), run, KnownProvider::Claude, "relay")
-            .expect("written");
+        InjectedSettings::write(scratch.path(), run, "{}").expect("written");
     }
     let partial = scratch
         .path()

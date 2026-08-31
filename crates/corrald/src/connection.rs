@@ -803,7 +803,7 @@ async fn execute_session_new(
                 provider,
                 SessionOwnership::CreatedHere,
                 &working_directory,
-                |settings| provider::launch_argv(provider, settings, &args),
+                provider::LaunchIntent::Fresh { args },
             )
             .await
             {
@@ -1007,7 +1007,9 @@ async fn execute_session_resume(
         plan.provider,
         SessionOwnership::Preexisting,
         &plan.working_directory,
-        |settings| provider::resume_argv(plan.provider, &plan.external_id, settings),
+        provider::LaunchIntent::Continue {
+            external_id: plan.external_id.clone(),
+        },
     )
     .await
     {

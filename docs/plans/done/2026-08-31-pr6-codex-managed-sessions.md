@@ -1,7 +1,7 @@
 ---
-status: active
+status: done
 class: C
-writes: [corrald, corral, corral-protocol]
+writes: [corrald, corral, corral-protocol, corral-tui]
 reads: [docs/adr/0009-codex-notify-delivery.md, docs/decisions/2026-08-31-pr6-codex-notify-grill.md, docs/references/2026-08-31-codex-0.145.0-notify-spike.md, docs/adr/0004-hook-delivery.md, docs/adr/0006-provider-hook-integration-policy.md, docs/adr/0007-managed-session-lifetime.md, docs/adr/0008-managed-runtime-binding-identity.md, docs/references/2026-08-22-s2-session-identity-verification.md, docs/references/2026-08-27-pr5-claude-code-hook-matrix.md, ARCHITECTURE.md, ROADMAP.md]
 ---
 
@@ -106,6 +106,11 @@ Argument refusal: every CLI spelling that can displace or disable the
 notify override, sealed by matrix evidence, version-sensitive like
 Claude's list and documented as such.
 
+> Superseded during review. That criterion was one ground; refusal now has
+> two, and the second refuses every subcommand — see "What implementation
+> changed about this plan" below and ADR 0010 D2, which is where the decision
+> lives rather than in this paragraph.
+
 **6. Relay argv-payload mode.** One new flag constant in
 `corral-protocol::hook`; with it the payload is the final positional
 argument and stdin is never read (spike scenario 2: argv-only delivery,
@@ -190,7 +195,10 @@ behavior, re-asserted for Codex where the tests are cheap.
 - Launch composition: override first; TOML escaping round-trips a path
   with spaces and quotes; refusal list refuses each matrix-sealed
   spelling and passes everything else; no injected file is created and
-  the artifact lifecycle is a no-op for Codex.
+  the artifact lifecycle is a no-op for Codex. (Review added the second
+  ground: the refusal also refuses every subcommand, reads the argv with the
+  provider's own option arity and separator, and is covered accordingly —
+  ADR 0010 D2.)
 - Resume: argv composition; contested → no external id in any argv;
   fingerprint and idempotent replay through the existing ladder.
 - Projection: a Codex session shows only `turn_ended`; no input produces
@@ -209,6 +217,56 @@ behavior, re-asserted for Codex where the tests are cheap.
   noun; notify, token, and binding never appear in rendered strings.
 - Plan moves to `done/`; `STORAGE_EPOCH` untouched.
 
+## What implementation changed about this plan
+
+Two things the writing did not foresee, recorded here rather than merged
+quietly.
+
+**The confirmation rule was Claude-shaped, and the second provider exposed
+it.** Design 4 and ADR 0009 D3 both say re-observation of the same thread-id
+records `BindingConfirmed`. The existing code wrote one only for a session
+start — Codex reports none, so a rule kept as written would have left every
+Codex Run confirming nothing, and a literal reading would have written one per
+turn, which the same function already rejects as a fact per prompt that records
+nothing new. The rule is now the union of the two ways a report can observe an
+identity anew: a provider-reported session start, or the first identity report
+of a Run. The Run half is a Corral-owned fact, because Corral spawned the Run.
+
+That is a Claude behavior change, small and disclosed rather than smuggled: a
+continuation whose `SessionStart` delivery is lost now confirms on the next
+identity-bearing event instead of not at all. It repairs an inconsistency —
+`establish` already refuses to hinge on one event arriving, because delivery is
+at-most-once — and it is pinned by its own test
+(`a_run_that_reports_no_start_still_confirms_the_identity_it_re_observes`).
+Nothing about contested, uniqueness, or eligibility moved.
+
+**The review turned two of these into a decision.** ADR 0010 supersedes, in
+part, ADR 0009 D2's uniform oversize guarantee and D5's single-ground refusal
+criterion; its acceptance is
+`docs/decisions/2026-08-31-pr6-review-surface-and-transport.md`. What follows
+is what the code found; what it means is recorded there.
+
+**Review found a native-resume bypass, and it is fixed here.** A caller could
+pass `resume <thread-id>` as a provider argument to `session.new`, and the
+fresh-launch composition passed it straight through: Corral would start
+`codex -c notify=[…] resume <id>` as a *new* Session, walking around the
+per-Session continuation claim and the eligibility ladder that exist so two
+processes cannot drive one conversation. Binding uniqueness cannot repair it —
+it answers when the second process reports a completed turn, which is after
+both have been writing. `refuse_arguments` now reads the command line the way
+the CLI does — options and their values until `--`, nothing after it — and
+refuses every Codex subcommand before it, which also makes the adapter's
+declared interactive-TUI-only surface mechanical instead of only stated.
+
+The same review found that scanning past `--` refused a flag-looking *prompt*.
+Both fall out of one repair. The plan had recorded the subcommand pass-through
+as a follow-up; that was the wrong call and the follow-up is now the fix.
+
+**`ArgumentRefused` moved up to the seam.** It was Claude's type in a
+provider-neutral signature, the same shape as the settings path design 3
+repairs. The refusal reason and its sentence are provider-neutral; what each
+provider refuses is not.
+
 ## Follow-ups
 
 - Feed grill Q8's invariant into the open PR5 handshake question: any
@@ -223,6 +281,24 @@ behavior, re-asserted for Codex where the tests are cheap.
 - Codex TUI terminal notifications / OSC signaling: a candidate evidence
   source for the attention phase to investigate — no more than that
   (grill Q2).
+- Claude has the same native-resume exposure this PR closed for Codex:
+  `corral new claude -- --resume <id>` reaches the provider's own resume
+  without the continuation claim, because PR5's refusal list is deliberately
+  "one reason, because there is one". Left alone here — it is a user-visible
+  behaviour change to a provider this PR was not meant to change — and it
+  should be the next thing after it, not an eventual one.
+- Measure the Linux single-argument ceiling rather than citing `execve(2)`: a
+  container that execs a program with a ~150 KiB argument and reports `E2BIG`.
+  No model turn, no provider account, and it turns this PR's weakest evidence
+  into a measurement.
+- Whether the Linux ceiling should ever gate a launch or be surfaced to a
+  person is left open by ADR 0010 D1: nothing yet shows it happening to
+  anyone, and what a person is told about missing evidence is the attention
+  phase's. Dogfood decides.
+- `codex --remote` is unmeasured and unrefused (matrix limits). A managed
+  launch against a remote app server may learn nothing, which degrades to an
+  identity that never binds. If dogfood meets it, the question is whether a
+  surface that cannot report should be refused rather than degraded.
 
 ## Plan size justification
 

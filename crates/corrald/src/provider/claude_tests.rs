@@ -191,7 +191,7 @@ fn a_caller_supplied_settings_flag_is_refused_rather_than_dropped() {
         vec!["--settings".to_owned(), "{\"hooks\":{}}".to_owned()],
     ] {
         let refusal = refuse_arguments(&spelling).expect_err("refused");
-        assert!(refusal.argument.starts_with("--settings"), "{refusal:?}");
+        assert!(refusal.argument().starts_with("--settings"), "{refusal:?}");
         // What a person reads names what they typed and why it is Corral's.
         let said = refusal.to_string();
         assert!(said.contains("--settings"), "{said}");
@@ -242,7 +242,7 @@ fn safe_mode_is_refused_because_the_injection_cannot_survive_it() {
         ],
     ] {
         let refusal = refuse_arguments(&spelling).expect_err("refused");
-        assert_eq!(refusal.argument, "--safe-mode", "{refusal:?}");
+        assert_eq!(refusal.argument(), "--safe-mode", "{refusal:?}");
         let said = refusal.to_string();
         assert!(said.contains("--safe-mode"), "{said}");
     }

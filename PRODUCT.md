@@ -269,8 +269,9 @@ Supported means the latest stable release of a provider CLI plus the
 previous tested release, carried by a version matrix, fixtures, and
 integration tests that Corral maintains. The matrix begins as a dated
 first-party record — `docs/references/2026-08-27-pr5-claude-code-hook-matrix.md`
-for Claude Code — and becomes a `verify-release`-owned task before the M1
-release: a one-time evidence document is not a permanent release gate. Within that matrix, every live
+for Claude Code, `docs/references/2026-08-31-pr6-codex-notify-matrix.md` for
+Codex — and becomes a `verify-release`-owned task before the M1 release: a
+one-time evidence document is not a permanent release gate. Within that matrix, every live
 session must be discovered regardless of terminal host, including tmux;
 systematic blind spots are release blockers. Outside it, Corral degrades
 honestly rather than guessing.
@@ -281,6 +282,16 @@ Disable Integration, which enters Limited awareness. Existing user and
 third-party hooks are preserved; merge ambiguity fails safe. Uninstall
 removes only Corral-owned changes and promises no byte-for-byte restore
 (`2026-08-21-m1-decision-grill.md` §1).
+
+Codex is the exception to "preserved", and it is named rather than smoothed
+over. Codex has one `notify` value where Claude Code has a hooks layer that
+merges, so a Corral-managed Codex session substitutes Corral's turn-completion
+notifier for the user's own **for that process only** — a managed-launch
+capability substitution, disclosed here, never a change to their configuration
+and never a claim that their notifier still ran. Sessions Corral did not start
+are untouched, no `config.toml`, profile, or project file is written, and the
+trade is Corral's to own: reliable integration evidence bought with that
+process's custom-notifier compatibility (ADR 0009 D4).
 
 ## 11. Boundaries
 

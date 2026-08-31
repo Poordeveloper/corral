@@ -1,10 +1,15 @@
-//! What a managed provider launch leaves behind: its token, and its file.
+//! What a managed provider launch leaves behind: its token, and — for a
+//! provider that takes one — its file.
 //!
 //! Both exist so that hook evidence can find its Session, and both have a
 //! lifetime rule that is not "clean up whatever looks unused". A token
 //! resolves for as long as this daemon remembers the launch it names; a file
 //! is destroyed only on ownership evidence as strong as the destruction
 //! (ADR 0004 D5, D6).
+//!
+//! A file is the Claude-shaped half and is optional: Codex's whole injection
+//! rides its argv, so that launch owns a token and nothing on disk
+//! (ADR 0009 D1). The token is the half every managed launch has.
 //!
 //! > Cleanup requires ownership evidence strong enough for the artifact being
 //! > destroyed. An Unverifiable Run does not provide that evidence.
@@ -16,10 +21,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use corral_core::{CorralSessionId, RunId};
-use corral_protocol::hook::{RELAY_PROVIDER_FLAG, RELAY_SUBCOMMAND, RELAY_TOKEN_FLAG};
+use corral_protocol::hook::{
+    RELAY_PAYLOAD_ARGV_FLAG, RELAY_PROVIDER_FLAG, RELAY_SUBCOMMAND, RELAY_TOKEN_FLAG,
+};
 use tracing::{debug, warn};
 
-use super::KnownProvider;
+use super::{KnownProvider, PayloadDelivery};
 
 /// The binary the injected hook command line names.
 const CLIENT_BINARY: &str = "corral";
@@ -271,21 +278,17 @@ impl InjectedSettings {
 
     /// Write the file one launch will be given, and publish it atomically.
     ///
+    /// What the document says is the provider adapter's; how it reaches disk
+    /// is this module's. The two were one function while one provider existed,
+    /// and the second provider is the one that writes no file at all.
+    ///
     /// A partial write is never a file a provider can read: the content lands
     /// in a `.partial` beside it and is renamed into place, so a launch either
     /// gets a whole file or none. 0600 from creation, never chmod'd afterwards
     /// — a window where the file is readable is a window, however short.
-    pub fn write(
-        launch_dir: &Path,
-        run: RunId,
-        provider: KnownProvider,
-        relay_command: &str,
-    ) -> Result<Self, InjectionFailed> {
+    pub fn write(launch_dir: &Path, run: RunId, document: &str) -> Result<Self, InjectionFailed> {
         let path = Self::path_for(launch_dir, run);
         let partial = launch_dir.join(format!("{FILE_PREFIX}{run}{FILE_SUFFIX}{PARTIAL_SUFFIX}"));
-        let document = match provider {
-            KnownProvider::Claude => super::claude::settings_document(relay_command),
-        };
 
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -313,17 +316,30 @@ impl InjectedSettings {
     /// Remove a file whose Run's exit is established.
     ///
     /// Best-effort: a file that will not go away costs a stale artifact, and
-    /// nothing about a Run's ending depends on it.
+    /// nothing about a Run's ending depends on it. A Run that never had one —
+    /// a raw command, or a provider whose injection rides its argv — is the
+    /// absent case, and absent is not a fault.
     ///
     /// **Blocking.** Its one synchronous caller is the run lifecycle recorder,
     /// which is a thread of its own. Anything on the reactor goes through
     /// `removed_without_waiting`.
     pub fn remove_for(launch_dir: &Path, run: RunId) {
-        let path = Self::path_for(launch_dir, run);
-        match std::fs::remove_file(&path) {
-            Ok(()) => debug!(%run, "the injected settings of a finished run were removed"),
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => warn!(%run, %source, "an injected settings file could not be removed"),
+        removed(&Self::path_for(launch_dir, run));
+    }
+}
+
+/// Remove one Corral-owned launch file, or say why it stayed.
+///
+/// Absent is silent: a Run that never had a file — a raw command, or a
+/// provider whose injection rides its argv — reaches here through the same
+/// lifecycle as one that did, and nothing about a Run's ending depends on a
+/// file being there.
+fn removed(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => debug!(path = %path.display(), "an injected settings file was removed"),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            warn!(path = %path.display(), %source, "an injected settings file could not be removed");
         }
     }
 }
@@ -343,40 +359,89 @@ impl InjectedSettings {
 /// that reach here have just decided a launch never happened and retire its
 /// token in the same breath; an `await` between those two would let hook
 /// ingestion resolve a token naming a Run the daemon had already given up on.
-pub fn removed_without_waiting(launch_dir: &Path, run: RunId) {
-    let launch_dir = launch_dir.to_path_buf();
-    std::thread::spawn(move || InjectedSettings::remove_for(&launch_dir, run));
+pub fn removed_without_waiting(settings: &InjectedSettings) {
+    let path = settings.path().to_path_buf();
+    std::thread::spawn(move || removed(&path));
 }
 
-/// The injected hook command line, quoted for the shell a provider runs it in.
+/// How one launch's injected configuration invokes the Corral relay.
+///
+/// Words rather than a command line, because the two providers need different
+/// renderings of the same invocation: Claude's settings file names a command a
+/// shell runs, and Codex's `notify` is a TOML array of argv words with no
+/// shell anywhere in it. Composing the words once and rendering them per
+/// provider is what stops the two from drifting into different relays.
 ///
 /// The relay is the installed `corral` binary, resolved as this daemon's own
 /// sibling. A shell-local `PATH` must not decide which relay an account's
-/// agents talk to, and skew is expected anyway: this file is written at launch
-/// and invokes whatever is installed by the time an event fires
+/// agents talk to, and skew is expected anyway: an injection is composed at
+/// launch and invokes whatever is installed by the time an event fires
 /// (ADR 0004 D1, D3).
-pub fn relay_command(
-    provider: KnownProvider,
-    token: LaunchToken,
-) -> Result<String, InjectionFailed> {
-    let relay = sibling_relay().map_err(InjectionFailed::RelayUnresolvable)?;
-    // Refused rather than rewritten. A lossy conversion substitutes U+FFFD for
-    // every byte a shell would have needed verbatim, composing a command line
-    // that names a path nothing can execute — the session that looks managed
-    // and can never report, which is exactly what `usable_relay` refuses a
-    // launch over one line above.
-    let relay = relay.to_str().ok_or_else(|| {
-        InjectionFailed::RelayUnresolvable(format!(
-            "{} is not a path this hook configuration can name",
-            relay.display()
-        ))
-    })?;
-    Ok(format!(
-        "{} {RELAY_SUBCOMMAND} {RELAY_PROVIDER_FLAG} {} {RELAY_TOKEN_FLAG} {}",
-        shell_word(relay),
-        provider.as_str(),
-        token.to_wire(),
-    ))
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayInvocation {
+    program: String,
+    arguments: Vec<String>,
+}
+
+impl RelayInvocation {
+    /// Compose the invocation one launch's injection will carry.
+    pub fn compose(provider: KnownProvider, token: LaunchToken) -> Result<Self, InjectionFailed> {
+        let relay = sibling_relay().map_err(InjectionFailed::RelayUnresolvable)?;
+        // Refused rather than rewritten. A lossy conversion substitutes U+FFFD
+        // for every byte an injection would have needed verbatim, composing an
+        // invocation that names a path nothing can execute — the session that
+        // looks managed and can never report, which is exactly what
+        // `usable_relay` refuses a launch over one line above.
+        let program = relay
+            .to_str()
+            .ok_or_else(|| {
+                InjectionFailed::RelayUnresolvable(format!(
+                    "{} is not a path this hook configuration can name",
+                    relay.display()
+                ))
+            })?
+            .to_owned();
+        let mut arguments = vec![
+            RELAY_SUBCOMMAND.to_owned(),
+            RELAY_PROVIDER_FLAG.to_owned(),
+            provider.as_str().to_owned(),
+            RELAY_TOKEN_FLAG.to_owned(),
+            token.to_wire(),
+        ];
+        // Told, not discovered. A provider that appends its payload to the
+        // invocation writes nothing to standard input, and a relay left to
+        // find that out would spend its interference budget on a pipe nobody
+        // opens (ADR 0009 D2).
+        if provider.payload_delivery() == PayloadDelivery::FinalArgument {
+            arguments.push(RELAY_PAYLOAD_ARGV_FLAG.to_owned());
+        }
+        Ok(Self { program, arguments })
+    }
+
+    /// The invocation as argv words, program first.
+    pub fn words(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.program.as_str()).chain(self.arguments.iter().map(String::as_str))
+    }
+
+    /// The invocation as one command line, quoted for the shell a provider
+    /// runs it in.
+    pub fn shell_command(&self) -> String {
+        self.words().map(shell_word).collect::<Vec<_>>().join(" ")
+    }
+
+    /// One invocation composed from words rather than from this daemon's own
+    /// location.
+    ///
+    /// `compose` resolves the running daemon's sibling, which a unit test
+    /// cannot put a path with a quote in it. What the adapters do with the
+    /// words is the thing under test.
+    #[cfg(test)]
+    pub(crate) fn of_words(program: &str, arguments: &[&str]) -> Self {
+        Self {
+            program: program.to_owned(),
+            arguments: arguments.iter().map(|word| (*word).to_owned()).collect(),
+        }
+    }
 }
 
 /// Quote one word so a shell passes it through unchanged.

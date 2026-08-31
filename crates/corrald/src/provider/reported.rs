@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use corral_core::{CorralSessionId, ExternalId};
+use corral_core::{CorralSessionId, ExternalId, RunId};
 
 use super::{AgentFact, KnownProvider};
 
@@ -40,6 +40,16 @@ pub struct ReportedSession {
     /// Superseded rather than accumulated: a newer fact retires the older one,
     /// so an `awaiting_input` is not still on screen after a turn started.
     pub latest: Option<AgentFact>,
+    /// The Run this Session's identity was last observed in.
+    ///
+    /// What makes a re-observation worth recording durably. Codex reports no
+    /// session start, so "a fresh Run of the same conversation" cannot be read
+    /// off an event name for every provider — but it can be read off the Run,
+    /// which is the fact the confirmation was always about (ADR 0004 D7,
+    /// ADR 0009 D3). Held here so the check costs no store hop: without it,
+    /// every turn of every launch would take the blocking pool and the store
+    /// lock to be told the identity has not changed.
+    observed_in: Option<RunId>,
     /// How far this Session's identity question is closed.
     ///
     /// Held here so the ingestion step can answer "this changes nothing"
@@ -77,6 +87,7 @@ impl ReportedSession {
         Self {
             provider,
             external_id: None,
+            observed_in: None,
             closure: IdentityClosure::Open,
             latest: None,
             arrived: None,
@@ -114,17 +125,42 @@ impl ReportedSessions {
             .or_insert_with(|| ReportedSession::new(provider));
     }
 
-    /// Publish the provider identity Corral now stands behind.
+    /// Publish the provider identity Corral now stands behind, and the Run it
+    /// was observed in.
+    ///
+    /// One call rather than two, because the two are one event: an identity
+    /// Corral stands behind was observed somewhere, and a Run that had
+    /// observed it without standing behind it would be a claim with no
+    /// evidence and evidence with no claim.
     pub fn identified(
         &mut self,
         session: CorralSessionId,
         provider: KnownProvider,
+        run: RunId,
         external_id: ExternalId,
     ) {
-        self.sessions
+        let held = self
+            .sessions
             .entry(session)
-            .or_insert_with(|| ReportedSession::new(provider))
-            .external_id = Some(external_id);
+            .or_insert_with(|| ReportedSession::new(provider));
+        held.external_id = Some(external_id);
+        held.observed_in = Some(run);
+    }
+
+    /// Whether this Run has already observed exactly this identity.
+    ///
+    /// `false` for a Session this daemon holds nothing about, which is the
+    /// honest answer: live state is lost on restart, and the store is the
+    /// authority every path falls back to.
+    pub fn identity_observed_in(
+        &self,
+        session: CorralSessionId,
+        run: RunId,
+        reported: &ExternalId,
+    ) -> bool {
+        self.sessions.get(&session).is_some_and(|held| {
+            held.observed_in == Some(run) && held.external_id.as_ref() == Some(reported)
+        })
     }
 
     /// Record that this Session's identity claim was contested, and withdraw
@@ -138,6 +174,7 @@ impl ReportedSessions {
     pub fn contested(&mut self, session: CorralSessionId) {
         if let Some(reported) = self.sessions.get_mut(&session) {
             reported.external_id = None;
+            reported.observed_in = None;
             reported.closure = IdentityClosure::Contested;
         }
     }

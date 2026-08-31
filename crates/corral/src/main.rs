@@ -102,7 +102,7 @@ fn main() -> ExitCode {
     // would delay the user's agent by however long a cold start takes
     // (ADR 0004 D1).
     if let Some(relay) = relay::invocation(std::env::args_os()) {
-        return relay::deliver(&relay.token, &relay.provider, started);
+        return relay::deliver(&relay, started);
     }
 
     let cli = Cli::parse();

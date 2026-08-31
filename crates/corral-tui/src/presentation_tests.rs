@@ -172,6 +172,31 @@ fn a_reported_fact_reads_as_a_report_with_its_age() {
     );
 }
 
+/// A second provider reaches this surface as data, not as code. The projection
+/// names whichever agent the daemon said reported, and the sentence a Codex
+/// session gets is the one the vocabulary already had — a turn ended, past
+/// tense, with its age.
+#[test]
+fn a_second_providers_fact_renders_through_the_same_projection() {
+    let item = SessionListItem {
+        provider: Some(corral_protocol::method::ProviderFacts {
+            name: "codex".to_owned(),
+            external_id: Some("01a0576f-0ecc-7b21-9719-f38f9e4ef933".to_owned()),
+        }),
+        ..reported(AgentEventKind::TurnEnded, at(1_000))
+    };
+
+    let presented = present_at(&item, at(1_120));
+
+    assert_eq!(
+        presented.agent.as_deref(),
+        Some("Codex reported finishing a turn · 2m ago"),
+    );
+    // The one fact Codex reports says nothing about a main state, exactly as
+    // Claude's does not.
+    assert_eq!(presented.state, MainState::Unknown);
+}
+
 /// The regression the whole phase turns on. No provider report — including the
 /// one that most looks like it — produces Working, Needs You, or Ready, and
 /// none of them touches the main state or the runtime fact beside it.

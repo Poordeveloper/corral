@@ -158,6 +158,14 @@ pub fn error_code(frame: &Value) -> Option<&str> {
     frame["outcome"]["error"]["code"].as_str()
 }
 
+/// The sentence a refusal put in front of a person.
+pub fn refused_with(frame: &Value) -> String {
+    frame["outcome"]["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
+}
+
 /// What a stand-in daemon does with each connection it accepts.
 pub enum FakeBehaviour {
     /// Read one line, write these bytes, close.

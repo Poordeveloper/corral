@@ -703,8 +703,8 @@ fn draw(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> 
             if frame.remaining() > 1 {
                 frame.line(
                     Emphasis::Secondary,
-                    "An agent — claude — or -- and a command. Quoting is not interpreted. \
-                     esc cancels.",
+                    "An agent — claude or codex — or -- and a command. Quoting is not \
+                     interpreted. esc cancels.",
                 );
             }
             // "new session", not "run": Run is an internal noun, and the one

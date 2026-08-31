@@ -2,9 +2,8 @@
 //!
 //! Four named boundaries, which are the four things a provider integration
 //! turns out to be: composing a launch, composing a resume, reading hook
-//! ingress, and validating what a payload claims. A trait extracted from two
-//! implementations will find them here rather than have to invent them
-//! (grill Q5).
+//! ingress, and validating what a payload claims. The second implementation
+//! (`super::codex`) found the same four (grill Q5).
 //!
 //! Behaviour verified first-party against 2.1.247; the evidence and its limits
 //! are `docs/references/2026-08-27-pr5-claude-code-hook-matrix.md`. A version
@@ -14,11 +13,15 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use corral_core::ExternalId;
+use corral_core::{ExternalId, RunId};
 use serde_json::{Value, json};
 use tracing::warn;
 
-use super::{AgentFactKind, ProviderReport, SessionOrigin, Uninterpretable};
+use super::launch::{InjectedSettings, InjectionFailed, RelayInvocation};
+use super::{
+    AgentFactKind, ArgumentRefused, LaunchIntent, ProviderLaunch, ProviderReport, SessionOrigin,
+    Uninterpretable,
+};
 
 /// How Corral names this provider, on the wire and in bindings.
 ///
@@ -80,7 +83,7 @@ const INJECTED: [(&str, AgentFactKind); 5] = [
 /// The one thing position cannot answer is a caller repeating the flag, since
 /// the last `--settings` is the one loaded (scenario 8) — which is what
 /// `refuse_arguments` is for.
-pub fn launch_argv(settings: &Path, args: &[String]) -> Vec<OsString> {
+fn launch_argv(settings: &Path, args: &[String]) -> Vec<OsString> {
     let mut argv = vec![
         OsString::from(SETTINGS_FLAG),
         OsString::from(settings.as_os_str()),
@@ -89,13 +92,28 @@ pub fn launch_argv(settings: &Path, args: &[String]) -> Vec<OsString> {
     argv
 }
 
-/// Why a caller's provider arguments cannot be passed through.
+/// Compose this provider's launch: its Corral-owned settings file, then the
+/// argv that names it.
 ///
-/// One reason, because there is one: an argument that would defeat the hook
-/// injection. Everything else a person may want to pass is theirs.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ArgumentRefused {
-    pub argument: String,
+/// The file is written before the argv is built and not afterwards, because
+/// the argv's whole content is where the file went — and a launch given a path
+/// nothing wrote is the session that looks managed and can never report.
+pub fn compose_launch(
+    intent: &LaunchIntent,
+    relay: &RelayInvocation,
+    launch_dir: &Path,
+    run: RunId,
+) -> Result<ProviderLaunch, InjectionFailed> {
+    let settings =
+        InjectedSettings::write(launch_dir, run, &settings_document(&relay.shell_command()))?;
+    let argv = match intent {
+        LaunchIntent::Fresh { args } => launch_argv(settings.path(), args),
+        LaunchIntent::Continue { external_id } => resume_argv(external_id, settings.path()),
+    };
+    Ok(ProviderLaunch {
+        argv,
+        artifact: Some(settings),
+    })
 }
 
 /// Refuse the provider arguments Corral cannot honour.
@@ -106,10 +124,6 @@ pub struct ArgumentRefused {
 /// with hooks off, so the injected file is loaded and ignored. Everything else
 /// a person may want to pass to their own agent is theirs, including the
 /// separator.
-///
-/// Refused rather than dropped. Silently discarding an argument a person asked
-/// for would be Corral deciding how their agent runs, and silently honouring it
-/// would be the unwatched session above.
 ///
 /// Version-sensitive by nature: this is a claim about one provider's command
 /// line, held against the version the matrix records. A flag a later release
@@ -122,9 +136,7 @@ pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
         *argument == SETTINGS_FLAG || argument.starts_with(&equals) || *argument == SAFE_MODE_FLAG
     };
     match args.iter().find(competing) {
-        Some(argument) => Err(ArgumentRefused {
-            argument: argument.clone(),
-        }),
+        Some(argument) => Err(ArgumentRefused::CompetesWithInjection(argument.clone())),
         None => Ok(()),
     }
 }
@@ -144,7 +156,7 @@ pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
 /// placed after it, either swallow Corral's flag as prompt text (matrix
 /// scenario 10) or take it as its own value. Nothing Corral needs may sit
 /// where a provider payload can reach it.
-pub fn resume_argv(external_id: &ExternalId, settings: &Path) -> Vec<OsString> {
+fn resume_argv(external_id: &ExternalId, settings: &Path) -> Vec<OsString> {
     vec![
         OsString::from(SETTINGS_FLAG),
         OsString::from(settings.as_os_str()),
@@ -162,7 +174,7 @@ pub fn resume_argv(external_id: &ExternalId, settings: &Path) -> Vec<OsString> {
 /// Every event runs the same command. The relay never parses the payload and
 /// never learns which event it carried, so one command line is the whole
 /// integration (ADR 0004 D1).
-pub fn settings_document(relay_command: &str) -> String {
+fn settings_document(relay_command: &str) -> String {
     let mut hooks = serde_json::Map::new();
     for (event, _) in INJECTED {
         hooks.insert(
@@ -255,18 +267,6 @@ fn session_origin(source: &str) -> SessionOrigin {
         _ => SessionOrigin::Unrecognized,
     }
 }
-
-impl std::fmt::Display for ArgumentRefused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} is Corral's to pass: it is how Corral watches the session it starts for you",
-            self.argument,
-        )
-    }
-}
-
-impl std::error::Error for ArgumentRefused {}
 
 #[cfg(test)]
 #[path = "claude_tests.rs"]

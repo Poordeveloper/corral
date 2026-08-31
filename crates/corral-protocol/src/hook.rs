@@ -37,11 +37,44 @@ pub const RELAY_SUBCOMMAND: &str = "hook-relay";
 pub const RELAY_PROVIDER_FLAG: &str = "--provider";
 pub const RELAY_TOKEN_FLAG: &str = "--token";
 
+/// How a provider that delivers its payload as a process argument invokes the
+/// relay.
+///
+/// Codex appends the notification JSON as one final argument and writes
+/// nothing to stdin (ADR 0009 D2), so the relay is told where to read rather
+/// than left to guess: a reader that fell back to stdin on an empty argument
+/// would park on a pipe nobody writes until its deadline, spending the
+/// interference budget of every event on discovering the same thing.
+///
+/// Skew law applies unchanged and in both directions. An older relay meeting
+/// this flag ignores it, reads an stdin that ends at once, and delivers
+/// nothing; the daemon drops that delivery with diagnostics. Fail-open is
+/// never conditional on being understood.
+///
+/// Argv delivery carries a ceiling this channel does not set and cannot see;
+/// `MAX_HOOK_PAYLOAD_BYTES` records it.
+pub const RELAY_PAYLOAD_ARGV_FLAG: &str = "--payload-argv";
+
 /// The largest provider payload this channel carries.
 ///
 /// A payload past it is dropped **whole** and marked, never truncated: a
 /// truncated fact would be a fabricated one, and a systematic oversize must be
 /// visible rather than silently missing (ADR 0004 D3).
+///
+/// It bounds what this channel carries, which is not the same as what a
+/// provider can hand over. A provider that delivers its payload as a process
+/// argument is bounded first by the operating system: Linux caps each single
+/// argv string at `MAX_ARG_STRLEN`, 32 pages — about 128 KiB on a 4 KiB-page
+/// machine — and `execve` fails with `E2BIG` before the relay process exists.
+/// Past that ceiling there is no delivery *and* no marker, because the marker
+/// is written by a relay that never ran. macOS has no such per-string cap and
+/// reaches the 1 MiB total instead, which is why the cap is fully exercisable
+/// there and not on every supported platform
+/// (`docs/references/2026-08-31-pr6-codex-notify-matrix.md`).
+///
+/// Nothing here can repair that: Corral cannot mark what never reaches it. It
+/// is recorded so that the cap is not read as a guarantee it cannot make for
+/// an argv-delivering provider.
 pub const MAX_HOOK_PAYLOAD_BYTES: usize = 256 * 1024;
 
 /// Why a delivery carries no payload. The only reason this version defines.
