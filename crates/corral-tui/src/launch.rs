@@ -68,7 +68,7 @@ pub async fn start_session(
     connection: &mut Connection,
     requested: Requested,
 ) -> Result<SessionNewResult, RequestError> {
-    let geometry = Geometry::of(&std::io::stdin());
+    let geometry = Geometry::of(std::io::stdin());
     let cwd = std::env::current_dir()
         .ok()
         .map(|path| path.to_string_lossy().into_owned());

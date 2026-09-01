@@ -88,10 +88,15 @@ pub struct Frame {
 }
 
 impl FullScreen {
+    /// Take the terminal this surface draws on.
+    ///
+    /// Standard output on both counts, because that is where the frames go. A
+    /// size read off standard input would be the size of whatever is feeding
+    /// the keyboard, which is the same terminal only when it is.
     pub fn take() -> std::io::Result<Self> {
         let mut screen = Self {
             out: std::io::stdout(),
-            last: Geometry::of(&std::io::stdin()),
+            last: Geometry::of(std::io::stdout()),
         };
         screen.claim()?;
         Ok(screen)
@@ -123,7 +128,7 @@ impl FullScreen {
     /// window while the list is up gets a list that fits it, without this
     /// surface needing to hear about the resize.
     pub fn geometry(&mut self) -> Option<Geometry> {
-        if let Some(now) = Geometry::of(&std::io::stdin()) {
+        if let Some(now) = Geometry::of(std::io::stdout()) {
             self.last = Some(now);
         }
         self.last

@@ -21,6 +21,15 @@ pub enum Key {
     Interrupt,
     /// A character the person typed.
     Typed(char),
+    /// A character that arrived inside a bracketed paste.
+    ///
+    /// Separate from `Typed` because a paste is data, not intent: this surface
+    /// maps `q`, `n` and Enter to actions, and clipboard contents that happen
+    /// to contain them must not perform them. A newline arrives as this and
+    /// never as `Enter`, so a pasted command waits for the person to confirm
+    /// it. What a surface does with pasted text is the surface's to decide;
+    /// what it may not do is treat it as a keystroke.
+    Pasted(char),
     /// Something this build has no meaning for. Kept as a value rather than
     /// dropped, so an escape sequence can be consumed whole instead of its
     /// insides arriving as typed characters.
@@ -36,7 +45,32 @@ pub enum Key {
 #[derive(Default)]
 pub struct Keyboard {
     held: Vec<u8>,
+    /// Whether the bytes now arriving are inside a bracketed paste, and how
+    /// many of them there have been.
+    ///
+    /// A count rather than a flag because the end marker is not guaranteed:
+    /// this surface never turns the mode on, so it is only ever in it because
+    /// a session the person detached from left it on, and a session killed
+    /// mid-paste can leave a start with no end. Without a bound that would be
+    /// a keyboard that stops working — every later key data, `q` included.
+    pasting: Option<usize>,
 }
+
+/// What a terminal writes around a paste when bracketed-paste mode is on.
+///
+/// Recognised here rather than in `decode_one`, which answers about bytes
+/// alone: whether a character is pasted is a fact about the bytes *before* it,
+/// and only something that survives a read boundary can know it.
+const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// The most a single paste may carry before this decoder stops believing in
+/// its end marker.
+///
+/// Far past any command a person pastes into a one-line prompt, and far short
+/// of a person being stuck. Reaching it ends the paste: the alternative is a
+/// surface that can never be left.
+const LONGEST_PASTE: usize = 64 * 1024;
 
 impl Keyboard {
     /// Add what one read produced to whatever was left over from the last.
@@ -46,12 +80,43 @@ impl Keyboard {
 
     /// The next key, or `None` while what is held is not a key yet.
     pub fn next(&mut self) -> Option<Key> {
-        if self.undecided() {
-            return None;
+        loop {
+            if self.undecided() {
+                return None;
+            }
+            if self.held.starts_with(PASTE_START) {
+                self.held.drain(..PASTE_START.len());
+                self.pasting = Some(0);
+                continue;
+            }
+            if self.held.starts_with(PASTE_END) {
+                self.held.drain(..PASTE_END.len());
+                self.pasting = None;
+                continue;
+            }
+            let (key, consumed) = decode_one(&self.held)?;
+            self.held.drain(..consumed);
+            return Some(match self.pasting {
+                None => key,
+                Some(so_far) => self.pasted(key, so_far + consumed),
+            });
         }
-        let (key, consumed) = decode_one(&self.held)?;
-        self.held.drain(..consumed);
-        Some(key)
+    }
+
+    /// One key that arrived inside a paste, as the surface may see it.
+    ///
+    /// Text stays text and a newline becomes one; everything else — a cursor
+    /// key, an Escape, a stray control byte in the payload — is delivered as
+    /// `Unknown`, which every surface already treats as nothing happening. A
+    /// paste may not reach an action by any route, so this says what is data
+    /// rather than listing what to suppress.
+    fn pasted(&mut self, key: Key, so_far: usize) -> Key {
+        self.pasting = (so_far < LONGEST_PASTE).then_some(so_far);
+        match key {
+            Key::Typed(character) => Key::Pasted(character),
+            Key::Enter => Key::Pasted('\n'),
+            _ => Key::Unknown,
+        }
     }
 
     /// Whether what is held is waiting on bytes that may never come.
@@ -99,6 +164,9 @@ impl Keyboard {
     /// after the key that opened it was typed for what they opened, and a
     /// surface that has stopped reading has no claim on it.
     pub fn unread(&mut self) -> Vec<u8> {
+        // The paste goes with them. What follows was typed for whatever this
+        // terminal was handed to, and that program does its own decoding.
+        self.pasting = None;
         std::mem::take(&mut self.held)
     }
 }
