@@ -311,13 +311,14 @@ pub fn interpret(
 
 /// Why a caller's provider arguments cannot be passed through.
 ///
-/// Two reasons, and they are different failures. One argument would defeat the
-/// injection Corral is about to make, leaving a launch Corral believes it is
-/// watching and is not. Another would start something other than the session
-/// Corral manages — a different program under a Corral PTY, or a second
-/// process on a conversation Corral may already be running, which is what
-/// `managed_launch`'s continuation claim exists to prevent and which no
-/// after-the-fact binding check can undo.
+/// Three reasons, and they are different failures. One argument would defeat
+/// the injection Corral is about to make, leaving a launch Corral believes it
+/// is watching and is not. One would start something other than the session
+/// Corral manages — a different program under a Corral PTY. And one would join
+/// a conversation the provider already has, which is `session.resume`'s to
+/// authorize: it holds the per-Session continuation claim and walks the
+/// eligibility ladder, and no after-the-fact binding check can undo two
+/// processes driving one conversation (ADR 0011 D1).
 ///
 /// What counts as either is each provider's own answer against its own command
 /// line. Everything else a person may want to pass to their own agent is
@@ -332,6 +333,8 @@ pub enum ArgumentRefused {
     CompetesWithInjection(String),
     /// It starts something other than the session Corral manages.
     OutsideTheManagedSession(String),
+    /// It would join a conversation this agent already has.
+    AttachesToAnExistingConversation(String),
 }
 
 impl ArgumentRefused {
@@ -339,9 +342,9 @@ impl ArgumentRefused {
     /// line.
     pub fn argument(&self) -> &str {
         match self {
-            Self::CompetesWithInjection(argument) | Self::OutsideTheManagedSession(argument) => {
-                argument
-            }
+            Self::CompetesWithInjection(argument)
+            | Self::OutsideTheManagedSession(argument)
+            | Self::AttachesToAnExistingConversation(argument) => argument,
         }
     }
 }
@@ -359,6 +362,11 @@ impl std::fmt::Display for ArgumentRefused {
                 "{argument} starts something other than the session Corral manages: Corral runs \
                  the agent's own interactive session, and continues one it already knows rather \
                  than starting a second agent on it",
+            ),
+            Self::AttachesToAnExistingConversation(argument) => write!(
+                f,
+                "{argument} would join a conversation this agent already has. Corral continues a \
+                 session it already knows, rather than starting a second agent on the same one",
             ),
         }
     }

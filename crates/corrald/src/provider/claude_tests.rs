@@ -293,3 +293,114 @@ fn a_provider_id_that_reads_like_a_flag_cannot_reach_the_injection() {
         assert_eq!(argv.last().map(String::as_str), Some(hostile));
     }
 }
+
+/// The bypass this task closes: a *fresh* managed launch carrying the
+/// provider's own attach argument reaches a conversation that already exists,
+/// with neither the per-Session continuation claim nor the eligibility ladder
+/// `session.resume` holds (ADR 0011 D1).
+///
+/// Every spelling this CLI accepts, measured on 2.1.251 — a refusal that knows
+/// one spelling is a refusal a person walks around by accident.
+#[test]
+fn an_argument_that_joins_an_existing_conversation_is_refused() {
+    for spelling in [
+        vec!["--resume", "d2dfcafd-9a73-4162-aa70-dddf99aa6e75"],
+        vec!["--resume=d2dfcafd-9a73-4162-aa70-dddf99aa6e75"],
+        vec!["-r", "d2dfcafd-9a73-4162-aa70-dddf99aa6e75"],
+        // A short flag takes its value attached, and commander does not strip
+        // the `=` — both still resume.
+        vec!["-rd2dfcafd-9a73-4162-aa70-dddf99aa6e75"],
+        vec!["-r=d2dfcafd-9a73-4162-aa70-dddf99aa6e75"],
+        // No value at all opens the picker, which is still an existing
+        // conversation.
+        vec!["--resume"],
+        vec!["-r"],
+        vec!["--continue"],
+        vec!["-c"],
+        // Short flags cluster, so `-c` hides inside one.
+        vec!["-pc"],
+        vec!["-cp"],
+        vec!["--from-pr", "4210"],
+        vec!["--from-pr=4210"],
+        vec!["--cloud", "d2dfcafd-9a73-4162-aa70-dddf99aa6e75"],
+        // Options may precede it, and the refusal is about the argument
+        // wherever it sits.
+        vec!["--model", "opus", "--continue"],
+    ] {
+        let args: Vec<String> = spelling.iter().map(|word| (*word).to_owned()).collect();
+        let refusal = refuse_arguments(&args).expect_err(&format!("refused: {spelling:?}"));
+        assert!(
+            matches!(
+                refusal,
+                ArgumentRefused::AttachesToAnExistingConversation(_)
+            ),
+            "{spelling:?} refused for the wrong reason: {refusal:?}",
+        );
+        assert!(
+            refusal.to_string().contains(refusal.argument()),
+            "{refusal:?}",
+        );
+    }
+}
+
+/// `attach <id>` opens a background session in this terminal, which is the
+/// same harm wearing a subcommand. Commander dispatches a subcommand only as
+/// the first argument — measured: `claude attach foo` answers "No job matching
+/// 'foo'", while `claude -p attach foo` sends the words to the model — so
+/// anywhere else the word is text.
+#[test]
+fn the_attach_subcommand_is_refused_where_this_cli_would_read_one() {
+    let attaching = vec!["attach".to_owned(), "3f2a".to_owned()];
+    assert!(matches!(
+        refuse_arguments(&attaching).expect_err("refused"),
+        ArgumentRefused::AttachesToAnExistingConversation(_)
+    ));
+
+    // Not first, so not a subcommand: this CLI would read it as prompt text.
+    for theirs in [
+        vec!["--model", "opus", "attach"],
+        vec!["write the attach docs"],
+        vec!["attach the file"],
+    ] {
+        let args: Vec<String> = theirs.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_ok(), "{theirs:?}");
+    }
+}
+
+/// A value-taking letter eats the rest of its cluster, so a `c` or an `r`
+/// after one is that flag's value and not a request to continue. Measured:
+/// `-pc` continues, while `-nc`, `-dc`, and `-wc` do not.
+#[test]
+fn a_cluster_letter_after_a_value_taking_one_is_a_value() {
+    for allowed in [
+        vec!["-nc"],
+        vec!["-dc"],
+        vec!["-wc"],
+        vec!["-nr"],
+        vec!["-dr"],
+        vec!["-wr"],
+        // Alone it attaches nothing: the help says it works only with
+        // `--resume` or `--continue`, and both of those are refused.
+        vec!["--fork-session"],
+    ] {
+        let args: Vec<String> = allowed.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_ok(), "{allowed:?}");
+    }
+}
+
+/// Everything after this CLI's own `--` is prompt text, including a word that
+/// looks like a flag Corral refuses. Measured: `claude -- --resume <id>`
+/// starts fresh and says the flag landed in the chat instead of the shell.
+#[test]
+fn nothing_after_the_separator_is_read_as_an_argument() {
+    for theirs in [
+        vec!["--", "--resume", "d2dfcafd-9a73-4162-aa70-dddf99aa6e75"],
+        vec!["--", "-c"],
+        vec!["--", "--settings", "/tmp/theirs.json"],
+        vec!["--", "attach"],
+        vec!["--model", "opus", "--", "--continue"],
+    ] {
+        let args: Vec<String> = theirs.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_ok(), "{theirs:?}");
+    }
+}

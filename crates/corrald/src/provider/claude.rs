@@ -55,6 +55,54 @@ const SAFE_MODE_FLAG: &str = "--safe-mode";
 /// The flag that continues a named conversation.
 const RESUME_FLAG: &str = "--resume";
 
+/// The word after which this CLI stops reading options.
+///
+/// Measured on 2.1.251: `claude -- --resume <id>` starts a fresh session and
+/// says so — "`--resume` is a CLI flag, not a prompt … this session started
+/// fresh". So a flag-looking word after it is prompt text, and refusing one
+/// would be Corral refusing somebody's prompt (ADR 0010 D2).
+const SEPARATOR: &str = "--";
+
+/// The arguments that join a conversation this agent already has.
+///
+/// Each is `session.resume`'s to authorize, not a fresh launch's: that path
+/// holds the per-Session continuation claim and walks the eligibility ladder,
+/// and binding uniqueness cannot stand in for either — it answers when the
+/// second process first reports an identity, which is after both have been
+/// writing (ADR 0011 D1).
+///
+/// `--cloud` is here although the same flag can also *create* a cloud session:
+/// which one it does is decided by the shape of a value Corral has no business
+/// interpreting, so it is refused in both meanings. The cost is a person who
+/// meant to create one being told to; the alternative is two agents on one
+/// conversation, silently (ADR 0011 D2).
+///
+/// Version-sensitive by nature, held against what the matrix records
+/// (`docs/references/2026-09-01-claude-2.1.251-attachment-matrix.md`).
+const ATTACHING_FLAGS: [&str; 4] = ["--resume", "--continue", "--from-pr", "--cloud"];
+
+/// The short flags that join one, as single letters.
+///
+/// `-r` is `--resume` and `-c` is `--continue`. They are letters rather than
+/// words because this CLI clusters its short flags: `-pc` continues, measured.
+const ATTACHING_SHORTS: [char; 2] = ['r', 'c'];
+
+/// The short flags that take a value, which is the rest of their cluster.
+///
+/// Measured: `-nc`, `-dc`, and `-wc` do **not** continue, because `n`, `d`, and
+/// `w` take the remainder as their value — a name, a debug filter, a worktree.
+/// So a letter after one of these is a value, not a request. `r` is here too
+/// and refused before it is reached; a cluster stops at any of them.
+const VALUE_SHORTS: [char; 4] = ['n', 'd', 'w', 'r'];
+
+/// The subcommand that opens a background session in this terminal.
+///
+/// The same harm wearing a subcommand. Read only as the **first** argument,
+/// which is the only place this CLI dispatches one: measured, `claude attach
+/// foo` answers "No job matching 'foo'" while `claude -p attach foo` sends the
+/// words to the model.
+const ATTACH_SUBCOMMAND: &str = "attach";
+
 /// The hook events Corral injects, and what each one means in Corral's
 /// vocabulary.
 ///
@@ -118,12 +166,21 @@ pub fn compose_launch(
 
 /// Refuse the provider arguments Corral cannot honour.
 ///
-/// Two, and the same reason twice: each one leaves a launch Corral believes it
-/// is watching and is not. A caller repeating `--settings` displaces Corral's
-/// own, since the last one is the one loaded; `--safe-mode` starts the agent
-/// with hooks off, so the injected file is loaded and ignored. Everything else
-/// a person may want to pass to their own agent is theirs, including the
-/// separator.
+/// Two grounds of the three, and one of them twice. A caller repeating
+/// `--settings` displaces Corral's own, since the last one is the one loaded;
+/// `--safe-mode` starts the agent with hooks off, so the injected file is
+/// loaded and ignored — each leaves a launch Corral believes it is watching and
+/// is not. And an argument that joins a conversation this agent already has is
+/// `session.resume`'s to authorize rather than a fresh launch's (ADR 0011 D1).
+///
+/// The third ground is what a Claude launch needs that a Codex one did not:
+/// its attach arguments are flags on the surface Corral manages, with the
+/// injection intact and hooks reporting normally, so neither of the first two
+/// reaches them.
+///
+/// Everything else a person may want to pass to their own agent is theirs,
+/// including the separator and — for now — this CLI's other subcommands, which
+/// no declared managed surface refuses because Claude has none (ADR 0011 D2).
 ///
 /// Version-sensitive by nature: this is a claim about one provider's command
 /// line, held against the version the matrix records. A flag a later release
@@ -131,14 +188,65 @@ pub fn compose_launch(
 /// has to survive learning nothing — it does, as an identity that never binds
 /// rather than as a false one.
 pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
-    let equals = format!("{SETTINGS_FLAG}=");
-    let competing = |argument: &&String| {
-        *argument == SETTINGS_FLAG || argument.starts_with(&equals) || *argument == SAFE_MODE_FLAG
-    };
-    match args.iter().find(competing) {
-        Some(argument) => Err(ArgumentRefused::CompetesWithInjection(argument.clone())),
-        None => Ok(()),
+    for (position, argument) in args.iter().enumerate() {
+        // Everything after it is prompt text, so there is nothing left to
+        // refuse — and nothing there can reach the injection Corral put ahead
+        // of every caller word.
+        if argument == SEPARATOR {
+            return Ok(());
+        }
+        if competes_with_injection(argument) {
+            return Err(ArgumentRefused::CompetesWithInjection(argument.clone()));
+        }
+        if attaches_to_a_conversation(argument, position) {
+            return Err(ArgumentRefused::AttachesToAnExistingConversation(
+                argument.clone(),
+            ));
+        }
     }
+    Ok(())
+}
+
+/// Whether this argument would displace or disable Corral's own injection.
+fn competes_with_injection(argument: &str) -> bool {
+    argument == SETTINGS_FLAG
+        || argument.starts_with(&format!("{SETTINGS_FLAG}="))
+        || argument == SAFE_MODE_FLAG
+}
+
+/// Whether this argument would join a conversation this agent already has.
+///
+/// Read the way this CLI reads it, which is the part a refusal gets wrong in
+/// both directions at once if it guesses (ADR 0010 D2). A long flag takes its
+/// value after `=`; a short flag takes one attached; short flags cluster, and
+/// a value-taking letter ends the cluster by swallowing the rest.
+fn attaches_to_a_conversation(argument: &str, position: usize) -> bool {
+    if ATTACHING_FLAGS
+        .iter()
+        .any(|flag| argument == *flag || argument.starts_with(&format!("{flag}=")))
+    {
+        return true;
+    }
+    if position == 0 && argument == ATTACH_SUBCOMMAND {
+        return true;
+    }
+    let Some(cluster) = argument
+        .strip_prefix('-')
+        .filter(|_| !argument.starts_with("--"))
+    else {
+        return false;
+    };
+    for letter in cluster.chars() {
+        if ATTACHING_SHORTS.contains(&letter) {
+            return true;
+        }
+        // Its value is the rest of this word, so no letter beyond here is a
+        // flag at all.
+        if VALUE_SHORTS.contains(&letter) {
+            return false;
+        }
+    }
+    false
 }
 
 /// The argv that continues the provider's own session as a new Run.

@@ -66,6 +66,12 @@ dogfood decides, and PR8 owns what a person is told about evidence gaps.
 
 ## D2 — A caller argument is refused on two grounds, not one
 
+> **Superseded in part by ADR 0011 D1.** There are three grounds. The third is
+> an argument that would attach the launch to a conversation that already
+> exists — which Codex spells as a subcommand, so the surface ground below
+> reached it, and Claude spells as a flag on the surface Corral manages, where
+> nothing below reaches it. The original wording is kept as written.
+
 **Supersedes in part:** ADR 0009 D5's "refuse exactly what defeats the
 injection".
 

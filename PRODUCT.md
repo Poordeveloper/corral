@@ -269,8 +269,9 @@ Supported means the latest stable release of a provider CLI plus the
 previous tested release, carried by a version matrix, fixtures, and
 integration tests that Corral maintains. The matrix begins as a dated
 first-party record — `docs/references/2026-08-27-pr5-claude-code-hook-matrix.md`
-for Claude Code, `docs/references/2026-08-31-pr6-codex-notify-matrix.md` for
-Codex — and becomes a `verify-release`-owned task before the M1 release: a
+and `docs/references/2026-09-01-claude-2.1.251-attachment-matrix.md` for Claude
+Code, `docs/references/2026-08-31-pr6-codex-notify-matrix.md` for Codex — and
+becomes a `verify-release`-owned task before the M1 release: a
 one-time evidence document is not a permanent release gate. Within that matrix, every live
 session must be discovered regardless of terminal host, including tmux;
 systematic blind spots are release blockers. Outside it, Corral degrades
