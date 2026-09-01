@@ -71,6 +71,12 @@ commander only reads as the first argument (measured: `claude attach foo`
 dispatches, `claude -p attach foo` does not). A value equal to `--continue` is
 not a case that happens.
 
+> **Wrong, and corrected in review — see "What review changed" below.** The
+> argument above only considered a value that *collides* with a refused
+> spelling. It missed a value that swallows the **separator**, which changes
+> how every word after it is read. Claude needs a table of required-value
+> flags, and has one.
+
 **4. `attach` is refused as the first caller word only,** because that is the
 only place it means anything.
 
@@ -130,6 +136,31 @@ work. Nothing about an already-running Session changes.
 - Matrix recorded with PR5's fields; the pending surface decision named in it.
 - Human-merged: Class C carrying ADR 0011.
 - Plan moves to `done/`; `STORAGE_EPOCH` untouched.
+
+## What review changed
+
+`refuse_arguments` scanned each token independently, so a word a required
+option had already swallowed was still read as an argument. Measured, that is
+two defects at once on commander, which takes the next word for a required
+value whatever it looks like:
+
+- `--name -- --continue` — the option ate the separator, the scan stopped
+  there, and `--continue` reached the provider. The bypass this task exists to
+  close, wearing three tokens. `--name -- --settings …` hides the first ground
+  the same way.
+- `-n -c` — the option ate `-c` as a session name, and Corral refused it as a
+  request to continue.
+
+The scan now carries one bit of state: whether the previous word required a
+value and took this one. Which flags do that is a table derived from `--help`
+on 2.1.251 (design 3's claim that Claude needed none was wrong for the reason
+above). Optional-value flags are deliberately absent from it — measured, they
+do not take a dash-leading word, and listing one would skip a word that is
+really a flag.
+
+Clap does not behave this way: `codex -C -- resume --last` errors rather than
+swallowing the separator, so the Codex adapter is unaffected and its own model
+stays right for its own parser. Matrix scenario 9 holds all of it.
 
 ## Follow-ups
 

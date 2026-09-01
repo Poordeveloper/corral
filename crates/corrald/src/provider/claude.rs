@@ -87,6 +87,58 @@ const ATTACHING_FLAGS: [&str; 4] = ["--resume", "--continue", "--from-pr", "--cl
 /// words because this CLI clusters its short flags: `-pc` continues, measured.
 const ATTACHING_SHORTS: [char; 2] = ['r', 'c'];
 
+/// The flags whose value is **required**, and which therefore take the next
+/// word whatever it is.
+///
+/// Commander is greedy here where clap is not: measured on 2.1.251,
+/// `claude -p --name -- --continue` answers `--continue`'s own error, so
+/// `--name` swallowed the separator and the flag behind it parsed normally.
+/// A scan that read that `--` as the end of options would wave through the
+/// attachment this refusal exists to stop — and one that read `-c` in
+/// `-n -c` as a request would refuse somebody's session name.
+///
+/// Optional-value flags are deliberately absent. Measured, they do not take a
+/// dash-leading word: `-d -c` continues, and `--debug -- --continue` leaves
+/// the separator standing. Listing one here would skip a word that is really
+/// a flag, which is the same bypass from the other side.
+///
+/// Taken from `--help` on this version, which is why it is long and why it is
+/// version-sensitive. An entry missing from it is a bypass; an entry that does
+/// not belong is one too.
+const REQUIRED_VALUE_FLAGS: [&str; 27] = [
+    "--add-dir",
+    "--agent",
+    "--agents",
+    "--append-system-prompt",
+    "--autocompact",
+    "--betas",
+    "--debug-file",
+    "--effort",
+    "--environment",
+    "--fallback-model",
+    "--file",
+    "--input-format",
+    "--json-schema",
+    "--max-budget-usd",
+    "--mcp-config",
+    "--model",
+    "--name",
+    "--output-format",
+    "--permission-mode",
+    "--plugin-dir",
+    "--plugin-url",
+    "--remote-control-session-name-prefix",
+    "--session-id",
+    "--setting-sources",
+    "--settings",
+    "--system-prompt",
+    "--tools",
+];
+
+/// The short flag whose value is required. `-n` is `--name`; `-d`, `-r`, and
+/// `-w` all take theirs optionally.
+const REQUIRED_VALUE_SHORTS: [char; 1] = ['n'];
+
 /// The short flags that take a value, which is the rest of their cluster.
 ///
 /// Measured: `-nc`, `-dc`, and `-wc` do **not** continue, because `n`, `d`, and
@@ -188,7 +240,16 @@ pub fn compose_launch(
 /// has to survive learning nothing — it does, as an identity that never binds
 /// rather than as a false one.
 pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
+    let mut swallowed = false;
     for (position, argument) in args.iter().enumerate() {
+        // Not an argument: the option before it required a value and took this
+        // word as one, whatever it looks like. Reading it as a flag would
+        // refuse somebody's session name; reading the *separator* as one is
+        // how a later `--continue` gets through.
+        if swallowed {
+            swallowed = false;
+            continue;
+        }
         // Everything after it is prompt text, so there is nothing left to
         // refuse — and nothing there can reach the injection Corral put ahead
         // of every caller word.
@@ -203,8 +264,39 @@ pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
                 argument.clone(),
             ));
         }
+        swallowed = takes_the_next_word(argument);
     }
     Ok(())
+}
+
+/// Whether this CLI would take the word after this one as its value.
+///
+/// Only a required value is greedy enough to matter, and only when it is not
+/// already carried inside this word: `--name=x` and `-nx` have theirs, and
+/// `--name` and `-pn` do not.
+fn takes_the_next_word(argument: &str) -> bool {
+    if REQUIRED_VALUE_FLAGS.contains(&argument) {
+        return true;
+    }
+    let Some(cluster) = short_cluster(argument) else {
+        return false;
+    };
+    let mut letters = cluster.chars();
+    while let Some(letter) = letters.next() {
+        if VALUE_SHORTS.contains(&letter) {
+            // The rest of this word is its value, so it reaches past the word
+            // only when there is no rest and it cannot do without one.
+            return letters.next().is_none() && REQUIRED_VALUE_SHORTS.contains(&letter);
+        }
+    }
+    false
+}
+
+/// This argument as a cluster of short flags, or `None` when it is not one.
+fn short_cluster(argument: &str) -> Option<&str> {
+    argument
+        .strip_prefix('-')
+        .filter(|_| !argument.starts_with("--"))
 }
 
 /// Whether this argument would displace or disable Corral's own injection.
@@ -230,10 +322,7 @@ fn attaches_to_a_conversation(argument: &str, position: usize) -> bool {
     if position == 0 && argument == ATTACH_SUBCOMMAND {
         return true;
     }
-    let Some(cluster) = argument
-        .strip_prefix('-')
-        .filter(|_| !argument.starts_with("--"))
-    else {
+    let Some(cluster) = short_cluster(argument) else {
         return false;
     };
     for letter in cluster.chars() {

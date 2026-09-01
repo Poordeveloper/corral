@@ -404,3 +404,54 @@ fn nothing_after_the_separator_is_read_as_an_argument() {
         assert!(refuse_arguments(&args).is_ok(), "{theirs:?}");
     }
 }
+
+/// A token consumed as a required option's value is not an argument at all,
+/// and reading it as one fails in both directions.
+///
+/// Measured on 2.1.251: `claude -p --name -- --continue` answers
+/// `--continue`'s own error, so `--name` took the separator as its value and
+/// the flag after it parsed normally — a scan that stopped at that `--` would
+/// wave through the attachment this refusal exists to stop. And
+/// `claude -p -n -c` answers the plain input error, so `-n` took `-c` as a
+/// name and there was nothing to refuse.
+#[test]
+fn a_word_a_required_option_swallows_is_not_read_as_an_argument() {
+    for hidden in [
+        // The separator itself, swallowed — so what follows is still options.
+        vec!["--name", "--", "--continue"],
+        vec![
+            "--model",
+            "--",
+            "--resume",
+            "d2dfcafd-9a73-4162-aa70-dddf99aa6e75",
+        ],
+        // The same swallowed separator hides the first ground too.
+        vec!["--name", "--", "--settings", "/tmp/theirs.json"],
+        vec!["-n", "--", "-c"],
+        // A cluster whose value is attached leaves the next word a flag.
+        vec!["-np", "-c"],
+    ] {
+        let args: Vec<String> = hidden.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_err(), "{hidden:?}");
+    }
+
+    for theirs in [
+        // The value happens to look like a flag Corral refuses, and is a name.
+        vec!["-n", "-c"],
+        vec!["--name", "--continue"],
+        // A cluster ending in the required-value letter swallows the next word.
+        vec!["-pn", "-c"],
+        // An *optional* value takes no dash-leading word, so the separator
+        // survives and everything after it is prompt text.
+        vec!["-d", "--", "--continue"],
+        vec![
+            "--debug",
+            "--",
+            "--resume",
+            "d2dfcafd-9a73-4162-aa70-dddf99aa6e75",
+        ],
+    ] {
+        let args: Vec<String> = theirs.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_ok(), "{theirs:?}");
+    }
+}
