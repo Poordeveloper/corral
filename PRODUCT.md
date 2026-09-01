@@ -269,12 +269,20 @@ Supported means the latest stable release of a provider CLI plus the
 previous tested release, carried by a version matrix, fixtures, and
 integration tests that Corral maintains. The matrix begins as a dated
 first-party record — `docs/references/2026-08-27-pr5-claude-code-hook-matrix.md`
-for Claude Code, `docs/references/2026-08-31-pr6-codex-notify-matrix.md` for
-Codex — and becomes a `verify-release`-owned task before the M1 release: a
+and `docs/references/2026-09-01-claude-2.1.251-attachment-matrix.md` for Claude
+Code, `docs/references/2026-08-31-pr6-codex-notify-matrix.md` for Codex — and
+becomes a `verify-release`-owned task before the M1 release: a
 one-time evidence document is not a permanent release gate. Within that matrix, every live
 session must be discovered regardless of terminal host, including tmux;
 systematic blind spots are release blockers. Outside it, Corral degrades
 honestly rather than guessing.
+
+Inside a managed session that extends to the agent's own command line: Corral
+passes only the options whose parsing it has verified for the supported
+version, and refuses one it has not rather than guessing at what the words
+after it mean. A newly added provider option is therefore unavailable through a
+managed session until it is verified — a refusal a person can read and act on,
+chosen over a launch that quietly does something else (ADR 0012).
 
 Corral's integration is installed and enabled by default with the normal
 installation and is transparently disclosed; settings offer per-provider

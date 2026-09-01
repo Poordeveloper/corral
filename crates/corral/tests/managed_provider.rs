@@ -209,6 +209,96 @@ fn the_same_identity_reported_twice_stays_one_binding() {
     drop(daemon);
 }
 
+/// A fresh managed session may not be a native resume in disguise.
+///
+/// The Codex half of this landed in PR6; this is the same hole on the other
+/// provider, where it wears a flag on the surface Corral manages rather than a
+/// subcommand. `--resume` reaches a conversation that already exists without
+/// the per-Session continuation claim or the eligibility ladder, and binding
+/// uniqueness answers only after the second process has reported an identity
+/// (ADR 0011 D1).
+#[test]
+fn a_fresh_claude_session_may_not_be_a_native_resume() {
+    let account = account("claude-no-native-resume");
+    let script = Script::new(&account, "claude-no-native-resume");
+    let daemon = daemon_running(&account, &script);
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    let refusal = client
+        .request(
+            1,
+            "session.new",
+            Some(json!({
+                "command_id": "new-1",
+                "provider": "claude",
+                "args": ["--resume", FIRST],
+                "cwd": provider::workdir(&account).to_string_lossy(),
+            })),
+        )
+        .expect("session.new answered");
+
+    assert_eq!(error_code(&refusal), Some("invalid_params"), "{refusal}");
+    assert!(
+        refused_with(&refusal).contains("--resume"),
+        "the refusal names what the person wrote: {}",
+        refused_with(&refusal),
+    );
+    // Nothing ran, and no Session exists to have run it.
+    assert!(script.launches().is_empty(), "{:?}", script.launches());
+    assert!(
+        sessions(&mut client, 2).is_empty(),
+        "{:?}",
+        sessions(&mut client, 2)
+    );
+
+    drop(daemon);
+}
+
+/// An option this build has not validated stops the launch, before anything is
+/// spawned (ADR 0012 D1).
+///
+/// The fail-closed half of the same protection: Corral cannot know that a
+/// provider option it has never read leaves the words after it alone, so it
+/// refuses rather than hands the command line over. A person meeting one is
+/// told which option it was.
+#[test]
+fn an_unvalidated_provider_option_stops_a_managed_launch() {
+    let account = account("claude-unvalidated-option");
+    let script = Script::new(&account, "claude-unvalidated-option");
+    let daemon = daemon_running(&account, &script);
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    let refusal = client
+        .request(
+            1,
+            "session.new",
+            Some(json!({
+                "command_id": "new-1",
+                "provider": "claude",
+                "args": ["--an-option-from-a-later-release", "--", "--continue"],
+                "cwd": provider::workdir(&account).to_string_lossy(),
+            })),
+        )
+        .expect("session.new answered");
+
+    assert_eq!(error_code(&refusal), Some("invalid_params"), "{refusal}");
+    assert!(
+        refused_with(&refusal).contains("--an-option-from-a-later-release"),
+        "the refusal names the option: {}",
+        refused_with(&refusal),
+    );
+    assert!(script.launches().is_empty(), "{:?}", script.launches());
+    assert!(
+        sessions(&mut client, 2).is_empty(),
+        "{:?}",
+        sessions(&mut client, 2)
+    );
+
+    drop(daemon);
+}
+
 /// A confirmation does not hinge on one event arriving.
 ///
 /// Delivery is at-most-once by construction — a full queue drops, a relay past

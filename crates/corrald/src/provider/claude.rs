@@ -15,8 +15,12 @@ use std::path::Path;
 
 use corral_core::{ExternalId, RunId};
 use serde_json::{Value, json};
-use tracing::warn;
+use tracing::{debug, warn};
 
+use super::claude_options::{
+    KNOWN_SHORTS, REQUIRED_VALUE_FLAGS, REQUIRED_VALUE_SHORTS, VALUE_SHORTS, VALUELESS_FLAGS,
+    VERIFIED_AGAINST,
+};
 use super::launch::{InjectedSettings, InjectionFailed, RelayInvocation};
 use super::{
     AgentFactKind, ArgumentRefused, LaunchIntent, ProviderLaunch, ProviderReport, SessionOrigin,
@@ -54,6 +58,62 @@ const SAFE_MODE_FLAG: &str = "--safe-mode";
 
 /// The flag that continues a named conversation.
 const RESUME_FLAG: &str = "--resume";
+
+/// The word after which this CLI stops reading options.
+///
+/// Measured on 2.1.251: `claude -- --resume <id>` starts a fresh session and
+/// says so — "`--resume` is a CLI flag, not a prompt … this session started
+/// fresh". So a flag-looking word after it is prompt text, and refusing one
+/// would be Corral refusing somebody's prompt (ADR 0010 D2).
+const SEPARATOR: &str = "--";
+
+/// The arguments that join a conversation this agent already has.
+///
+/// Each is `session.resume`'s to authorize, not a fresh launch's: that path
+/// holds the per-Session continuation claim and walks the eligibility ladder,
+/// and binding uniqueness cannot stand in for either — it answers when the
+/// second process first reports an identity, which is after both have been
+/// writing (ADR 0011 D1).
+///
+/// `--cloud` is here although the same flag can also *create* a cloud session:
+/// which one it does is decided by the shape of a value Corral has no business
+/// interpreting, so it is refused in both meanings. The cost is a person who
+/// meant to create one being told to; the alternative is two agents on one
+/// conversation, silently (ADR 0011 D2).
+///
+/// `--help` is not the inventory, and this list is not built from it. Two of
+/// these are proof: `--remote` is a deprecated alias `--help` never mentions,
+/// which reports itself as `--cloud` when refused; `--teleport` is in the help
+/// but its one-line description ("Resume a teleport session") is the only place
+/// it says so, and the binary's own text groups it with the others —
+/// "`--environment` cannot be combined with `--resume`, `--continue`, or
+/// `--teleport`", and "/teleport pulls a cloud session into a terminal on your
+/// own machine".
+///
+/// Version-sensitive by nature, held against what the matrix records
+/// (`docs/references/2026-09-01-claude-2.1.251-attachment-matrix.md`).
+const ATTACHING_FLAGS: [&str; 6] = [
+    "--resume",
+    "--continue",
+    "--from-pr",
+    "--cloud",
+    "--remote",
+    "--teleport",
+];
+
+/// The short flags that join one, as single letters.
+///
+/// `-r` is `--resume` and `-c` is `--continue`. They are letters rather than
+/// words because this CLI clusters its short flags: `-pc` continues, measured.
+const ATTACHING_SHORTS: [char; 2] = ['r', 'c'];
+
+/// The subcommand that opens a background session in this terminal.
+///
+/// The same harm wearing a subcommand. Read only as the **first** argument,
+/// which is the only place this CLI dispatches one: measured, `claude attach
+/// foo` answers "No job matching 'foo'" while `claude -p attach foo` sends the
+/// words to the model.
+const ATTACH_SUBCOMMAND: &str = "attach";
 
 /// The hook events Corral injects, and what each one means in Corral's
 /// vocabulary.
@@ -118,12 +178,21 @@ pub fn compose_launch(
 
 /// Refuse the provider arguments Corral cannot honour.
 ///
-/// Two, and the same reason twice: each one leaves a launch Corral believes it
-/// is watching and is not. A caller repeating `--settings` displaces Corral's
-/// own, since the last one is the one loaded; `--safe-mode` starts the agent
-/// with hooks off, so the injected file is loaded and ignored. Everything else
-/// a person may want to pass to their own agent is theirs, including the
-/// separator.
+/// Two grounds of the three, and one of them twice. A caller repeating
+/// `--settings` displaces Corral's own, since the last one is the one loaded;
+/// `--safe-mode` starts the agent with hooks off, so the injected file is
+/// loaded and ignored — each leaves a launch Corral believes it is watching and
+/// is not. And an argument that joins a conversation this agent already has is
+/// `session.resume`'s to authorize rather than a fresh launch's (ADR 0011 D1).
+///
+/// The third ground is what a Claude launch needs that a Codex one did not:
+/// its attach arguments are flags on the surface Corral manages, with the
+/// injection intact and hooks reporting normally, so neither of the first two
+/// reaches them.
+///
+/// Everything else a person may want to pass to their own agent is theirs,
+/// including the separator and — for now — this CLI's other subcommands, which
+/// no declared managed surface refuses because Claude has none (ADR 0011 D2).
 ///
 /// Version-sensitive by nature: this is a claim about one provider's command
 /// line, held against the version the matrix records. A flag a later release
@@ -131,14 +200,158 @@ pub fn compose_launch(
 /// has to survive learning nothing — it does, as an identity that never binds
 /// rather than as a false one.
 pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
-    let equals = format!("{SETTINGS_FLAG}=");
-    let competing = |argument: &&String| {
-        *argument == SETTINGS_FLAG || argument.starts_with(&equals) || *argument == SAFE_MODE_FLAG
-    };
-    match args.iter().find(competing) {
-        Some(argument) => Err(ArgumentRefused::CompetesWithInjection(argument.clone())),
-        None => Ok(()),
+    let mut awaiting_value = false;
+    for (position, argument) in args.iter().enumerate() {
+        // Not an argument: the option before it required a value and took this
+        // word as one, whatever it looks like.
+        if awaiting_value {
+            awaiting_value = false;
+            continue;
+        }
+        if argument == SEPARATOR {
+            // A terminator, and known to be one: every word up to here has been
+            // read by a grammar that says the parser is not waiting for a
+            // value. Reaching this point with an unread word behind it is
+            // impossible — an unknown option refuses above — which is what
+            // makes the terminator trustworthy here and not merely assumed
+            // (ADR 0012 D3).
+            return Ok(());
+        }
+        awaiting_value = match read(argument, position)? {
+            Reads::TheFlagAlone => false,
+            Reads::TheFlagAndTheNextWord => true,
+        };
     }
+    Ok(())
+}
+
+/// How much of the command line one word accounts for.
+enum Reads {
+    TheFlagAlone,
+    TheFlagAndTheNextWord,
+}
+
+/// Read one word the way this provider's parser reads it, or refuse it.
+///
+/// Every path out of here is either a reading Corral can defend or a refusal.
+/// There is deliberately no "pass it through and hope": an option this build
+/// cannot read may change the syntactic role of the words after it, and a
+/// managed launch that guessed would be a launch Corral believes it is
+/// watching and is not (ADR 0012 D1, D2).
+fn read(argument: &str, position: usize) -> Result<Reads, ArgumentRefused> {
+    // The governing invariant, and the one two bypasses came from ignoring:
+    //
+    //   a token becomes data only because the verified grammar says parsing has
+    //   transitioned to data, never merely because of its spelling or position.
+    //
+    // So every branch below decides what the *parser* does with this word, and
+    // the only way out without a decision is a refusal.
+    if competes_with_injection(argument) {
+        return Err(ArgumentRefused::CompetesWithInjection(argument.to_owned()));
+    }
+    if attaches_to_a_conversation(argument, position) {
+        return Err(ArgumentRefused::AttachesToAnExistingConversation(
+            argument.to_owned(),
+        ));
+    }
+    if REQUIRED_VALUE_FLAGS.contains(&argument) {
+        return Ok(Reads::TheFlagAndTheNextWord);
+    }
+    if VALUELESS_FLAGS.contains(&argument) {
+        return Ok(Reads::TheFlagAlone);
+    }
+    let Some(cluster) = short_cluster(argument) else {
+        // A long flag carries its value inside the word or it is one this
+        // build does not know; anything that is not a flag at all is a
+        // positional, which this provider still reads options after.
+        return match argument.split_once('=') {
+            Some((flag, _))
+                if VALUELESS_FLAGS.contains(&flag) || REQUIRED_VALUE_FLAGS.contains(&flag) =>
+            {
+                Ok(Reads::TheFlagAlone)
+            }
+            _ if !argument.starts_with('-') => Ok(Reads::TheFlagAlone),
+            _ => Err(unvalidated(argument)),
+        };
+    };
+    let mut letters = cluster.chars();
+    while let Some(letter) = letters.next() {
+        if !KNOWN_SHORTS.contains(&letter) {
+            return Err(unvalidated(argument));
+        }
+        if VALUE_SHORTS.contains(&letter) {
+            // The rest of this word is its value, so it reaches past the word
+            // only when there is no rest and it cannot do without one.
+            return Ok(
+                if letters.next().is_none() && REQUIRED_VALUE_SHORTS.contains(&letter) {
+                    Reads::TheFlagAndTheNextWord
+                } else {
+                    Reads::TheFlagAlone
+                },
+            );
+        }
+    }
+    Ok(Reads::TheFlagAlone)
+}
+
+/// Refuse a word this build cannot read, and say what it was read against.
+///
+/// The version goes to the log rather than to the person: what they need is
+/// which argument stopped the launch, and what a maintainer needs is which
+/// grammar was holding it (ADR 0012 D4).
+fn unvalidated(argument: &str) -> ArgumentRefused {
+    debug!(
+        argument,
+        verified_against = VERIFIED_AGAINST,
+        "a caller argument is outside the provider command line this build has verified",
+    );
+    ArgumentRefused::NotValidatedForAManagedLaunch(argument.to_owned())
+}
+
+/// This argument as a cluster of short flags, or `None` when it is not one.
+fn short_cluster(argument: &str) -> Option<&str> {
+    argument
+        .strip_prefix('-')
+        .filter(|_| !argument.starts_with("--"))
+}
+
+/// Whether this argument would displace or disable Corral's own injection.
+fn competes_with_injection(argument: &str) -> bool {
+    argument == SETTINGS_FLAG
+        || argument.starts_with(&format!("{SETTINGS_FLAG}="))
+        || argument == SAFE_MODE_FLAG
+}
+
+/// Whether this argument would join a conversation this agent already has.
+///
+/// Read the way this CLI reads it, which is the part a refusal gets wrong in
+/// both directions at once if it guesses (ADR 0010 D2). A long flag takes its
+/// value after `=`; a short flag takes one attached; short flags cluster, and
+/// a value-taking letter ends the cluster by swallowing the rest.
+fn attaches_to_a_conversation(argument: &str, position: usize) -> bool {
+    if ATTACHING_FLAGS
+        .iter()
+        .any(|flag| argument == *flag || argument.starts_with(&format!("{flag}=")))
+    {
+        return true;
+    }
+    if position == 0 && argument == ATTACH_SUBCOMMAND {
+        return true;
+    }
+    let Some(cluster) = short_cluster(argument) else {
+        return false;
+    };
+    for letter in cluster.chars() {
+        if ATTACHING_SHORTS.contains(&letter) {
+            return true;
+        }
+        // Its value is the rest of this word, so no letter beyond here is a
+        // flag at all.
+        if VALUE_SHORTS.contains(&letter) {
+            return false;
+        }
+    }
+    false
 }
 
 /// The argv that continues the provider's own session as a new Run.

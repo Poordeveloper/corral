@@ -34,6 +34,7 @@
 //! ```
 
 pub mod claude;
+pub mod claude_options;
 pub mod codex;
 pub mod launch;
 pub mod reported;
@@ -311,13 +312,17 @@ pub fn interpret(
 
 /// Why a caller's provider arguments cannot be passed through.
 ///
-/// Two reasons, and they are different failures. One argument would defeat the
-/// injection Corral is about to make, leaving a launch Corral believes it is
-/// watching and is not. Another would start something other than the session
-/// Corral manages — a different program under a Corral PTY, or a second
-/// process on a conversation Corral may already be running, which is what
-/// `managed_launch`'s continuation claim exists to prevent and which no
-/// after-the-fact binding check can undo.
+/// Four reasons, and they are different failures. One argument would defeat
+/// the injection Corral is about to make, leaving a launch Corral believes it
+/// is watching and is not. One would start something other than the session
+/// Corral manages — a different program under a Corral PTY. And one would join
+/// a conversation the provider already has, which is `session.resume`'s to
+/// authorize: it holds the per-Session continuation claim and walks the
+/// eligibility ladder, and no after-the-fact binding check can undo two
+/// processes driving one conversation (ADR 0011 D1). And one is not about the
+/// argument at all: Corral has not validated how this provider parses it, and
+/// an unvalidated option can change the syntactic role of every word after it,
+/// so the launch is refused rather than handed over (ADR 0012 D1).
 ///
 /// What counts as either is each provider's own answer against its own command
 /// line. Everything else a person may want to pass to their own agent is
@@ -332,6 +337,15 @@ pub enum ArgumentRefused {
     CompetesWithInjection(String),
     /// It starts something other than the session Corral manages.
     OutsideTheManagedSession(String),
+    /// It would join a conversation this agent already has.
+    AttachesToAnExistingConversation(String),
+    /// This build has not validated how the agent parses it.
+    ///
+    /// Not a judgement about the argument — a statement about Corral. An
+    /// option whose parsing is unverified can change the meaning of every word
+    /// after it, so a managed launch refuses it rather than passing it on for
+    /// forward compatibility (ADR 0012 D1).
+    NotValidatedForAManagedLaunch(String),
 }
 
 impl ArgumentRefused {
@@ -339,9 +353,10 @@ impl ArgumentRefused {
     /// line.
     pub fn argument(&self) -> &str {
         match self {
-            Self::CompetesWithInjection(argument) | Self::OutsideTheManagedSession(argument) => {
-                argument
-            }
+            Self::CompetesWithInjection(argument)
+            | Self::OutsideTheManagedSession(argument)
+            | Self::AttachesToAnExistingConversation(argument)
+            | Self::NotValidatedForAManagedLaunch(argument) => argument,
         }
     }
 }
@@ -359,6 +374,17 @@ impl std::fmt::Display for ArgumentRefused {
                 "{argument} starts something other than the session Corral manages: Corral runs \
                  the agent's own interactive session, and continues one it already knows rather \
                  than starting a second agent on it",
+            ),
+            Self::AttachesToAnExistingConversation(argument) => write!(
+                f,
+                "{argument} would join a conversation this agent already has. Corral continues a \
+                 session it already knows, rather than starting a second agent on the same one",
+            ),
+            Self::NotValidatedForAManagedLaunch(argument) => write!(
+                f,
+                "{argument} is not something this build of Corral has checked against the agent \
+                 it starts. An unchecked option can change what the arguments after it mean, so \
+                 Corral will not start a session it cannot read the command line of",
             ),
         }
     }
