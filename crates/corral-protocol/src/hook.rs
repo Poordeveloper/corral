@@ -55,6 +55,28 @@ pub const RELAY_TOKEN_FLAG: &str = "--token";
 /// `MAX_HOOK_PAYLOAD_BYTES` records it.
 pub const RELAY_PAYLOAD_ARGV_FLAG: &str = "--payload-argv";
 
+/// How a globally installed entry declares which Corral wrote it.
+///
+/// Ownership at global scope is structural — the relay invocation *is* the
+/// owner identity (ADR 0013 D2) — and this flag is how that artifact evolves.
+/// The merge engine is its only reader: an entry at a version this binary
+/// understands may be upgraded in place by `repair`, and one at a newer
+/// version is left alone and reported, so an older Corral never rewrites what
+/// a newer Corral wrote.
+///
+/// The relay itself ignores it, by the same tolerance that lets an injected
+/// file outlive the binary that wrote it. A version the relay understood would
+/// be a second reader of a decision that has one owner.
+pub const RELAY_INTEGRATION_VERSION_FLAG: &str = "--integration-version";
+
+/// The version of the global artifact this binary writes and can upgrade.
+///
+/// Distinct from `HOOK_PROTOCOL_VERSION`: that versions what crosses the
+/// socket, this versions what is written into a user's configuration file.
+/// The two evolve for different reasons and a shared number would tie a wire
+/// change to a rewrite of every installed entry.
+pub const INTEGRATION_VERSION: u32 = 1;
+
 /// The largest provider payload this channel carries.
 ///
 /// A payload past it is dropped **whole** and marked, never truncated: a

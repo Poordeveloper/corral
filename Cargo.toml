@@ -91,6 +91,15 @@ tokio = { version = "1.48", default-features = false, features = [
     "sync",
     "time",
 ] }
+# Format-preserving TOML, for the one file Corral edits that legally carries
+# the user's own comments and layout: Codex's `config.toml` (ADR 0013 D3, and
+# the 2026-09-02 spike that measured Codex preserving what it did not write).
+# `toml` was the alternative and loses exactly what D3 requires — it parses to
+# a value tree, so a rewrite would strip a user's comments; extending the
+# existing hand-rolled emitter in `provider::codex` was the other, and it can
+# render a value but cannot locate and replace one key inside a document it
+# did not write.
+toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = [
     "fmt",

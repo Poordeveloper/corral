@@ -1,15 +1,17 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use corral_core::{
-    Command, CommandFingerprint, CommandId, CommandKind, CorralSessionId, ProviderId, RunId,
+    Command, CommandFingerprint, CommandId, CommandKind, CorralSessionId, IntegrationIntent,
+    ProviderId, RepairFingerprint, RepairableDrift, RunId,
 };
 
 use corral_protocol::method::{
-    self, AgentEvent, PingResult, ProviderFacts, SessionListItem, SessionListResult,
-    SessionNewParams, SessionNewResult, SessionResumeParams, SessionResumeResult,
-    TerminalAttachParams, TerminalAttachResult,
+    self, AgentEvent, IntegrationParams, IntegrationResult, PingResult, ProviderFacts,
+    SessionListItem, SessionListResult, SessionNewParams, SessionNewResult, SessionResumeParams,
+    SessionResumeResult, TerminalAttachParams, TerminalAttachResult,
 };
 use corral_protocol::{
     ClientHello, Compatibility, ConnectionRole, ErrorCode, Frame, FrameError, FrameReader,
@@ -22,11 +24,13 @@ use tokio::sync::watch;
 use tracing::{debug, error, warn};
 
 use crate::in_flight::{self, Claim, Concluded};
+use crate::integration;
 use crate::lifecycle::{EstablishedGuard, Lifecycle, ShutdownReason};
 use crate::managed_launch::{
     self, Committed, ResumeRefused, SessionOwnership, compose_provider_launch, resume_plan,
 };
 use crate::policy::DaemonPolicy;
+use crate::provider::launch::RelayInvocation;
 use crate::provider::{self, KnownProvider, ReportedSession};
 use crate::runtime::{
     AttachGrant, AttachToken, LaunchRequest, ManagedSession, PtyGeometry, TerminalAccess,
@@ -426,6 +430,19 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             )),
             Err(error) => Dispatch::FailClosed(error),
         },
+        // Status reads a file rather than the registry, but it is still a
+        // claim made in the daemon's name and the two mutations write durable
+        // intent, so all three take the same gate as any other request.
+        method::INTEGRATION_STATUS | method::INTEGRATION_ENABLE | method::INTEGRATION_DISABLE => {
+            match state.vouch().await {
+                Ok(Vouched::Yes) => integration_request(request, state).await,
+                Ok(Vouched::NotNow) => Dispatch::Reply(Frame::error(
+                    id,
+                    ProtocolError::new(ErrorCode::Busy, "the registry is held by another writer"),
+                )),
+                Err(error) => Dispatch::FailClosed(error),
+            }
+        }
         // A compatibility safety net, not how features are discovered: the
         // connection stays usable.
         other => Dispatch::Reply(Frame::error(
@@ -583,6 +600,192 @@ async fn session_new(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             Err(error) => Dispatch::FailClosed(error),
         },
     }
+}
+
+/// Serve `integration.status`, `integration.enable`, and
+/// `integration.disable`.
+///
+/// The daemon performs the operation; a client never writes a provider's
+/// configuration itself (ADR 0013 D1). Enable records intent *before* it
+/// installs, so a refused merge still leaves a decision the user can act on —
+/// the file is evidence of what is installed and never the record of what was
+/// chosen (D5/D6).
+async fn integration_request(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
+    let id = request.id;
+    let invalid = |detail: String| ProtocolError::new(ErrorCode::InvalidParams, detail);
+
+    let params: IntegrationParams = match request.params.clone() {
+        Some(params) => match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(source) => {
+                return Dispatch::Reply(Frame::error(id, invalid(source.to_string())));
+            }
+        },
+        None => {
+            return Dispatch::Reply(Frame::error(
+                id,
+                invalid("an integration request needs a provider".to_owned()),
+            ));
+        }
+    };
+    let Some(provider) = KnownProvider::from_name(&params.provider) else {
+        return Dispatch::Reply(Frame::error(
+            id,
+            ProtocolError::new(
+                ErrorCode::UnknownProvider,
+                unknown_provider(&params.provider),
+            ),
+        ));
+    };
+    // Corral being unable to name itself is answered as a refusal with its
+    // cause, not as a protocol error: the client asked a well-formed question,
+    // and "Corral wrote nothing, here is why" is the honest answer to it.
+    let (target, relay) = match (
+        integration::Target::resolve(provider),
+        RelayInvocation::compose_global(provider),
+    ) {
+        (Ok(target), Ok(relay)) => (target, relay),
+        (Err(error), _) => {
+            return Dispatch::Reply(Frame::result(
+                id,
+                unresolvable_wire_value(provider, &error.to_string()),
+            ));
+        }
+        (Ok(_), Err(error)) => {
+            return Dispatch::Reply(Frame::result(
+                id,
+                unresolvable_wire_value(provider, &error.to_string()),
+            ));
+        }
+    };
+
+    let now = SystemTime::now();
+    let standing = match request.method.as_str() {
+        method::INTEGRATION_STATUS => integration::status(&target, &relay),
+        // Enabling is the explicit user action that re-arms repair: a breaker
+        // opened because something kept undoing Corral's integration stays
+        // open until the user says so, and this is them saying so (grill Q4′).
+        method::INTEGRATION_ENABLE => {
+            match record_intent(state, provider, IntegrationIntent::Enabled, now).await {
+                Ok(()) => match restore_repair_authority(state, &target).await {
+                    Ok(()) => integration::install(&target, &relay, now, state.state_dir()),
+                    Err(error) => return Dispatch::FailClosed(error),
+                },
+                Err(error) => return Dispatch::FailClosed(error),
+            }
+        }
+        method::INTEGRATION_DISABLE => {
+            match record_intent(state, provider, IntegrationIntent::Disabled, now).await {
+                Ok(()) => integration::uninstall(&target, &relay, now, state.state_dir()),
+                Err(error) => return Dispatch::FailClosed(error),
+            }
+        }
+        other => {
+            // Unreachable: dispatch routes exactly the three methods above.
+            // Answered rather than asserted, because a panic here would take
+            // the daemon down over a routing mistake.
+            return Dispatch::Reply(Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::MethodNotFound, format!("{other} is not served")),
+            ));
+        }
+    };
+
+    Dispatch::Reply(Frame::result(
+        id,
+        integration_wire_value(provider, &target, &standing),
+    ))
+}
+
+/// Clear every repair breaker this file could have opened.
+///
+/// Both repairable drift classes, because the user's action is about the
+/// integration and not about whichever recurrence happened to trip first.
+/// Ownership conflict is deliberately not among them: it is never
+/// auto-repaired, so it never had a breaker to clear.
+async fn restore_repair_authority(
+    state: &Arc<DaemonState>,
+    target: &integration::Target,
+) -> Result<(), corral_state::StateError> {
+    let Ok(named) = ProviderId::new(target.provider().as_str()) else {
+        return Ok(());
+    };
+    for drift in [RepairableDrift::Missing, RepairableDrift::OldRepresentation] {
+        state
+            .restore_repair_authority(RepairFingerprint::new(
+                named.clone(),
+                target.config_target(),
+                drift,
+            ))
+            .await?;
+    }
+    Ok(())
+}
+
+async fn record_intent(
+    state: &Arc<DaemonState>,
+    provider: KnownProvider,
+    intent: IntegrationIntent,
+    now: SystemTime,
+) -> Result<(), corral_state::StateError> {
+    let Ok(named) = ProviderId::new(provider.as_str()) else {
+        // A name this build declares cannot fail the domain's own rule; if it
+        // ever did, the honest answer is to change nothing rather than record
+        // a decision under a name nothing else will match.
+        warn!("a provider name this build declares is not a usable provider id");
+        return Ok(());
+    };
+    state.set_integration_intent(named, intent, now).await
+}
+
+/// The answer when Corral cannot name itself or the file it would write.
+fn unresolvable_wire_value(provider: KnownProvider, detail: &str) -> serde_json::Value {
+    let result = IntegrationResult {
+        provider: provider.as_str().to_owned(),
+        standing: method::STANDING_REFUSED.to_owned(),
+        claims_delivery: false,
+        detail: Some(
+            integration::Trigger::NotResolvable {
+                detail: detail.to_owned(),
+            }
+            .to_string(),
+        ),
+        path: None,
+    };
+    serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn integration_wire_value(
+    provider: KnownProvider,
+    target: &integration::Target,
+    standing: &integration::Standing,
+) -> serde_json::Value {
+    let (name, detail) = match standing {
+        integration::Standing::Installed => (method::STANDING_INSTALLED, None),
+        integration::Standing::NotInstalled => (method::STANDING_NOT_INSTALLED, None),
+        integration::Standing::Drifted(_) => (
+            method::STANDING_DRIFTED,
+            Some("Corral's entry is not the one this version writes".to_owned()),
+        ),
+        integration::Standing::Refused(trigger) => {
+            (method::STANDING_REFUSED, Some(trigger.to_string()))
+        }
+        integration::Standing::RepairWithheld { .. } => (
+            method::STANDING_REPAIR_WITHHELD,
+            Some(
+                "something keeps undoing Corral's integration, so Corral stopped repairing it"
+                    .to_owned(),
+            ),
+        ),
+    };
+    let result = IntegrationResult {
+        provider: provider.as_str().to_owned(),
+        standing: name.to_owned(),
+        claims_delivery: standing.claims_delivery(),
+        detail,
+        path: Some(target.path().display().to_string()),
+    };
+    serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({}))
 }
 
 /// Everything about a `session.new` that can be decided before anything runs.

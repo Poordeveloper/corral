@@ -8,8 +8,8 @@
 use std::time::{Duration, SystemTime};
 
 use corral_core::{
-    Assurance, BindingKind, CommandOutcome, EvidenceSource, ExitCause, IdentityStatus, MalformedId,
-    Provenance, RunEnd,
+    Assurance, BindingKind, CommandOutcome, ConfigTarget, EvidenceSource, ExitCause,
+    IdentityStatus, IntegrationIntent, MalformedId, Provenance, RepairableDrift, RunEnd,
 };
 
 use crate::error::FatalState;
@@ -137,6 +137,46 @@ pub(crate) fn run_end_from_token(token: &str) -> Result<RunEnd, FatalState> {
         "exited-cause-unknown" => Ok(RunEnd::Exited(ExitCause::Unknown)),
         "unverifiable" => Ok(RunEnd::Unverifiable),
         other => Err(unreadable("a run end", other)),
+    }
+}
+
+pub(crate) fn integration_intent_token(intent: IntegrationIntent) -> &'static str {
+    match intent {
+        IntegrationIntent::Enabled => "enabled",
+        IntegrationIntent::Disabled => "disabled",
+    }
+}
+
+pub(crate) fn integration_intent_from_token(token: &str) -> Result<IntegrationIntent, FatalState> {
+    match token {
+        "enabled" => Ok(IntegrationIntent::Enabled),
+        "disabled" => Ok(IntegrationIntent::Disabled),
+        other => Err(unreadable("an integration intent", other)),
+    }
+}
+
+/// Which provider file a repair fingerprint names.
+///
+/// Spelled per file rather than per provider: a provider that grows a second
+/// integration surface gets a new token, and the old rows keep meaning the
+/// file they were written about.
+///
+/// Written and matched, never decoded: a fingerprint's rows are found by
+/// equality on the tokens the caller's own fingerprint renders, so nothing
+/// turns a stored token back into a domain value. A reader belongs with the
+/// first caller that needs to enumerate fingerprints rather than ask about
+/// one.
+pub(crate) fn config_target_token(target: ConfigTarget) -> &'static str {
+    match target {
+        ConfigTarget::ClaudeUserSettings => "claude-user-settings",
+        ConfigTarget::CodexUserConfig => "codex-user-config",
+    }
+}
+
+pub(crate) fn repairable_drift_token(drift: RepairableDrift) -> &'static str {
+    match drift {
+        RepairableDrift::Missing => "missing",
+        RepairableDrift::OldRepresentation => "old-representation",
     }
 }
 

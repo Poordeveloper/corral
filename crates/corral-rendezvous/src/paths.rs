@@ -284,6 +284,25 @@ fn corral_root() -> Result<PathBuf, RendezvousError> {
     Ok(account_home()?.join(CORRAL_DIR))
 }
 
+/// The home directory whose provider dotfiles Corral's integration reads and
+/// writes — `~/.claude/settings.json`, `~/.codex/config.toml` (ADR 0013).
+///
+/// Resolved through the account database for the same reason the rendezvous
+/// is (ADR 0001 D1): a shell variable must not be able to point Corral's one
+/// mutator at a different account's configuration. It follows the test
+/// namespace for a blunter reason — a test that resolved the real home would
+/// write into the developer's own provider configuration.
+pub fn provider_home() -> Result<PathBuf, RendezvousError> {
+    if let Some(root) = test_namespace::root()? {
+        return Ok(root.join(TEST_PROVIDER_HOME));
+    }
+    account_home()
+}
+
+/// Where provider dotfiles live under a substituted namespace. Inside the
+/// test root, so one scratch directory still holds everything a test creates.
+const TEST_PROVIDER_HOME: &str = "provider-home";
+
 /// The home directory of the effective OS user, from the account database.
 ///
 /// Never `$HOME`: the canonical rendezvous is user-wide, so a shell variable

@@ -27,6 +27,7 @@ impl Registry {
                 DaemonState::open(
                     &directory.join("registry.sqlite3"),
                     &directory.join("launch"),
+                    &directory,
                 )
                 .expect("open"),
             ),

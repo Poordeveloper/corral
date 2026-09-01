@@ -129,6 +129,13 @@ pub async fn serve(
         }
     }
 
+    // At startup, and nowhere on a timer: drift repair is a boundary
+    // operation, never a background normalization loop (ADR 0013 D5). It runs
+    // after the endpoint work because a provider file Corral cannot repair
+    // costs awareness, never the daemon — and only for a provider whose
+    // integration the user actually chose.
+    tokio::spawn(crate::integration::repair_at_startup(Arc::clone(&state)));
+
     info!(endpoint = %socket.display(), "corrald is serving");
 
     let accepting = Arc::clone(&lifecycle);

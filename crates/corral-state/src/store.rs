@@ -3,14 +3,16 @@ use std::time::SystemTime;
 
 use corral_core::{
     Assurance, Binding, BindingId, BindingKey, BindingKind, Command, CommandOutcome,
-    CommandReceipt, CorralSessionId, Evidence, EvidenceSource, ExternalId, IdentityStatus, NodeId,
-    OccurrenceTime, Provenance, Run, RunEnd, RunId, Session, SessionLineage,
+    CommandReceipt, CorralSessionId, Evidence, EvidenceSource, ExternalId, IdentityStatus,
+    IntegrationIntent, NodeId, OccurrenceTime, Provenance, ProviderId, RepairAuthority,
+    RepairBudget, RepairFingerprint, Run, RunEnd, RunId, Session, SessionLineage,
 };
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use crate::encoding;
 use crate::error::{FatalState, Refusal, StateError};
 use crate::event::{self, SessionEvent};
+use crate::integration::{self, RecordedIntent};
 use crate::projection;
 use crate::schema;
 
@@ -218,6 +220,19 @@ impl<T> Written<T> {
 
     fn recording(answer: T, facts: Vec<SessionEvent>) -> Self {
         Self { answer, facts }
+    }
+
+    /// A write whose whole effect is a Corral-owned table outside the log.
+    ///
+    /// Spelled apart from `nothing_to_record` so that "the log gains nothing"
+    /// and "nothing happened" stay two different statements: integration
+    /// intent is a durable decision the log is deliberately not the carrier of
+    /// (ADR 0013 D6).
+    fn outside_the_log(answer: T) -> Self {
+        Self {
+            answer,
+            facts: Vec::new(),
+        }
     }
 }
 
@@ -1034,6 +1049,75 @@ impl Store {
             ))
         });
         self.name_unknown_session(outcome, lineage.child())
+    }
+
+    /// What the user chose about this provider's integration, if they have
+    /// chosen. Absence is not `Disabled`: it means no decision is recorded,
+    /// which the caller resolves against the installed default rather than
+    /// reading as a refusal.
+    pub fn integration_intent(
+        &mut self,
+        provider: &ProviderId,
+    ) -> Result<Option<RecordedIntent>, StateError> {
+        self.read(|connection| integration::intent(connection, provider))
+    }
+
+    pub fn set_integration_intent(
+        &mut self,
+        provider: &ProviderId,
+        intent: IntegrationIntent,
+        at: SystemTime,
+    ) -> Result<(), StateError> {
+        self.write(move |transaction| {
+            integration::set_intent(transaction, provider, intent, at)?;
+            Ok(Written::outside_the_log(()))
+        })
+    }
+
+    /// Whether an automatic repair of this drift may proceed — and, when the
+    /// budget is already spent, the act of withdrawing that authority.
+    ///
+    /// One call rather than a query plus a separate decision: the breaker must
+    /// open in the same transaction that observes the budget is gone, or two
+    /// daemons could each read three repairs and each perform a fourth.
+    pub fn authorize_repair(
+        &mut self,
+        fingerprint: &RepairFingerprint,
+        now: SystemTime,
+        budget: RepairBudget,
+    ) -> Result<RepairAuthority, StateError> {
+        self.write(move |transaction| {
+            let authority = integration::authorize_repair(transaction, fingerprint, now, budget)?;
+            Ok(Written::outside_the_log(authority))
+        })
+    }
+
+    /// Record a repair that already succeeded. A refused merge never reaches
+    /// here, so a provider Corral could not write to cannot exhaust its own
+    /// repair budget.
+    pub fn record_repair(
+        &mut self,
+        fingerprint: &RepairFingerprint,
+        at: SystemTime,
+    ) -> Result<(), StateError> {
+        self.write(move |transaction| {
+            integration::record_repair(transaction, fingerprint, at)?;
+            Ok(Written::outside_the_log(()))
+        })
+    }
+
+    /// Re-arm automatic repair after an explicit user reconciliation.
+    ///
+    /// The only thing that closes an open breaker. Nothing time-based calls
+    /// this, and neither does daemon startup (grill Q4′).
+    pub fn restore_repair_authority(
+        &mut self,
+        fingerprint: &RepairFingerprint,
+    ) -> Result<(), StateError> {
+        self.write(move |transaction| {
+            integration::restore_authority(transaction, fingerprint)?;
+            Ok(Written::outside_the_log(()))
+        })
     }
 
     /// Rebuild every projection from the log.

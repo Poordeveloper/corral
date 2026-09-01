@@ -22,14 +22,15 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use corral_core::{CorralSessionId, RunId};
 use corral_protocol::hook::{
-    RELAY_PAYLOAD_ARGV_FLAG, RELAY_PROVIDER_FLAG, RELAY_SUBCOMMAND, RELAY_TOKEN_FLAG,
+    INTEGRATION_VERSION, RELAY_INTEGRATION_VERSION_FLAG, RELAY_PAYLOAD_ARGV_FLAG,
+    RELAY_PROVIDER_FLAG, RELAY_SUBCOMMAND, RELAY_TOKEN_FLAG,
 };
 use tracing::{debug, warn};
 
 use super::{KnownProvider, PayloadDelivery};
 
 /// The binary the injected hook command line names.
-const CLIENT_BINARY: &str = "corral";
+pub(crate) const CLIENT_BINARY: &str = "corral";
 
 /// What every Corral-owned per-launch file is named with.
 ///
@@ -386,6 +387,27 @@ pub struct RelayInvocation {
 impl RelayInvocation {
     /// Compose the invocation one launch's injection will carry.
     pub fn compose(provider: KnownProvider, token: LaunchToken) -> Result<Self, InjectionFailed> {
+        Self::of(provider, vec![RELAY_TOKEN_FLAG.to_owned(), token.to_wire()])
+    }
+
+    /// Compose the invocation a globally installed entry carries.
+    ///
+    /// Token-less: a launch token names one managed launch, and this entry
+    /// outlives every launch and belongs to none (ADR 0014 D1). The version
+    /// flag is what makes the written artifact upgradable in place, and the
+    /// merge engine is its only reader (ADR 0013 D2).
+    pub fn compose_global(provider: KnownProvider) -> Result<Self, InjectionFailed> {
+        Self::of(
+            provider,
+            vec![
+                RELAY_INTEGRATION_VERSION_FLAG.to_owned(),
+                INTEGRATION_VERSION.to_string(),
+            ],
+        )
+    }
+
+    /// The words both scopes share, around the words that tell them apart.
+    fn of(provider: KnownProvider, scope: Vec<String>) -> Result<Self, InjectionFailed> {
         let relay = sibling_relay().map_err(InjectionFailed::RelayUnresolvable)?;
         // Refused rather than rewritten. A lossy conversion substitutes U+FFFD
         // for every byte an injection would have needed verbatim, composing an
@@ -405,13 +427,13 @@ impl RelayInvocation {
             RELAY_SUBCOMMAND.to_owned(),
             RELAY_PROVIDER_FLAG.to_owned(),
             provider.as_str().to_owned(),
-            RELAY_TOKEN_FLAG.to_owned(),
-            token.to_wire(),
         ];
+        arguments.extend(scope);
         // Told, not discovered. A provider that appends its payload to the
         // invocation writes nothing to standard input, and a relay left to
         // find that out would spend its interference budget on a pipe nobody
-        // opens (ADR 0009 D2).
+        // opens (ADR 0009 D2). Last, so the payload the provider appends after
+        // it is still the invocation's final word.
         if provider.payload_delivery() == PayloadDelivery::FinalArgument {
             arguments.push(RELAY_PAYLOAD_ARGV_FLAG.to_owned());
         }

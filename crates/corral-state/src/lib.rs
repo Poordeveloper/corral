@@ -17,12 +17,14 @@
 mod encoding;
 mod error;
 mod event;
+mod integration;
 mod projection;
 mod schema;
 mod store;
 
 pub use error::{FatalState, Refusal, StateError};
 pub use event::SessionEvent;
+pub use integration::RecordedIntent;
 pub use store::{
     BindingResolution, CommandAcceptance, Contested, Durability, RecordedEvent, RecordedRun,
     SessionResolution, StartedManagedSession, Store,

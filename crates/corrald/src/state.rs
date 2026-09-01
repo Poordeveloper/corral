@@ -5,15 +5,18 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
 use corral_core::{
-    Binding, BindingKey, BindingKind, Command, CorralSessionId, Evidence, ExternalId, NodeId,
-    OccurrenceTime, Provenance, Run, RunId,
+    Binding, BindingKey, BindingKind, Command, CorralSessionId, Evidence, ExternalId,
+    IntegrationIntent, NodeId, OccurrenceTime, Provenance, ProviderId, RepairAuthority,
+    RepairFingerprint, Run, RunId,
 };
 use corral_state::{
-    BindingResolution, Contested, FatalState, Refusal, StartedManagedSession, StateError, Store,
+    BindingResolution, Contested, FatalState, RecordedIntent, Refusal, StartedManagedSession,
+    StateError, Store,
 };
 
 use crate::hook_evidence::{Deliveries, Ingest};
 use crate::in_flight::InFlightCommands;
+use crate::policy;
 use crate::provider::{ReportedSessions, SharedLaunchTokens};
 use crate::runtime::{AttachTokens, Integrity, ManagedSessions, RunObservations, observe_runs};
 
@@ -89,6 +92,11 @@ pub struct DaemonState {
     /// Where per-launch provider configuration Corral owns is written.
     launch_dir: PathBuf,
 
+    /// Corral's own state directory. The integration engine puts a copy of a
+    /// user's configuration here before it changes it, which is Corral's
+    /// artifact to keep and never something written beside the user's file.
+    state_dir: PathBuf,
+
     /// Where the hook endpoint puts what it received, and the receiver the
     /// server hands to the one task that interprets it.
     deliveries: Deliveries,
@@ -133,7 +141,7 @@ impl DaemonState {
     /// Called before the daemon binds its endpoint, so a store that cannot be
     /// used is a startup failure rather than something discovered a
     /// millisecond after a client's hello succeeded (ADR 0002, Q14).
-    pub fn open(registry: &Path, launch_dir: &Path) -> Result<Self, StateError> {
+    pub fn open(registry: &Path, launch_dir: &Path, state_dir: &Path) -> Result<Self, StateError> {
         let store = Store::open(registry)?;
         let node = store.node();
         let store = Arc::new(Mutex::new(store));
@@ -158,6 +166,7 @@ impl DaemonState {
             launch_tokens,
             node,
             launch_dir: launch_dir.to_path_buf(),
+            state_dir: state_dir.to_path_buf(),
             deliveries,
             incoming: Mutex::new(Some(incoming)),
             resuming: Mutex::new(HashSet::new()),
@@ -205,6 +214,10 @@ impl DaemonState {
     /// Where per-launch provider configuration Corral owns is written.
     pub fn launch_dir(&self) -> &Path {
         &self.launch_dir
+    }
+
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
     }
 
     /// Where the hook endpoint puts what it received.
@@ -360,6 +373,61 @@ impl DaemonState {
         at: SystemTime,
     ) -> Result<BindingResolution, StateError> {
         self.off_the_reactor(move |store| store.bind(session, key, provenance, evidence, at))
+            .await
+    }
+
+    /// What the user chose about a provider's integration, if they chose.
+    ///
+    /// `None` is not `Disabled`: it says no decision is recorded, and the
+    /// caller resolves that against the installed default rather than reading
+    /// silence as a refusal (ADR 0013 D6).
+    pub async fn integration_intent(
+        self: &Arc<Self>,
+        provider: ProviderId,
+    ) -> Result<Option<RecordedIntent>, StateError> {
+        self.off_the_reactor(move |store| store.integration_intent(&provider))
+            .await
+    }
+
+    pub async fn set_integration_intent(
+        self: &Arc<Self>,
+        provider: ProviderId,
+        intent: IntegrationIntent,
+        at: SystemTime,
+    ) -> Result<(), StateError> {
+        self.off_the_reactor(move |store| store.set_integration_intent(&provider, intent, at))
+            .await
+    }
+
+    /// Whether an automatic repair may proceed, withdrawing the authority when
+    /// the budget is spent.
+    pub async fn authorize_repair(
+        self: &Arc<Self>,
+        fingerprint: RepairFingerprint,
+        now: SystemTime,
+    ) -> Result<RepairAuthority, StateError> {
+        self.off_the_reactor(move |store| {
+            store.authorize_repair(&fingerprint, now, policy::REPAIR_BUDGET)
+        })
+        .await
+    }
+
+    /// Record a repair that already succeeded.
+    pub async fn record_repair(
+        self: &Arc<Self>,
+        fingerprint: RepairFingerprint,
+        at: SystemTime,
+    ) -> Result<(), StateError> {
+        self.off_the_reactor(move |store| store.record_repair(&fingerprint, at))
+            .await
+    }
+
+    /// Re-arm automatic repair after an explicit user reconciliation.
+    pub async fn restore_repair_authority(
+        self: &Arc<Self>,
+        fingerprint: RepairFingerprint,
+    ) -> Result<(), StateError> {
+        self.off_the_reactor(move |store| store.restore_repair_authority(&fingerprint))
             .await
     }
 

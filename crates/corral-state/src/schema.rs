@@ -20,7 +20,7 @@ use crate::error::{FatalState, StateError};
 /// No migration exists yet: `STORAGE_EPOCH` is `dev`, development databases
 /// are disposable, and the first migration is written by the change that
 /// needs one. A store at any other version is refused rather than guessed at.
-pub(crate) const SCHEMA_VERSION: u32 = 3;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 
 /// How long an operation waits for another writer before giving up.
 ///
@@ -112,6 +112,50 @@ CREATE TABLE session_lineage (
     assurance         TEXT NOT NULL
 ) STRICT;
 
+-- What the user chose about provider integration, and the bounded self-repair
+-- authority that choice grants. Corral-owned facts with no external source of
+-- truth: the provider's own file cannot carry either, because an entry missing
+-- from it is indistinguishable from a provider rewrite (ADR 0013 D5/D6).
+--
+-- Node-scoped without a node column: one store belongs to one node, the way
+-- `node_identity` is one row. A provider's integration is a fact about this
+-- machine's configuration, so a second node's answer could never belong here.
+--
+-- Not projections. Nothing derives them from the event log, and a rebuild must
+-- leave them untouched — replaying the log would otherwise forget that the
+-- user turned integration off.
+CREATE TABLE integration_intent (
+    provider      TEXT PRIMARY KEY,
+    intent        TEXT NOT NULL,
+    changed_at_ms INTEGER NOT NULL
+) STRICT;
+
+-- One row per automatic repair Corral performed, so the rolling window can be
+-- counted after a restart. Rows outside every window are pruned when their
+-- fingerprint is next examined, never on a timer.
+CREATE TABLE integration_repairs (
+    provider       TEXT NOT NULL,
+    config_target  TEXT NOT NULL,
+    drift_class    TEXT NOT NULL,
+    repaired_at_ms INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX integration_repairs_by_fingerprint
+    ON integration_repairs (provider, config_target, drift_class);
+
+-- An open circuit breaker: repeated evidence that another authority keeps
+-- undoing Corral's integration. Sticky on purpose — the row carries no expiry,
+-- because the rolling window decides only when authority is withdrawn, never
+-- when it returns. Only an explicit user reconciliation deletes it, and a
+-- daemon restart must not (grill Q4′).
+CREATE TABLE integration_breakers (
+    provider      TEXT NOT NULL,
+    config_target TEXT NOT NULL,
+    drift_class   TEXT NOT NULL,
+    opened_at_ms  INTEGER NOT NULL,
+    PRIMARY KEY (provider, config_target, drift_class)
+) STRICT;
+
 CREATE TABLE command_receipts (
     command_id     TEXT PRIMARY KEY,
     fingerprint    TEXT NOT NULL,
@@ -129,6 +173,9 @@ CREATE TABLE command_receipts (
 /// The projections, in an order that lets them be emptied without tripping a
 /// foreign key. Replay does not use this order — it follows `global_seq`,
 /// which already places a row after whatever it references.
+///
+/// The `integration_*` tables are absent deliberately: they hold Corral-owned
+/// facts no event derives, so a rebuild must leave them alone.
 pub(crate) const PROJECTIONS: [&str; 5] = [
     "session_lineage",
     "runs",

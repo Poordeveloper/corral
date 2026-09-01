@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use corral_core::{
-    Assurance, BindingKind, CommandFingerprint, CommandId, CommandKind, ControlEligibility,
-    EvidenceSource, ExitCause, ExternalId, ProviderId, RunOrdinal,
+    Assurance, BindingKind, CommandFingerprint, CommandId, CommandKind, ConfigTarget,
+    ControlEligibility, EvidenceSource, ExitCause, ExternalId, IntegrationIntent, ProviderId,
+    RepairAuthority, RepairBudget, RepairFingerprint, RepairableDrift, RunOrdinal,
 };
 
 use super::*;
@@ -2774,4 +2775,259 @@ fn an_older_confirmation_of_equal_standing_is_still_stale() {
 
     assert_eq!(answered.assurance(), Assurance::Deterministic);
     assert_eq!(answered.evidence().observed_at(), instant(100));
+}
+
+// Integration intent and repair authority: Corral-owned facts the event log is
+// deliberately not the carrier of (ADR 0013 D6, grill Q4′).
+
+fn claude() -> ProviderId {
+    ProviderId::new("claude").expect("usable")
+}
+
+fn missing_entry() -> RepairFingerprint {
+    RepairFingerprint::new(
+        claude(),
+        ConfigTarget::ClaudeUserSettings,
+        RepairableDrift::Missing,
+    )
+}
+
+const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+fn three_a_day() -> RepairBudget {
+    RepairBudget::new(3, DAY)
+}
+
+/// Absence is not a decision. A caller that read it as `Disabled` would let a
+/// fresh install claim the user opted out.
+#[test]
+fn a_provider_the_user_never_decided_about_has_no_recorded_intent() {
+    let mut store = TestStore::new("intent-absent");
+
+    assert_eq!(store.integration_intent(&claude()).expect("read"), None);
+}
+
+#[test]
+fn an_integration_decision_survives_the_process_that_made_it() {
+    let mut store = TestStore::new("intent-durable");
+    store
+        .set_integration_intent(&claude(), IntegrationIntent::Disabled, instant(400))
+        .expect("record the decision");
+
+    store.reopen();
+
+    let recorded = store
+        .integration_intent(&claude())
+        .expect("read")
+        .expect("a decision");
+    assert_eq!(recorded.intent(), IntegrationIntent::Disabled);
+    assert_eq!(recorded.changed_at(), instant(400));
+}
+
+#[test]
+fn deciding_again_replaces_the_decision_rather_than_accumulating_one() {
+    let mut store = TestStore::new("intent-replace");
+    store
+        .set_integration_intent(&claude(), IntegrationIntent::Enabled, instant(100))
+        .expect("enable");
+    store
+        .set_integration_intent(&claude(), IntegrationIntent::Disabled, instant(200))
+        .expect("disable");
+
+    let recorded = store
+        .integration_intent(&claude())
+        .expect("read")
+        .expect("a decision");
+    assert_eq!(recorded.intent(), IntegrationIntent::Disabled);
+    assert_eq!(recorded.changed_at(), instant(200));
+}
+
+/// Rebuilding projections must not touch a user decision: the log never
+/// carried it, so a replay that cleared it would forget rather than recompute.
+#[test]
+fn rebuilding_projections_leaves_integration_intent_alone() {
+    let mut store = TestStore::new("intent-rebuild");
+    store
+        .set_integration_intent(&claude(), IntegrationIntent::Disabled, instant(300))
+        .expect("record");
+
+    store.rebuild_projections().expect("rebuild");
+
+    let recorded = store
+        .integration_intent(&claude())
+        .expect("read")
+        .expect("a decision");
+    assert_eq!(recorded.intent(), IntegrationIntent::Disabled);
+}
+
+#[test]
+fn a_budget_admits_its_repairs_and_then_withdraws_authority() {
+    let mut store = TestStore::new("repair-budget");
+    let fingerprint = missing_entry();
+
+    for repair in 0..3 {
+        let authority = store
+            .authorize_repair(&fingerprint, instant(1_000 + repair), three_a_day())
+            .expect("authorize");
+        assert_eq!(
+            authority,
+            RepairAuthority::Available {
+                remaining: 3 - u32::try_from(repair).expect("small"),
+            }
+        );
+        store
+            .record_repair(&fingerprint, instant(1_000 + repair))
+            .expect("record");
+    }
+
+    let fourth = store
+        .authorize_repair(&fingerprint, instant(1_003), three_a_day())
+        .expect("authorize");
+    assert_eq!(
+        fourth,
+        RepairAuthority::Withdrawn {
+            since: instant(1_003)
+        }
+    );
+    assert!(!fourth.permits_repair());
+}
+
+/// The whole point of the sticky breaker: a dotfiles authority that repaints
+/// the file once a day must not get a fresh repair every day.
+#[test]
+fn a_withdrawn_authority_does_not_return_when_the_window_slides_past_it() {
+    let mut store = TestStore::new("repair-sticky-window");
+    let fingerprint = missing_entry();
+    for repair in 0..3 {
+        store
+            .authorize_repair(&fingerprint, instant(1_000 + repair), three_a_day())
+            .expect("authorize");
+        store
+            .record_repair(&fingerprint, instant(1_000 + repair))
+            .expect("record");
+    }
+    store
+        .authorize_repair(&fingerprint, instant(1_003), three_a_day())
+        .expect("open the breaker");
+
+    let a_week_later = instant(1_003 + 7 * DAY.as_secs());
+    let authority = store
+        .authorize_repair(&fingerprint, a_week_later, three_a_day())
+        .expect("authorize");
+
+    assert_eq!(
+        authority,
+        RepairAuthority::Withdrawn {
+            since: instant(1_003)
+        }
+    );
+}
+
+#[test]
+fn a_daemon_restart_does_not_re_arm_a_withdrawn_authority() {
+    let mut store = TestStore::new("repair-sticky-restart");
+    let fingerprint = missing_entry();
+    for repair in 0..3 {
+        store
+            .authorize_repair(&fingerprint, instant(1_000 + repair), three_a_day())
+            .expect("authorize");
+        store
+            .record_repair(&fingerprint, instant(1_000 + repair))
+            .expect("record");
+    }
+    store
+        .authorize_repair(&fingerprint, instant(1_003), three_a_day())
+        .expect("open the breaker");
+
+    store.reopen();
+
+    let authority = store
+        .authorize_repair(&fingerprint, instant(1_004), three_a_day())
+        .expect("authorize");
+    assert_eq!(
+        authority,
+        RepairAuthority::Withdrawn {
+            since: instant(1_003)
+        }
+    );
+}
+
+#[test]
+fn an_explicit_reconciliation_is_what_re_arms_repair() {
+    let mut store = TestStore::new("repair-restore");
+    let fingerprint = missing_entry();
+    for repair in 0..3 {
+        store
+            .authorize_repair(&fingerprint, instant(1_000 + repair), three_a_day())
+            .expect("authorize");
+        store
+            .record_repair(&fingerprint, instant(1_000 + repair))
+            .expect("record");
+    }
+    store
+        .authorize_repair(&fingerprint, instant(1_003), three_a_day())
+        .expect("open the breaker");
+
+    store
+        .restore_repair_authority(&fingerprint)
+        .expect("reconcile");
+
+    let authority = store
+        .authorize_repair(&fingerprint, instant(1_004), three_a_day())
+        .expect("authorize");
+    assert_eq!(authority, RepairAuthority::Available { remaining: 3 });
+}
+
+/// Repairs that fell out of the window are forgotten, so a provider that drops
+/// Corral's entry once a month is repaired every time.
+#[test]
+fn repairs_older_than_the_window_do_not_count_against_the_budget() {
+    let mut store = TestStore::new("repair-window");
+    let fingerprint = missing_entry();
+    for repair in 0..3 {
+        store
+            .authorize_repair(&fingerprint, instant(1_000 + repair), three_a_day())
+            .expect("authorize");
+        store
+            .record_repair(&fingerprint, instant(1_000 + repair))
+            .expect("record");
+    }
+
+    let next_month = instant(1_000 + 30 * DAY.as_secs());
+    let authority = store
+        .authorize_repair(&fingerprint, next_month, three_a_day())
+        .expect("authorize");
+
+    assert_eq!(authority, RepairAuthority::Available { remaining: 3 });
+}
+
+/// Two drift classes in one file are two recurrences. A provider rewrite
+/// eating the entry must not spend the budget an upgrade's stale
+/// representation needs.
+#[test]
+fn one_drift_class_cannot_exhaust_anothers_budget() {
+    let mut store = TestStore::new("repair-fingerprint");
+    let missing = missing_entry();
+    let stale = RepairFingerprint::new(
+        claude(),
+        ConfigTarget::ClaudeUserSettings,
+        RepairableDrift::OldRepresentation,
+    );
+    for repair in 0..3 {
+        store
+            .authorize_repair(&missing, instant(1_000 + repair), three_a_day())
+            .expect("authorize");
+        store
+            .record_repair(&missing, instant(1_000 + repair))
+            .expect("record");
+    }
+    store
+        .authorize_repair(&missing, instant(1_003), three_a_day())
+        .expect("open the breaker");
+
+    let authority = store
+        .authorize_repair(&stale, instant(1_004), three_a_day())
+        .expect("authorize");
+
+    assert_eq!(authority, RepairAuthority::Available { remaining: 3 });
 }
