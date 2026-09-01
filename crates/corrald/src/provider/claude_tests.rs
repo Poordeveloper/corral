@@ -217,11 +217,25 @@ fn ordinary_provider_arguments_pass_through() {
         // of it, everything after it is the caller's own prompt text and none
         // of Corral's business (matrix scenario 12).
         vec!["--".to_owned(), "a prompt".to_owned()],
-        // A value that merely starts the same way is not the flag.
+        // A word that merely starts the same way is not the flag, and is
+        // refused for its own reason rather than that one.
+        vec!["--".to_owned(), "--settings-are-fine".to_owned()],
+    ] {
+        assert_eq!(refuse_arguments(&allowed), Ok(()), "{allowed:?}");
+    }
+
+    // Before the terminator it is an option this build cannot read, which is
+    // now its own refusal: a prefix of a refused flag is not that flag, and
+    // an unvalidated option is refused whatever it resembles (ADR 0012 D1).
+    for unread in [
         vec!["--settings-are-fine".to_owned()],
         vec!["--safe-mode-ish".to_owned()],
     ] {
-        assert_eq!(refuse_arguments(&allowed), Ok(()), "{allowed:?}");
+        let refusal = refuse_arguments(&unread).expect_err("refused");
+        assert!(
+            matches!(refusal, ArgumentRefused::NotValidatedForAManagedLaunch(_)),
+            "{unread:?} refused for the wrong reason: {refusal:?}",
+        );
     }
 }
 
@@ -507,6 +521,72 @@ fn a_required_value_flag_outside_the_help_still_swallows_the_separator() {
     ] {
         let args: Vec<String> = hidden.iter().map(|word| (*word).to_owned()).collect();
         assert!(refuse_arguments(&args).is_err(), "{hidden:?}");
+    }
+}
+
+/// The regression the founder ruling asks for by name: an option this build
+/// cannot read, placed before any attaching one, ends in a refused launch and
+/// never in an attached session (ADR 0012 D1).
+///
+/// It is the table-ageing case made concrete. Whichever way a later release
+/// spells an attachment, and whatever new option precedes it, the launch stops
+/// here — the safety no longer rests on the attaching list having found
+/// everything.
+#[test]
+fn an_unread_option_before_an_attaching_one_refuses_the_launch() {
+    for attaching in [
+        "--continue",
+        "--resume",
+        "--teleport",
+        "--cloud",
+        "--remote",
+        "--from-pr",
+    ] {
+        for shape in [
+            vec!["--an-option-from-a-later-release", attaching],
+            // The shape that made this a decision: the unknown option may be
+            // the one that swallows the terminator.
+            vec!["--an-option-from-a-later-release", "--", attaching],
+            vec!["-Z", "--", attaching],
+        ] {
+            let args: Vec<String> = shape.iter().map(|word| (*word).to_owned()).collect();
+            assert!(
+                refuse_arguments(&args).is_err(),
+                "{shape:?} must not reach a managed launch",
+            );
+        }
+    }
+}
+
+/// `--` is an option terminator only where the grammar establishes the parser
+/// is in a state to read it as one (ADR 0012 D3). Permanent: it is the
+/// assumption that produced two separate bypasses.
+///
+/// Measured, `--append-subagent-system-prompt -- --continue` hands the
+/// terminator to the option and continues a conversation; the same three words
+/// after a valueless flag are a prompt.
+#[test]
+fn the_terminator_is_only_a_terminator_where_the_grammar_says_so() {
+    // Awaiting a required value: the terminator is that value, and the words
+    // behind it are options again.
+    for swallowed in [
+        vec!["--append-subagent-system-prompt", "--", "--continue"],
+        vec!["--name", "--", "--resume"],
+        vec!["-n", "--", "-c"],
+    ] {
+        let args: Vec<String> = swallowed.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_err(), "{swallowed:?}");
+    }
+
+    // Not awaiting anything: a terminator, and everything behind it is data.
+    for terminated in [
+        vec!["--print", "--", "--continue"],
+        vec!["--name", "session", "--", "--continue"],
+        vec!["--model=opus", "--", "--resume"],
+        vec!["--", "--continue"],
+    ] {
+        let args: Vec<String> = terminated.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_ok(), "{terminated:?}");
     }
 }
 

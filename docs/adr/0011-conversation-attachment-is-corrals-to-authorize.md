@@ -19,6 +19,11 @@ R1–R2), raised by PR6 review ruling R3. Measured evidence:
 
 ## D1 — The third ground
 
+> **Amended by ADR 0012.** This ground still says what it says, but it no
+> longer carries the safety weight alone: a managed launch now passes only
+> arguments whose parsing Corral has verified, so a spelling missing from the
+> list below costs a refused launch rather than a silent attachment.
+
 > A caller's provider argument is refused when it would attach the launch to a
 > provider conversation that already exists. `session.resume` is the only path
 > authorized to do that.

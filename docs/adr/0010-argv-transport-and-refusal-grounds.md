@@ -66,6 +66,10 @@ dogfood decides, and PR8 owns what a person is told about evidence gaps.
 
 ## D2 — A caller argument is refused on two grounds, not one
 
+> **Superseded in part by ADR 0012 D1/D2.** The grounds below are now subsets
+> inside a verified grammar: an argument whose parsing Corral has not validated
+> is refused whether or not it matches any of them.
+>
 > **Superseded in part by ADR 0011 D1.** There are three grounds. The third is
 > an argument that would attach the launch to a conversation that already
 > exists — which Codex spells as a subcommand, so the surface ground below

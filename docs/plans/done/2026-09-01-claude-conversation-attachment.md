@@ -180,17 +180,29 @@ word is still judged, and a `--` after it is not trusted to end the options.
 Completeness now buys precision rather than safety, and the next missing entry
 costs a refused prompt instead of a missed attachment.
 
-What that does not fix, and what is now stated in the matrix's limits: the
-attachment list is a denylist over a surface the help does not fully expose,
-so a spelling nobody has found is a hole no algorithm here closes. Refusing
-every unrecognised caller flag would close it and is a policy decision, named
-rather than taken.
+That left one thing unfixed, and the founder ruled on it rather than letting it
+stand: the attachment list was still a denylist over a surface the help does
+not fully expose. ADR 0012 replaces the model — a managed launch now passes
+only options whose parsing Corral has verified for the supported version, and
+an unknown option refuses the launch before Claude is spawned
+(`docs/decisions/2026-09-01-claude-argument-allowlist.md`). The validator is a
+small grammar rather than a scan: known-forbidden, known-boolean,
+known-required-value, or unknown-and-refused. `--` is a terminator only where
+that grammar says the parser could read it as one.
+
+So the three refusal grounds keep their meaning but stop carrying completeness
+for safety, and the tables stop being a denylist that must never miss anything:
+a gap in them is now a refused launch, not a wrong attach. The cost — a new
+provider option is unusable through a managed launch until it is verified — is
+accepted, with no passthrough escape hatch in M1.
 
 ## Follow-ups
 
-- Whether a caller flag Corral does not recognise should be refused outright,
-  which is the only thing that makes the attachment inventory provably complete
-  — and a policy change wide enough to need its own acceptance.
+- Whether Codex's validator should adopt the same shape. Its parser does not
+  swallow a terminator, so the same reasoning lands differently there; ADR 0012
+  leaves it as its own task with its own evidence.
+- An explicit mode that leaves managed guarantees behind, if dogfood shows the
+  no-passthrough rule is painful (ADR 0012 D5, deferred rather than rejected).
 - Whether Claude gets a declared managed surface, and with it a refusal of its
   remaining subcommands (ADR 0011 D2, ruling R2).
 - Whether an argument that relocates execution should be refused, degraded, or

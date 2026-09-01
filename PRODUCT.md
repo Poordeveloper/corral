@@ -277,6 +277,13 @@ session must be discovered regardless of terminal host, including tmux;
 systematic blind spots are release blockers. Outside it, Corral degrades
 honestly rather than guessing.
 
+Inside a managed session that extends to the agent's own command line: Corral
+passes only the options whose parsing it has verified for the supported
+version, and refuses one it has not rather than guessing at what the words
+after it mean. A newly added provider option is therefore unavailable through a
+managed session until it is verified — a refusal a person can read and act on,
+chosen over a launch that quietly does something else (ADR 0012).
+
 Corral's integration is installed and enabled by default with the normal
 installation and is transparently disclosed; settings offer per-provider
 Disable Integration, which enters Limited awareness. Existing user and
