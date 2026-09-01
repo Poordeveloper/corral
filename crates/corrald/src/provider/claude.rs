@@ -77,9 +77,25 @@ const SEPARATOR: &str = "--";
 /// meant to create one being told to; the alternative is two agents on one
 /// conversation, silently (ADR 0011 D2).
 ///
+/// `--help` is not the inventory, and this list is not built from it. Two of
+/// these are proof: `--remote` is a deprecated alias `--help` never mentions,
+/// which reports itself as `--cloud` when refused; `--teleport` is in the help
+/// but its one-line description ("Resume a teleport session") is the only place
+/// it says so, and the binary's own text groups it with the others —
+/// "`--environment` cannot be combined with `--resume`, `--continue`, or
+/// `--teleport`", and "/teleport pulls a cloud session into a terminal on your
+/// own machine".
+///
 /// Version-sensitive by nature, held against what the matrix records
 /// (`docs/references/2026-09-01-claude-2.1.251-attachment-matrix.md`).
-const ATTACHING_FLAGS: [&str; 4] = ["--resume", "--continue", "--from-pr", "--cloud"];
+const ATTACHING_FLAGS: [&str; 6] = [
+    "--resume",
+    "--continue",
+    "--from-pr",
+    "--cloud",
+    "--remote",
+    "--teleport",
+];
 
 /// The short flags that join one, as single letters.
 ///
@@ -93,51 +109,154 @@ const ATTACHING_SHORTS: [char; 2] = ['r', 'c'];
 /// Commander is greedy here where clap is not: measured on 2.1.251,
 /// `claude -p --name -- --continue` answers `--continue`'s own error, so
 /// `--name` swallowed the separator and the flag behind it parsed normally.
-/// A scan that read that `--` as the end of options would wave through the
-/// attachment this refusal exists to stop — and one that read `-c` in
-/// `-n -c` as a request would refuse somebody's session name.
 ///
-/// Optional-value flags are deliberately absent. Measured, they do not take a
-/// dash-leading word: `-d -c` continues, and `--debug -- --continue` leaves
-/// the separator standing. Listing one here would skip a word that is really
-/// a flag, which is the same bypass from the other side.
+/// Measured, not read off `--help`, because this CLI's help is not its
+/// inventory: 40 of the entries below never appear there, and one of them —
+/// `--append-subagent-system-prompt` — reproduces that same bypass. Each was
+/// classified by asking the root parser itself, where a required value with
+/// none supplied answers `argument missing` and a name it does not know
+/// answers `unknown option`
+/// (`docs/references/2026-09-01-claude-2.1.251-attachment-matrix.md`,
+/// scenario 10).
 ///
-/// Taken from `--help` on this version, which is why it is long and why it is
-/// version-sensitive. An entry missing from it is a bypass; an entry that does
-/// not belong is one too.
-const REQUIRED_VALUE_FLAGS: [&str; 27] = [
+/// Completeness here buys precision, not safety. A flag missing from both this
+/// list and `VALUELESS_FLAGS` is unknown, and an unknown flag is read
+/// conservatively: the word after it is still judged, and a `--` after it is
+/// not trusted to be the separator. That is how a table that will age stays a
+/// source of friction rather than of holes.
+const REQUIRED_VALUE_FLAGS: [&str; 69] = [
     "--add-dir",
+    "--advisor",
     "--agent",
+    "--agent-color",
+    "--agent-id",
+    "--agent-name",
+    "--agent-type",
     "--agents",
+    "--allowed-tools",
+    "--append-subagent-system-prompt",
     "--append-system-prompt",
+    "--append-system-prompt-file",
     "--autocompact",
     "--betas",
+    "--channels",
+    "--correlation-id",
+    "--dangerously-load-development-channels",
     "--debug-file",
+    "--deep-link-cwd-b64",
+    "--deep-link-last-fetch",
+    "--deep-link-repo",
+    "--disallowed-tools",
     "--effort",
     "--environment",
     "--fallback-model",
     "--file",
+    "--forward-home-settings",
     "--input-format",
     "--json-schema",
+    "--managed-settings",
     "--max-budget-usd",
+    "--max-thinking-tokens",
+    "--max-turns",
     "--mcp-config",
+    "--messaging-socket-path",
     "--model",
     "--name",
+    "--on-branch",
     "--output-format",
+    "--parent-session-id",
     "--permission-mode",
+    "--permission-prompt-tool",
+    "--plan-mode-instructions",
     "--plugin-dir",
+    "--plugin-dir-no-mcp",
     "--plugin-url",
+    "--pool",
+    "--prefill",
+    "--prefill-b64",
+    "--ref",
     "--remote-control-session-name-prefix",
+    "--resume-drops-turn",
+    "--resume-session-at",
+    "--rewind-files",
+    "--sdk-url",
     "--session-id",
     "--setting-sources",
     "--settings",
     "--system-prompt",
+    "--system-prompt-file",
+    "--task-budget",
+    "--team-name",
+    "--teammate-mode",
+    "--thinking",
+    "--thinking-display",
     "--tools",
+    "--watch-artifact",
+    "--watch-artifact-no-autoreact",
+    "--workload",
+];
+
+/// The flags this build knows take no word from after them.
+///
+/// Their job is precision in the other direction: after one of these, a `--`
+/// really is the separator and everything behind it is prompt text. Measured
+/// the same way, and including the eight the help does not list. Optional-value
+/// flags are here rather than with the required ones — measured, they take no
+/// dash-leading word: `-d -c` continues, and `--debug -- --continue` leaves the
+/// separator standing.
+const VALUELESS_FLAGS: [&str; 43] = [
+    "--allow-dangerously-skip-permissions",
+    "--ax-screen-reader",
+    "--background",
+    "--bare",
+    "--bg",
+    "--brief",
+    "--chrome",
+    "--cloud",
+    "--continue",
+    "--dangerously-skip-permissions",
+    "--debug",
+    "--debug-to-stderr",
+    "--deep-link-origin",
+    "--disable-slash-commands",
+    "--enable-auto-mode",
+    "--exclude-dynamic-system-prompt-sections",
+    "--fork-session",
+    "--forward-subagent-text",
+    "--from-pr",
+    "--help",
+    "--ide",
+    "--include-hook-events",
+    "--include-partial-messages",
+    "--init",
+    "--init-only",
+    "--maintenance",
+    "--no-chrome",
+    "--no-session-persistence",
+    "--print",
+    "--prompt-suggestions",
+    "--remote",
+    "--remote-control",
+    "--replay-user-messages",
+    "--reply-on-resume",
+    "--restricted",
+    "--resume",
+    "--safe-mode",
+    "--strict-mcp-config",
+    "--teleport",
+    "--tmux",
+    "--verbose",
+    "--version",
+    "--worktree",
 ];
 
 /// The short flag whose value is required. `-n` is `--name`; `-d`, `-r`, and
 /// `-w` all take theirs optionally.
 const REQUIRED_VALUE_SHORTS: [char; 1] = ['n'];
+
+/// Every short flag this build knows. A cluster holding a letter outside this
+/// set is a cluster this build cannot read, and is treated as such.
+const KNOWN_SHORTS: [char; 8] = ['c', 'd', 'h', 'n', 'p', 'r', 'v', 'w'];
 
 /// The short flags that take a value, which is the rest of their cluster.
 ///
@@ -240,21 +359,32 @@ pub fn compose_launch(
 /// has to survive learning nothing — it does, as an identity that never binds
 /// rather than as a false one.
 pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
-    let mut swallowed = false;
+    let mut reach = Reach::Leaves;
     for (position, argument) in args.iter().enumerate() {
         // Not an argument: the option before it required a value and took this
         // word as one, whatever it looks like. Reading it as a flag would
-        // refuse somebody's session name; reading the *separator* as one is
-        // how a later `--continue` gets through.
-        if swallowed {
-            swallowed = false;
+        // refuse somebody's session name.
+        if reach == Reach::Takes {
+            reach = Reach::Leaves;
             continue;
         }
-        // Everything after it is prompt text, so there is nothing left to
-        // refuse — and nothing there can reach the injection Corral put ahead
-        // of every caller word.
         if argument == SEPARATOR {
-            return Ok(());
+            // Everything after a real separator is prompt text, so there is
+            // nothing left to refuse — and nothing there can reach the
+            // injection Corral put ahead of every caller word.
+            //
+            // After a flag this build cannot read, it is not known to be one.
+            // Commander would hand it to that flag if the flag wanted a value,
+            // and then the words behind it are options again — which is how
+            // `--name -- --continue` attaches. Unknown resolves to reading on:
+            // the cost is refusing a prompt somebody wrote after a flag this
+            // build has never heard of, and the alternative is a hole that
+            // opens every time this CLI grows an option.
+            if reach == Reach::Leaves {
+                return Ok(());
+            }
+            reach = Reach::Leaves;
+            continue;
         }
         if competes_with_injection(argument) {
             return Err(ArgumentRefused::CompetesWithInjection(argument.clone()));
@@ -264,32 +394,65 @@ pub fn refuse_arguments(args: &[String]) -> Result<(), ArgumentRefused> {
                 argument.clone(),
             ));
         }
-        swallowed = takes_the_next_word(argument);
+        reach = reach_of(argument);
     }
     Ok(())
 }
 
-/// Whether this CLI would take the word after this one as its value.
+/// What this word does to the one after it.
 ///
-/// Only a required value is greedy enough to matter, and only when it is not
-/// already carried inside this word: `--name=x` and `-nx` have theirs, and
-/// `--name` and `-pn` do not.
-fn takes_the_next_word(argument: &str) -> bool {
+/// Three answers rather than two, because "this build has never seen this
+/// flag" is not the same as "this flag takes nothing", and treating it as the
+/// second is what turns every option a later release adds into a bypass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    /// It takes the next word as its value, whatever the word looks like.
+    Takes,
+    /// It leaves the next word alone.
+    Leaves,
+    /// This build cannot say. Read the next word as an argument anyway, and do
+    /// not trust a `--` there to be the separator.
+    Unknown,
+}
+
+/// How far this word reaches, read the way this CLI reads it.
+fn reach_of(argument: &str) -> Reach {
     if REQUIRED_VALUE_FLAGS.contains(&argument) {
-        return true;
+        return Reach::Takes;
+    }
+    if VALUELESS_FLAGS.contains(&argument) {
+        return Reach::Leaves;
+    }
+    // A long flag carrying its value inside the word, and anything that is not
+    // a flag at all: neither reaches past itself.
+    if argument.starts_with("--") {
+        return if argument.contains('=') {
+            Reach::Leaves
+        } else {
+            Reach::Unknown
+        };
     }
     let Some(cluster) = short_cluster(argument) else {
-        return false;
+        return Reach::Leaves;
     };
     let mut letters = cluster.chars();
     while let Some(letter) = letters.next() {
         if VALUE_SHORTS.contains(&letter) {
             // The rest of this word is its value, so it reaches past the word
             // only when there is no rest and it cannot do without one.
-            return letters.next().is_none() && REQUIRED_VALUE_SHORTS.contains(&letter);
+            return if letters.next().is_some() {
+                Reach::Leaves
+            } else if REQUIRED_VALUE_SHORTS.contains(&letter) {
+                Reach::Takes
+            } else {
+                Reach::Leaves
+            };
+        }
+        if !KNOWN_SHORTS.contains(&letter) {
+            return Reach::Unknown;
         }
     }
-    false
+    Reach::Leaves
 }
 
 /// This argument as a cluster of short flags, or `None` when it is not one.

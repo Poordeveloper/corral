@@ -162,8 +162,35 @@ Clap does not behave this way: `codex -C -- resume --last` errors rather than
 swallowing the separator, so the Codex adapter is unaffected and its own model
 stays right for its own parser. Matrix scenario 9 holds all of it.
 
+## What the second review round changed
+
+`--help` is not this CLI's inventory, and both tables had been read off it.
+Measured against the installed binary: 69 root options require a value and 40
+never appear in the help, one of which — `--append-subagent-system-prompt` —
+reproduced the separator-swallow bypass at `bb33137`. Two attaching spellings
+were missing too: `--remote`, a hidden deprecated alias that names itself
+`--cloud` when refused, and `--teleport`, whose help line says "Resume a
+teleport session" and which the binary's own text groups with `--resume` and
+`--continue`.
+
+Patching the tables would have left the same shape of defect waiting for the
+next release, so the algorithm changed with them: a flag in neither table is
+**unknown**, and an unknown flag no longer makes the word after it safe — the
+word is still judged, and a `--` after it is not trusted to end the options.
+Completeness now buys precision rather than safety, and the next missing entry
+costs a refused prompt instead of a missed attachment.
+
+What that does not fix, and what is now stated in the matrix's limits: the
+attachment list is a denylist over a surface the help does not fully expose,
+so a spelling nobody has found is a hole no algorithm here closes. Refusing
+every unrecognised caller flag would close it and is a policy decision, named
+rather than taken.
+
 ## Follow-ups
 
+- Whether a caller flag Corral does not recognise should be refused outright,
+  which is the only thing that makes the attachment inventory provably complete
+  — and a policy change wide enough to need its own acceptance.
 - Whether Claude gets a declared managed surface, and with it a refusal of its
   remaining subcommands (ADR 0011 D2, ruling R2).
 - Whether an argument that relocates execution should be refused, degraded, or

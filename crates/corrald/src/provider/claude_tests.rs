@@ -455,3 +455,99 @@ fn a_word_a_required_option_swallows_is_not_read_as_an_argument() {
         assert!(refuse_arguments(&args).is_ok(), "{theirs:?}");
     }
 }
+
+/// `--help` is not this CLI's inventory, and a refusal built from it is a
+/// refusal with holes.
+///
+/// `--remote` appears nowhere in the help and is a deprecated alias for
+/// `--cloud` — measured, it answers with `--cloud`'s own name. `--teleport` is
+/// in the help, but only its one-line description says what it does, and the
+/// binary's own text puts it in the family: "`--environment` cannot be
+/// combined with `--resume`, `--continue`, or `--teleport`", and "/teleport
+/// pulls a cloud session into a terminal on your own machine".
+#[test]
+fn an_attaching_flag_the_help_does_not_explain_is_still_one() {
+    for spelling in [
+        vec!["--remote", "d2dfcafd-9a73-4162-aa70-dddf99aa6e75"],
+        vec!["--remote=d2dfcafd-9a73-4162-aa70-dddf99aa6e75"],
+        vec!["--teleport"],
+        vec!["--teleport", "d2dfcafd-9a73-4162-aa70-dddf99aa6e75"],
+    ] {
+        let args: Vec<String> = spelling.iter().map(|word| (*word).to_owned()).collect();
+        let refusal = refuse_arguments(&args).expect_err(&format!("refused: {spelling:?}"));
+        assert!(
+            matches!(
+                refusal,
+                ArgumentRefused::AttachesToAnExistingConversation(_)
+            ),
+            "{spelling:?} refused for the wrong reason: {refusal:?}",
+        );
+    }
+}
+
+/// The separator-swallow bypass, reached through a required-value flag the
+/// help does not list.
+///
+/// Measured: `claude -p --append-subagent-system-prompt -- --continue` answers
+/// `--continue`'s own error, so the option took the separator and the flag
+/// behind it parsed. Every root option that requires a value is in the table
+/// for this reason — one missing entry is one bypass.
+#[test]
+fn a_required_value_flag_outside_the_help_still_swallows_the_separator() {
+    for hidden in [
+        vec!["--append-subagent-system-prompt", "--", "--continue"],
+        vec!["--system-prompt-file", "--", "--resume"],
+        vec![
+            "--permission-prompt-tool",
+            "--",
+            "--settings",
+            "/tmp/theirs.json",
+        ],
+        vec!["--ref", "--", "--continue"],
+    ] {
+        let args: Vec<String> = hidden.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_err(), "{hidden:?}");
+    }
+}
+
+/// The property that makes an ageing table a source of friction rather than of
+/// holes: a flag this build cannot read is not assumed to take nothing.
+///
+/// After a known valueless flag, an inline-value flag, or an ordinary word, a
+/// `--` is the separator and everything behind it is prompt text. After a flag
+/// this build has never heard of, it is not: commander would hand it over if
+/// that flag wanted a value, and the words behind it would be options again.
+/// So the scan reads on, and the cost is refusing a prompt written after an
+/// unknown flag rather than missing an attachment behind one.
+#[test]
+fn an_unreadable_flag_does_not_make_the_next_word_safe() {
+    for conservative in [
+        vec!["--a-flag-from-a-later-release", "--", "--continue"],
+        vec![
+            "--a-flag-from-a-later-release",
+            "--",
+            "--settings",
+            "/tmp/x.json",
+        ],
+        // An unknown letter makes the whole cluster unreadable.
+        vec!["-z", "--", "--continue"],
+    ] {
+        let args: Vec<String> = conservative.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_err(), "{conservative:?}");
+    }
+
+    for known in [
+        // Measured valueless, so the separator is one.
+        vec!["--print", "--", "--continue"],
+        vec!["-p", "--", "--continue"],
+        vec!["--verbose", "--", "--resume"],
+        // Its value is inside the word, so it reaches no further.
+        vec!["--model=opus", "--", "--continue"],
+        vec!["-nname", "--", "--continue"],
+        // An ordinary word reaches nothing at all.
+        vec!["hello", "--", "--continue"],
+    ] {
+        let args: Vec<String> = known.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_ok(), "{known:?}");
+    }
+}
