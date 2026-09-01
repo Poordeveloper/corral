@@ -119,3 +119,12 @@ recorded in the matrix, not law. Whether Codex's validator adopts the same
 shape: its parser does not swallow a terminator (`codex -C -- resume` errors
 instead), so the same reasoning reaches a different implementation, and
 tightening it is a separate task with its own evidence.
+
+The cross-provider rule this does settle:
+
+> Share the safety invariant, not the parser assumptions.
+
+Every provider may be held to "a managed launch must not let unverified argv
+rewrite its control semantics". How each one's option/data boundary is found is
+that provider's own parser evidence, per version — copying one adapter's
+reading into another is how a measured fact quietly becomes an assumption.

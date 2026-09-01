@@ -15,10 +15,11 @@ use std::path::Path;
 
 use corral_core::{ExternalId, RunId};
 use serde_json::{Value, json};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::claude_options::{
     KNOWN_SHORTS, REQUIRED_VALUE_FLAGS, REQUIRED_VALUE_SHORTS, VALUE_SHORTS, VALUELESS_FLAGS,
+    VERIFIED_AGAINST,
 };
 use super::launch::{InjectedSettings, InjectionFailed, RelayInvocation};
 use super::{
@@ -238,6 +239,13 @@ enum Reads {
 /// managed launch that guessed would be a launch Corral believes it is
 /// watching and is not (ADR 0012 D1, D2).
 fn read(argument: &str, position: usize) -> Result<Reads, ArgumentRefused> {
+    // The governing invariant, and the one two bypasses came from ignoring:
+    //
+    //   a token becomes data only because the verified grammar says parsing has
+    //   transitioned to data, never merely because of its spelling or position.
+    //
+    // So every branch below decides what the *parser* does with this word, and
+    // the only way out without a decision is a refusal.
     if competes_with_injection(argument) {
         return Err(ArgumentRefused::CompetesWithInjection(argument.to_owned()));
     }
@@ -263,17 +271,13 @@ fn read(argument: &str, position: usize) -> Result<Reads, ArgumentRefused> {
                 Ok(Reads::TheFlagAlone)
             }
             _ if !argument.starts_with('-') => Ok(Reads::TheFlagAlone),
-            _ => Err(ArgumentRefused::NotValidatedForAManagedLaunch(
-                argument.to_owned(),
-            )),
+            _ => Err(unvalidated(argument)),
         };
     };
     let mut letters = cluster.chars();
     while let Some(letter) = letters.next() {
         if !KNOWN_SHORTS.contains(&letter) {
-            return Err(ArgumentRefused::NotValidatedForAManagedLaunch(
-                argument.to_owned(),
-            ));
+            return Err(unvalidated(argument));
         }
         if VALUE_SHORTS.contains(&letter) {
             // The rest of this word is its value, so it reaches past the word
@@ -288,6 +292,20 @@ fn read(argument: &str, position: usize) -> Result<Reads, ArgumentRefused> {
         }
     }
     Ok(Reads::TheFlagAlone)
+}
+
+/// Refuse a word this build cannot read, and say what it was read against.
+///
+/// The version goes to the log rather than to the person: what they need is
+/// which argument stopped the launch, and what a maintainer needs is which
+/// grammar was holding it (ADR 0012 D4).
+fn unvalidated(argument: &str) -> ArgumentRefused {
+    debug!(
+        argument,
+        verified_against = VERIFIED_AGAINST,
+        "a caller argument is outside the provider command line this build has verified",
+    );
+    ArgumentRefused::NotValidatedForAManagedLaunch(argument.to_owned())
 }
 
 /// This argument as a cluster of short flags, or `None` when it is not one.

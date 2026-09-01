@@ -631,3 +631,79 @@ fn an_unreadable_flag_does_not_make_the_next_word_safe() {
         assert!(refuse_arguments(&args).is_ok(), "{known:?}");
     }
 }
+
+/// The token-role sweep, mechanically over every form this grammar has to
+/// place a word in.
+///
+/// The invariant under test is the one two bypasses came from ignoring:
+///
+/// > a token becomes data only because the verified grammar says parsing has
+/// > transitioned to data, never merely because of its spelling or position.
+///
+/// So each row is a shape rather than an example, and the expectation is about
+/// the role the parser gives the word — not about what it looks like.
+#[test]
+fn every_token_form_is_placed_by_the_grammar_rather_than_by_its_spelling() {
+    // A word whose role is "value" or "data" cannot refuse, however it is
+    // spelled.
+    for data in [
+        // A required value, joined and separated.
+        vec!["--name=--continue"],
+        vec!["--name", "--continue"],
+        // A short flag's value is the rest of its own word, so what follows is
+        // an ordinary word again.
+        vec!["-nname", "hello"],
+        vec!["-p", "hello"],
+        // Repeated options, each read on its own.
+        vec!["--name", "one", "--name", "two"],
+        vec!["--model", "opus", "--model", "sonnet"],
+        // A required value left missing is the provider's error to raise, not
+        // Corral's to guess at: nothing here is refused for it.
+        vec!["--name"],
+        vec!["--model", "--name"],
+        // `--` sitting in a required-value slot is that value.
+        vec!["--name", "--"],
+        // Past a terminator the grammar established, every word is data —
+        // including ones that would be refused anywhere before it.
+        vec![
+            "--",
+            "--continue",
+            "--resume",
+            "--settings",
+            "--zzz-unknown",
+        ],
+        vec!["--print", "--", "--teleport"],
+    ] {
+        let args: Vec<String> = data.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_ok(), "{data:?}");
+    }
+
+    // A word whose role is "option" is judged, in every spelling of it.
+    for option in [
+        (vec!["--continue"], "attaching, bare"),
+        (vec!["--resume=x"], "attaching, joined value"),
+        (vec!["-rx"], "attaching, short with attached value"),
+        (vec!["-pc"], "attaching, inside a cluster"),
+        (vec!["--settings=x"], "competing, joined value"),
+        (vec!["--zzz-unknown"], "unread, long"),
+        (vec!["--zzz-unknown=1"], "unread, long with a joined value"),
+        (vec!["-Z"], "unread, short"),
+        (
+            vec!["--name", "one", "--continue"],
+            "after a consumed value",
+        ),
+        (
+            vec!["-nname", "--continue"],
+            "after a short flag that carried its value inside its own word",
+        ),
+        (vec!["--print", "--continue"], "after a valueless option"),
+        (
+            vec!["hello", "--continue"],
+            "after a positional, which does not end parsing",
+        ),
+    ] {
+        let (shape, why) = option;
+        let args: Vec<String> = shape.iter().map(|word| (*word).to_owned()).collect();
+        assert!(refuse_arguments(&args).is_err(), "{shape:?} ({why})");
+    }
+}

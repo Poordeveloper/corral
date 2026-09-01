@@ -1,4 +1,11 @@
-//! The verified command line of the Claude Code versions this build supports.
+//! The verified command line of one Claude Code version family.
+//!
+//! **Not "Claude's grammar".** It is what one measured build's parser does,
+//! bound to `VERIFIED_AGAINST` and to the row this provider holds in
+//! `PRODUCT.md` §10's supported provider/version matrix. A newer executable
+//! does not extend it: an option it adds is unknown here, and unknown refuses
+//! the launch (ADR 0012 D1). The way that is repaired is the pipeline below,
+//! not a build that happens to be newer.
 //!
 //! Evidence, not policy. What each entry *means* — which options are refused
 //! and why — belongs to `super::claude`; this module only says what the
@@ -25,6 +32,16 @@
 //!
 //! A gap here is a false rejection, never a wrong attach: an option in neither
 //! list is unknown, and an unknown option refuses the launch (ADR 0012 D1).
+
+/// The build these lists were measured against.
+///
+/// Held as a value rather than only as prose so that the binding to a version
+/// is a fact in the code, and so a person reading a refusal in a log can see
+/// what Corral was holding the command line against. Corral does **not** ask
+/// the installed executable for its version and does not gate a launch on it:
+/// a newer Claude runs, and only an option this file has never seen is
+/// refused.
+pub const VERIFIED_AGAINST: &str = "2.1.251";
 
 /// The options that take the next word as their value, whatever it looks like.
 ///
