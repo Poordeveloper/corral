@@ -132,12 +132,20 @@ claude|codex` over new RPC methods (daemon executes; ADR 0013 D1). Enable
 runs install and reports triggers honestly; disable runs uninstall and
 sets intent. Disclosure copy follows PRODUCT §9's one-line framing.
 
-**9. The matrix, at merge.** A dated PR7 reference with the PR5/PR6
-fields: merge scenarios over the corpus (each D4 trigger observed
-first-party), drift/rewrite scenarios, double-fire, discovery coverage
-across terminal hosts including tmux (seeding ROADMAP §9.2's
-coverage-audit definition), Codex occupied/absent `notify`, and the
-ancestry walk per host. `PRODUCT.md` §10 gains the PR7 matrix rows.
+**9. The matrix, at merge — partial.** Recorded 2026-09-02:
+`docs/references/2026-09-02-pr7-integration-matrix.md`. Verified first-party
+on Linux: the whole suite including the real `/proc` observation and a sweep
+over the real process table; install/status/disable against a real Claude
+2.1.252 configuration with the written entry inspected; a real provider
+session running under Corral's guarded entries with no hook error in its UI;
+idle exit behaving as designed. **Not** verified end to end: discovery
+promoting a delivery to a binding, and the sweep producing a provisional row
+— both need a faithful `/proc/<pid>/exe`, which neither udocker engine
+provides (PRoot rewrites the link; Fakechroot breaks path interception for
+the daemon's raw syscalls). Closing it needs real namespaces (rootless
+Podman or Docker, needing an administrator on that host) or a machine where
+the provider may run outside a container. Codex's live half waits on the
+same environment. `PRODUCT.md` §10 gains the PR7 rows from that record.
 
 **10. Docs.** Glossary adds **Integration intent**, **Runtime
 observation**, and **Succession** (nouns ADR 0013/0014 introduce) in the

@@ -399,18 +399,22 @@ fn a_file_replaced_while_corral_writes_aborts_rather_than_clobbering() {
     );
 }
 
+/// A directory Corral cannot write into refuses the write and changes
+/// nothing.
+///
+/// The unwritability is a path that cannot be a directory rather than a mode
+/// bit, because a mode bit does not bind every uid: root ignores directory
+/// permissions, so a chmod-based test would assert nothing wherever Corral
+/// runs as root — a container, a CI image — and would look like coverage
+/// while providing none.
 #[test]
 fn a_configuration_directory_that_cannot_be_written_refuses_the_write() {
-    let scratch = Scratch::new("trigger-readonly");
+    let scratch = Scratch::new("trigger-unwritable");
     let target = scratch.target(KnownProvider::Claude);
-    scratch.seed(&target, A_USERS_CLAUDE_SETTINGS);
     let directory = target.path().parent().expect("a directory");
-    let mode = std::fs::metadata(directory)
-        .expect("metadata")
-        .permissions();
-    let mut read_only = mode.clone();
-    read_only.set_mode(0o500);
-    std::fs::set_permissions(directory, read_only).expect("make it read-only");
+    std::fs::create_dir_all(directory.parent().expect("a parent")).expect("create the parent");
+    // Where the provider's directory would be, there is a file.
+    std::fs::write(directory, b"not a directory").expect("occupy the path");
 
     let standing = install(
         &target,
@@ -419,12 +423,15 @@ fn a_configuration_directory_that_cannot_be_written_refuses_the_write() {
         &scratch.state_dir(),
     );
 
-    std::fs::set_permissions(directory, mode).expect("restore");
-    assert!(matches!(
-        standing,
-        Standing::Refused(Trigger::NotWritable { .. })
-    ));
-    assert_eq!(scratch.read(&target), A_USERS_CLAUDE_SETTINGS);
+    assert!(
+        matches!(standing, Standing::Refused(Trigger::NotWritable { .. })),
+        "{standing:?}",
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory).expect("read"),
+        "not a directory",
+        "corral wrote over something that was not its to touch",
+    );
 }
 
 #[test]
