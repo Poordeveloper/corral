@@ -1,0 +1,3 @@
+notify = "/usr/local/bin/my-notifier"
+
+model = "gpt-5.6"

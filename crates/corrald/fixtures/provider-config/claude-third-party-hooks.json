@@ -1,0 +1,74 @@
+{
+  "env": {
+    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
+    "ENABLE_TOOL_SEARCH": "true",
+    "USE_BUILTIN_RIPGREP": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(rg:*)",
+      "Bash(git add:*)",
+      "Read($HOME/.claude/skills/**)"
+    ],
+    "deny": [
+      "Bash(sudo:*)",
+      "Bash(rm:*)",
+      "Read(**/*token*)",
+      "Write(**/secrets/**)"
+    ],
+    "defaultMode": "plan"
+  },
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-notify permission"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-notify plan"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-notify stop"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.ts",
+    "padding": 0
+  },
+  "enabledPlugins": {
+    "code-simplifier@claude-plugins-official": true,
+    "skill-creator@claude-plugins-official": true
+  },
+  "language": "Japanese",
+  "alwaysThinkingEnabled": true,
+  "effortLevel": "high",
+  "preferredNotifChannel": "notifications_disabled",
+  "showTurnDuration": false,
+  "teammateMode": "in-process",
+  "skipAutoPermissionPrompt": true,
+  "model": "fable"
+}

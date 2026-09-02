@@ -1,0 +1,7 @@
+{
+  "disableAllHooks": true,
+  "permissions": {
+    "defaultMode": "plan"
+  },
+  "model": "fable"
+}

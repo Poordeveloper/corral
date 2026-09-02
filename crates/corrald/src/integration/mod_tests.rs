@@ -88,39 +88,20 @@ fn now() -> SystemTime {
     SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000)
 }
 
-/// A real user's Claude settings, from the 2026-09-02 corpus.
-const A_USERS_CLAUDE_SETTINGS: &str = r#"{
-  "env": {
-    "USE_BUILTIN_RIPGREP": "1"
-  },
-  "permissions": {
-    "allow": [
-      "Bash(ls:*)"
-    ]
-  },
-  "hooks": {
-    "Notification": [
-      {
-        "matcher": "permission_prompt",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "claude-notify permission"
-          }
-        ]
-      }
-    ]
-  },
-  "model": "fable"
-}
-"#;
-
-const A_USERS_CODEX_CONFIG: &str = r#"# my codex setup
-model = "gpt-5.6"
-
-[projects."/Users/someone/work"]
-trust_level = "trusted"
-"#;
+/// The corpus, loaded rather than retyped: what the merge engine is proven
+/// against is what people actually have, and a shape a test author imagined
+/// would prove nothing (`crates/corrald/fixtures/provider-config/README.md`).
+const A_USERS_CLAUDE_SETTINGS: &str =
+    include_str!("../../fixtures/provider-config/claude-third-party-hooks.json");
+const CLAUDE_HOOKS_DISABLED: &str =
+    include_str!("../../fixtures/provider-config/claude-hooks-disabled.json");
+const CLAUDE_NOT_JSON: &str = include_str!("../../fixtures/provider-config/claude-not-json.json");
+const A_USERS_CODEX_CONFIG: &str =
+    include_str!("../../fixtures/provider-config/codex-user-config.toml");
+const CODEX_NOTIFIER_OCCUPIED: &str =
+    include_str!("../../fixtures/provider-config/codex-notifier-occupied.toml");
+const CODEX_NOTIFY_ILL_TYPED: &str =
+    include_str!("../../fixtures/provider-config/codex-notify-ill-typed.toml");
 
 #[test]
 fn a_provider_with_no_configuration_file_is_not_installed() {
@@ -280,8 +261,7 @@ fn uninstall_returns_the_file_to_what_the_user_had() {
 fn a_settings_file_with_comments_refuses_the_write_and_changes_nothing() {
     let scratch = Scratch::new("trigger-jsonc");
     let target = scratch.target(KnownProvider::Claude);
-    let jsonc = "{\n  // mine\n  \"model\": \"fable\"\n}\n";
-    scratch.seed(&target, jsonc);
+    scratch.seed(&target, CLAUDE_NOT_JSON);
 
     let standing = install(
         &target,
@@ -294,7 +274,7 @@ fn a_settings_file_with_comments_refuses_the_write_and_changes_nothing() {
         standing,
         Standing::Refused(Trigger::Unparseable { .. })
     ));
-    assert_eq!(scratch.read(&target), jsonc);
+    assert_eq!(scratch.read(&target), CLAUDE_NOT_JSON);
 }
 
 #[test]
@@ -324,8 +304,7 @@ fn a_hooks_key_of_the_wrong_shape_refuses_the_write() {
 fn hooks_disabled_by_the_user_refuses_the_write_and_is_never_overridden() {
     let scratch = Scratch::new("trigger-disabled");
     let target = scratch.target(KnownProvider::Claude);
-    let disabled = "{\"disableAllHooks\": true}";
-    scratch.seed(&target, disabled);
+    scratch.seed(&target, CLAUDE_HOOKS_DISABLED);
 
     let standing = install(
         &target,
@@ -338,7 +317,7 @@ fn hooks_disabled_by_the_user_refuses_the_write_and_is_never_overridden() {
         standing,
         Standing::Refused(Trigger::HooksDisabled { .. })
     ));
-    assert_eq!(scratch.read(&target), disabled);
+    assert_eq!(scratch.read(&target), CLAUDE_HOOKS_DISABLED);
 }
 
 /// Corral never overwrites a non-Corral Codex notifier merely to obtain
@@ -347,8 +326,7 @@ fn hooks_disabled_by_the_user_refuses_the_write_and_is_never_overridden() {
 fn an_occupied_codex_notifier_refuses_the_write_and_is_preserved() {
     let scratch = Scratch::new("trigger-occupied");
     let target = scratch.target(KnownProvider::Codex);
-    let occupied = format!("notify = [\"/usr/local/bin/mine\"]\n{A_USERS_CODEX_CONFIG}");
-    scratch.seed(&target, &occupied);
+    scratch.seed(&target, CODEX_NOTIFIER_OCCUPIED);
 
     let standing = install(
         &target,
@@ -358,7 +336,7 @@ fn an_occupied_codex_notifier_refuses_the_write_and_is_preserved() {
     );
 
     assert_eq!(standing, Standing::Refused(Trigger::NotifierOccupied));
-    assert_eq!(scratch.read(&target), occupied);
+    assert_eq!(scratch.read(&target), CODEX_NOTIFIER_OCCUPIED);
 }
 
 #[test]
@@ -583,4 +561,95 @@ fn a_target_names_the_file_it_acts_on() {
 
     assert_eq!(target.config_target(), ConfigTarget::CodexUserConfig);
     assert!(Path::new(target.path()).ends_with("config.toml"));
+}
+
+/// Measured: codex-cli 0.152.0 refuses to start on a `notify` of the wrong
+/// type, naming a line and column. It is the user's file to fix, and never
+/// something Corral quietly normalizes into an array.
+#[test]
+fn an_ill_typed_codex_notifier_refuses_the_write_and_is_left_as_it_is() {
+    let scratch = Scratch::new("trigger-ill-typed");
+    let target = scratch.target(KnownProvider::Codex);
+    scratch.seed(&target, CODEX_NOTIFY_ILL_TYPED);
+
+    let standing = install(
+        &target,
+        &relay(KnownProvider::Codex),
+        now(),
+        &scratch.state_dir(),
+    );
+
+    assert!(matches!(
+        standing,
+        Standing::Refused(Trigger::IncompatibleStructure { .. })
+    ));
+    assert_eq!(scratch.read(&target), CODEX_NOTIFY_ILL_TYPED);
+}
+
+/// The merge gate's own claim, asserted rather than asserted about: install
+/// then uninstall over every file in the corpus returns each one to what the
+/// user had, or refuses it and changes nothing at all. There is no third
+/// outcome — normalizing a file until Corral can edit it is the thing this
+/// forbids (grill Q7′).
+#[test]
+fn the_corpus_survives_an_install_and_uninstall_round_trip() {
+    let corpus = [
+        (
+            KnownProvider::Claude,
+            "claude-third-party",
+            A_USERS_CLAUDE_SETTINGS,
+        ),
+        (
+            KnownProvider::Claude,
+            "claude-disabled",
+            CLAUDE_HOOKS_DISABLED,
+        ),
+        (KnownProvider::Claude, "claude-not-json", CLAUDE_NOT_JSON),
+        (KnownProvider::Codex, "codex-user", A_USERS_CODEX_CONFIG),
+        (
+            KnownProvider::Codex,
+            "codex-occupied",
+            CODEX_NOTIFIER_OCCUPIED,
+        ),
+        (
+            KnownProvider::Codex,
+            "codex-ill-typed",
+            CODEX_NOTIFY_ILL_TYPED,
+        ),
+    ];
+
+    for (provider, name, original) in corpus {
+        let scratch = Scratch::new(name);
+        let target = scratch.target(provider);
+        scratch.seed(&target, original);
+
+        let installed = install(&target, &relay(provider), now(), &scratch.state_dir());
+        if matches!(installed, Standing::Refused(_)) {
+            assert_eq!(
+                scratch.read(&target),
+                original,
+                "{name}: a refused install changed the file",
+            );
+            continue;
+        }
+        assert_eq!(installed, Standing::Installed, "{name}");
+
+        uninstall(&target, &relay(provider), now(), &scratch.state_dir());
+
+        let after = scratch.read(&target);
+        match provider {
+            // Claude's own writes reserialize the document, so the round trip
+            // is compared as values: matching the provider's normalization is
+            // what preserving this file means (grill Q3′).
+            KnownProvider::Claude => assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&after).expect("valid JSON"),
+                serde_json::from_str::<serde_json::Value>(original).expect("valid JSON"),
+                "{name}",
+            ),
+            // Codex's file is compared byte for byte: the user's comments,
+            // key order and spacing are theirs and the provider preserves
+            // them, so Corral must too.
+            KnownProvider::Codex => assert_eq!(after, original, "{name}"),
+        }
+    }
 }

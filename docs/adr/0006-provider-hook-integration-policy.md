@@ -27,7 +27,7 @@ installation:
   promise.
 
 Managed sessions (PR4/PR5) use launch-scoped injection only and never mutate
-global agent configuration. Global hook configuration arrives at PR6 with
+global agent configuration. Global hook configuration arrives at PR7 with
 lock and owner identity; if safe coexistence cannot be proven, discovery
 degrades to read-only heuristics rather than risking the user's setup.
 
@@ -54,7 +54,7 @@ of every agent run for every user. That is why the fail-open budget is law
 - The A-thesis experiment must exclude users who disabled integration and
   users degraded by merge failure, and must track disable rate and
   merge-failure rate separately as delivery health (`ROADMAP.md` §6).
-- PR6 concentrates the discovery-coverage and safe-coexistence release gates
+- PR7 concentrates the discovery-coverage and safe-coexistence release gates
   and is the schedule's highest-risk point.
 
 Acceptance evidence: `docs/decisions/2026-08-21-m1-decision-grill.md` §1

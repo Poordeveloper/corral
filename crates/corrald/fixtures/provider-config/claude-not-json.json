@@ -1,0 +1,5 @@
+{
+  // my own settings, kept where I can see them
+  "model": "fable",
+  "env": { "USE_BUILTIN_RIPGREP": "1" }
+}

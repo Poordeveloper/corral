@@ -403,8 +403,18 @@ re-discovered on the next start through history and process scan.
 **Provider-owned files and directories are read-only.** Mutating them —
 installing hooks is the canonical case — happens only as a named,
 disclosed, reversible operation, never as a side effect. Writes use atomic
-same-directory tempfile plus rename with mode preservation, comment-
-preserving structured editing, and backfill-before-overwrite.
+same-directory tempfile plus rename with mode preservation, structured
+editing, and backfill-before-overwrite.
+
+What "structured" preserves is two levels, and only one of them is universal
+(ADR 0013 D3). Corral always preserves the *semantics* of user-owned
+configuration outside the entry it owns. Byte and format preservation is
+per provider and measured: Codex's TOML legally carries the user's comments
+and the provider itself preserves what it did not write, so Corral edits it
+in place; Claude's `settings.json` rejects comments outright — one makes the
+whole file invalid and silently drops every setting in it — and the provider
+reserializes the document on its own writes, so Corral parses, merges, and
+reserializes, and never emits a comment.
 
 The default-install policy, disable path, and uninstall promise are product
 decisions recorded in `PRODUCT.md` §10 and ADR 6.
@@ -573,6 +583,9 @@ terms: `PRODUCT.md` §8.
 | **Hook relay** | the shim a provider's hook configuration invokes: it reads one hook payload, delivers it to the hook endpoint, and exits 0. It never parses the payload, never writes to stdout or stderr, and never starts `corrald` — a shim that can fail loudly is a shim that can steer the agent |
 | **Hook endpoint** | the second local socket `corrald` listens on, beside the canonical rendezvous. Evidence-only by construction: no session method and no control surface is reachable from it |
 | **Launch token** | the opaque single-launch value Corral mints into a managed launch's injected hook configuration, mapping a hook event to the (Session, Run) it belongs to. Correlation evidence and accidental-confusion protection; never authorization, and never a privilege boundary |
+| **Integration intent** | what the user chose about integrating Corral with one provider on this node: `Enabled` or `Disabled`, and nothing else. A Corral-owned durable fact with no external source of truth — the provider's own file cannot carry it, because an entry missing from that file is indistinguishable from a provider rewrite that dropped it. The file is evidence of what is installed; it is never the record of what was chosen |
+| **Runtime observation** | what the operating system will say about a process: `(pid, start time, executable)` and its parent. "Gone" and "this account may not look" are different answers and stay apart — only the first supports reporting that a Run ended. Start time is what makes a pid safe to remember, because a reused pid necessarily has a later one |
+| **Corroboration** | reaching a recognized provider process from where a delivering relay stood. What promotes a provider-emitted identity from something that merely arrived to an Attested binding: a payload alone proves a provider thread emitted an event, never that the process it names was observed |
 | **Identity status** | whether Corral still stands behind the external identity a binding names: Confirmed or Contested. Orthogonal to assurance — Attested-and-contested is not Heuristic — and monotonic in M1: contradictory provider-identity evidence contests a binding, and no accepted fact returns it to Confirmed |
 | **Live synchronized control** | joining the same live provider session as a second synchronized surface; the preferred control path |
 | **First-response lease** | the bounded window (≤15s) during which Corral may hold an already-blocked interaction before failing open |
