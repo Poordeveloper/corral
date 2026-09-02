@@ -145,6 +145,15 @@ pub async fn serve(
         &state,
     )));
 
+    // At start and on a bounded cadence, for the sessions that produce no
+    // events at all: a session idle since before Corral started would
+    // otherwise stay invisible for exactly as long as the user leaves it
+    // alone (ADR 0014 D2).
+    tokio::spawn(crate::sweep::sweep_until_shutdown(
+        state.seen_runtimes().clone(),
+        lifecycle.subscribe(),
+    ));
+
     info!(endpoint = %socket.display(), "corrald is serving");
 
     let accepting = Arc::clone(&lifecycle);

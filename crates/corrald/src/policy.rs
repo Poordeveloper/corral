@@ -55,6 +55,16 @@ pub const CONCURRENT_CONNECTIONS: usize = 128;
 /// the first day.
 pub const REPAIR_BUDGET: RepairBudget = RepairBudget::new(3, Duration::from_secs(24 * 60 * 60));
 
+/// How often the process table is swept for provider runtimes.
+///
+/// Chosen from how stale a row may be, not from what a sweep costs. The cost
+/// was measured and is about a millisecond for a whole desktop's process
+/// table (2026-09-02: p50 0.79 ms over 535 processes), so it buys nothing to
+/// economize on — what this number actually decides is how long a session
+/// that has been idle since before Corral started stays invisible, and how
+/// long one that exited keeps a row.
+pub const SWEEP_CADENCE: Duration = Duration::from_secs(30);
+
 /// Timing the daemon runs under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DaemonPolicy {

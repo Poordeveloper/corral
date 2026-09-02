@@ -1,8 +1,8 @@
 //! What the operating system will say about a process, and what it will not.
 //!
 //! The runtime-observation mechanism ADR 0014 D2 names, behind the platform
-//! boundary: `(pid, start time, executable)` for one process, and its parent.
-//! Enumerating the whole table is the sweep's, and arrives with it.
+//! boundary: `(pid, start time, executable)` for one process, its parent, and
+//! an enumeration of the whole table for the sweep.
 //!
 //! The failure modes are the interesting part, and they are kept apart
 //! deliberately (measured 2026-09-02). "It is gone" and "I may not look" are
@@ -67,6 +67,15 @@ pub enum Observation {
     Unobservable,
 }
 
+/// Every pid this account may enumerate.
+///
+/// `None` when enumeration is unavailable, which is not an empty machine: a
+/// sweep that read failure as "nothing is running" would end every external
+/// Run it had ever recorded.
+pub fn all_pids() -> Option<Vec<u32>> {
+    implementation::all_pids()
+}
+
 /// Observe one process.
 pub fn observe(pid: u32) -> Observation {
     if pid == 0 {
@@ -101,6 +110,10 @@ mod implementation {
 
     pub(super) fn observe(_pid: u32) -> Observation {
         Observation::Unobservable
+    }
+
+    pub(super) fn all_pids() -> Option<Vec<u32>> {
+        None
     }
 }
 
@@ -168,6 +181,18 @@ mod implementation {
         })
     }
 
+    /// Every numeric entry under `/proc`, which is every process this account
+    /// can see. Read once per sweep rather than per hop: the directory listing
+    /// is the cheap half.
+    pub(super) fn all_pids() -> Option<Vec<u32>> {
+        let entries = std::fs::read_dir("/proc").ok()?;
+        Some(
+            entries
+                .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+                .collect(),
+        )
+    }
+
     fn boot_time() -> Option<SystemTime> {
         let stat = std::fs::read_to_string("/proc/stat").ok()?;
         let seconds: u64 = stat
@@ -186,6 +211,10 @@ mod implementation {
 
     pub(super) fn observe(_pid: u32) -> Observation {
         Observation::Unobservable
+    }
+
+    pub(super) fn all_pids() -> Option<Vec<u32>> {
+        None
     }
 }
 

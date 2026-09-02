@@ -481,10 +481,21 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
         );
     };
 
-    let sessions: Vec<serde_json::Value> = described
+    let mut sessions: Vec<serde_json::Value> = described
         .iter()
         .map(|(session, reported)| encode_session(session, reported.as_ref()))
         .collect();
+    // After the managed rows, and only what runtime recognition supports.
+    // A session Corral started reports through its own channel; these are the
+    // ones that have never reported anything, which is exactly the session a
+    // person most needs reminding of (ADR 0014 D2).
+    sessions.extend(
+        state
+            .seen_runtimes()
+            .snapshot()
+            .iter()
+            .map(encode_provisional),
+    );
     match serde_json::to_value(SessionListResult { sessions }) {
         Ok(value) => Frame::result(id, value),
         Err(source) => Frame::error(
@@ -521,6 +532,41 @@ fn encode_session(
         agent_event: reported
             .and_then(|reported| reported.latest)
             .and_then(|fact| AgentEvent::at(fact.kind.as_wire(), fact.observed_at)),
+        // Known by construction: this daemon started it.
+        origin: Some(method::ORIGIN_MANAGED.to_owned()),
+        location_hint: None,
+    })
+    .unwrap_or_else(|_| serde_json::json!({}))
+}
+
+/// One provider runtime the sweep found, as a row.
+///
+/// The row claims exactly what runtime recognition supports and no more: a
+/// supported provider runtime appears to be running here, and its execution
+/// state is the only thing the process table can speak to. It carries no
+/// provider identity, because the process table holds none — that arrives on
+/// the delivery path or not at all (grill Q5, Q6′).
+///
+/// Its `session_id` is the Corral identity minted for this runtime's
+/// incarnation, so the row is stable across passes without the pid ever
+/// becoming an identity.
+fn encode_provisional(candidate: &crate::sweep::RuntimeCandidate) -> serde_json::Value {
+    serde_json::to_value(SessionListItem {
+        session_id: candidate.provisional_id().to_string(),
+        title: candidate.provider().as_str().to_owned(),
+        // The process is there; nothing else about it is known.
+        execution_state: "running".to_owned(),
+        // Corral owns no terminal for a process it did not start, and the
+        // refusal is honest rather than a capability it might grow later.
+        terminal_access: Some(corral_protocol::method::TerminalAccess::Unavailable),
+        provider: Some(ProviderFacts {
+            name: candidate.provider().as_str().to_owned(),
+            // No identity. Absent is unknown, which is exactly right here.
+            external_id: None,
+        }),
+        agent_event: None,
+        origin: Some(method::ORIGIN_DISCOVERED.to_owned()),
+        location_hint: None,
     })
     .unwrap_or_else(|_| serde_json::json!({}))
 }

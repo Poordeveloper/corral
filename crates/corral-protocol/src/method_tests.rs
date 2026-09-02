@@ -153,6 +153,8 @@ fn an_unknown_terminal_access_is_left_off_the_wire() {
         terminal_access: None,
         provider: None,
         agent_event: None,
+        origin: None,
+        location_hint: None,
     };
 
     let encoded = serde_json::to_value(&item).expect("encode");
@@ -171,6 +173,8 @@ fn absent_provider_facts_are_left_off_the_wire() {
         terminal_access: None,
         provider: None,
         agent_event: None,
+        origin: None,
+        location_hint: None,
     };
 
     let encoded = serde_json::to_value(&item).expect("encode");

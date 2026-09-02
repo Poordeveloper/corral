@@ -349,7 +349,29 @@ pub struct SessionListItem {
         skip_serializing_if = "Option::is_none"
     )]
     pub agent_event: Option<AgentEvent>,
+    /// Where this session came from, when Corral reliably knows.
+    ///
+    /// An open string — `managed`, `discovered` — read the way
+    /// `execution_state` is: a value this build has no word for is rendered as
+    /// unknown rather than refused. Absent means Corral does not reliably know
+    /// the origin, never that there is no origin: a guessed one would be the
+    /// "never a guessed terminal host" rule broken by a different name
+    /// (`PRODUCT.md` §8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// The working directory the session reported, when it reported one.
+    ///
+    /// A display hint and nothing else. It is never an identity input and
+    /// never correlates two sessions: cwd and time correlation never bind
+    /// (`ARCHITECTURE.md` §1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location_hint: Option<String>,
 }
+
+/// The origins this build names. Open on the decode side; see
+/// `SessionListItem::origin`.
+pub const ORIGIN_MANAGED: &str = "managed";
+pub const ORIGIN_DISCOVERED: &str = "discovered";
 
 /// `session.list`'s result.
 ///

@@ -40,6 +40,8 @@ mod run_lifecycle;
 pub mod runtime;
 mod server;
 mod state;
+/// Finding provider runtimes that never sent Corral anything (ADR 0014 D2).
+mod sweep;
 mod terminal_channel;
 
 use std::fmt;

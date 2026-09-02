@@ -97,6 +97,11 @@ pub struct DaemonState {
     /// artifact to keep and never something written beside the user's file.
     state_dir: PathBuf,
 
+    /// The provider runtimes the sweep believes are running. Live state: a
+    /// restart forgets them and the next pass rediscovers whatever is still
+    /// there (ADR 0014 D5).
+    seen_runtimes: crate::sweep::SharedSeenRuntimes,
+
     /// Where the hook endpoint puts what it received, and the receiver the
     /// server hands to the one task that interprets it.
     deliveries: Deliveries,
@@ -167,6 +172,7 @@ impl DaemonState {
             node,
             launch_dir: launch_dir.to_path_buf(),
             state_dir: state_dir.to_path_buf(),
+            seen_runtimes: crate::sweep::SharedSeenRuntimes::new(),
             deliveries,
             incoming: Mutex::new(Some(incoming)),
             resuming: Mutex::new(HashSet::new()),
@@ -339,6 +345,11 @@ impl DaemonState {
     /// what a delivery actually wrote.
     pub async fn sessions(self: &Arc<Self>) -> Result<Vec<corral_core::Session>, StateError> {
         self.off_the_reactor(Store::sessions).await
+    }
+
+    /// The provider runtimes the sweep has found.
+    pub fn seen_runtimes(&self) -> &crate::sweep::SharedSeenRuntimes {
+        &self.seen_runtimes
     }
 
     /// The bindings recorded against one Session.

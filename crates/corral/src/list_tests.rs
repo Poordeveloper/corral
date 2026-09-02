@@ -21,6 +21,8 @@ fn listed(execution_state: &str, terminal_access: Option<TerminalAccess>) -> Ses
         terminal_access,
         provider: None,
         agent_event: None,
+        origin: None,
+        location_hint: None,
     }
 }
 
