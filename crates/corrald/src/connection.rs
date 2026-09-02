@@ -706,15 +706,29 @@ async fn integration_request(request: &Request, state: &Arc<DaemonState>) -> Dis
     };
 
     let now = SystemTime::now();
+    // Every arm's work reads and usually writes a file with an `fsync`, and
+    // none of that may happen on the reactor: `corrald` runs one runtime
+    // thread, and a synchronous write on it stalls every other connection
+    // this daemon is serving.
+    let state_dir = state.state_dir().to_path_buf();
     let standing = match request.method.as_str() {
-        method::INTEGRATION_STATUS => integration::status(&target, &relay),
+        method::INTEGRATION_STATUS => {
+            let (target, relay) = (target.clone(), relay.clone());
+            integration::off_the_reactor(move || integration::status(&target, &relay)).await
+        }
         // Enabling is the explicit user action that re-arms repair: a breaker
         // opened because something kept undoing Corral's integration stays
         // open until the user says so, and this is them saying so (grill Q4′).
         method::INTEGRATION_ENABLE => {
             match record_intent(state, provider, IntegrationIntent::Enabled, now).await {
                 Ok(()) => match restore_repair_authority(state, &target).await {
-                    Ok(()) => integration::install(&target, &relay, now, state.state_dir()),
+                    Ok(()) => {
+                        let (target, relay) = (target.clone(), relay.clone());
+                        integration::off_the_reactor(move || {
+                            integration::install(&target, &relay, now, &state_dir)
+                        })
+                        .await
+                    }
                     Err(error) => return Dispatch::FailClosed(error),
                 },
                 Err(error) => return Dispatch::FailClosed(error),
@@ -722,7 +736,13 @@ async fn integration_request(request: &Request, state: &Arc<DaemonState>) -> Dis
         }
         method::INTEGRATION_DISABLE => {
             match record_intent(state, provider, IntegrationIntent::Disabled, now).await {
-                Ok(()) => integration::uninstall(&target, &relay, now, state.state_dir()),
+                Ok(()) => {
+                    let (target, relay) = (target.clone(), relay.clone());
+                    integration::off_the_reactor(move || {
+                        integration::uninstall(&target, &relay, now, &state_dir)
+                    })
+                    .await
+                }
                 Err(error) => return Dispatch::FailClosed(error),
             }
         }
@@ -735,6 +755,20 @@ async fn integration_request(request: &Request, state: &Arc<DaemonState>) -> Dis
                 ProtocolError::new(ErrorCode::MethodNotFound, format!("{other} is not served")),
             ));
         }
+    };
+
+    // The operation did not run at all — the blocking pool is gone, or the
+    // work panicked. Answering with a standing would be inventing a fact
+    // about the user's configuration; the honest reply is that the daemon
+    // could not act.
+    let Some(standing) = standing else {
+        return Dispatch::Reply(Frame::error(
+            id,
+            ProtocolError::new(
+                ErrorCode::Busy,
+                "the daemon could not perform the integration operation; try again",
+            ),
+        ));
     };
 
     Dispatch::Reply(Frame::result(

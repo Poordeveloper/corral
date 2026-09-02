@@ -41,9 +41,9 @@ pub struct ProcessIdentity {
 /// What asking about a pid produced.
 ///
 /// Every variant is meaningful on every platform; what varies is which ones a
-/// given build can reach. macOS reaches only `Unobservable` until its
-/// implementation is decided, and the expectation below fails the build the
-/// moment that changes rather than quietly outliving the gap. It is scoped
+/// given build can reach. macOS reaches only `Unobservable`, by ruling, and
+/// the expectation below fails the build the moment that stops being true —
+/// so a later change of mind cannot leave a stale claim behind. It is scoped
 /// away from test builds, where the ancestry walk's own tests construct every
 /// variant against process trees they build.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,7 +51,7 @@ pub struct ProcessIdentity {
     all(target_os = "macos", not(test)),
     expect(
         dead_code,
-        reason = "macOS observation is blocked on the decision named below"
+        reason = "macOS does not observe processes, by the ruling named below"
     )
 )]
 pub enum Observation {
@@ -87,23 +87,28 @@ pub fn observe(pid: u32) -> Observation {
     implementation::observe(pid)
 }
 
-// macOS observation is blocked on a decision the founder owns, and the honest
-// answer until then is that this build cannot look. `Unobservable` is a
-// first-class state and never collapses into `Gone`, so the effect is that no
-// external session is discovered here — degraded awareness, never a false
-// claim that a process ended.
+// macOS does not observe processes, by founder ruling of 2026-09-02
+// (`docs/decisions/2026-09-01-pr7-integration-grill.md`). Not "not yet
+// implemented": the decision was put and answered, and this is the answer.
 //
-// What it takes, and why none of it is an implementation detail: the facts the
-// claim ladder rests on are `proc_pidinfo`'s microsecond start time, the
-// executable `proc_pidpath` resolves, and `ESRCH` versus `EPERM`. Reaching
-// them means one of three things Corral has not agreed to. `libproc` pulls
-// `bindgen` as an unconditional build dependency, making libclang a build
-// requirement for every developer and CI job. `sysinfo` exposes neither the
-// microsecond start time nor the difference between gone and not-permitted,
-// which is the difference that decides whether Corral may say a Run ended.
-// A named unsafe boundary crate doing the two calls directly is the clean
-// answer and is exactly what `Cargo.toml`'s workspace lint says must be named
+// What it costs is stated where it is decided rather than discovered: every
+// claim in ADR 0014's ladder needs a corroborating process, so on macOS no
+// external session is discovered at all — not by the sweep, which has no
+// table to read, and not by a delivery, whose identity nothing can
+// corroborate. Corral on macOS sees the sessions it launched and no others.
+//
+// What it buys is that none of the three ways to reach the facts was taken:
+// `libproc`'s unconditional `bindgen` build dependency, which would make
+// libclang a build requirement for every developer and CI job; `sysinfo`,
+// which exposes neither the microsecond start time nor the difference
+// between gone and not-permitted, and would therefore have to guess at the
+// one distinction that decides whether Corral may say a Run ended; and a
+// named unsafe boundary crate, which the workspace lint says must be named
 // in an ADR first.
+//
+// `Unobservable` is a first-class state and never collapses into `Gone`, so
+// the effect is degraded awareness and never a false claim that a process
+// ended.
 #[cfg(target_os = "macos")]
 mod implementation {
     use super::Observation;

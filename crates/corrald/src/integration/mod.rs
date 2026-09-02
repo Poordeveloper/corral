@@ -67,6 +67,7 @@ impl Standing {
 /// Bundles the three things every operation needs — which provider, which
 /// file, and what a Corral-owned entry in it looks like — so no caller can
 /// pair a provider with another provider's path.
+#[derive(Clone)]
 pub struct Target {
     provider: KnownProvider,
     target: ConfigTarget,
@@ -127,8 +128,34 @@ struct Examined {
 }
 
 /// What one provider's integration looks like, without changing anything.
+///
+/// Reads a file, so it is the caller's job to keep it off the reactor —
+/// `corrald` runs one runtime thread, and a synchronous read on it stalls
+/// every connection the daemon is serving. `off_the_reactor` is how every
+/// caller here does that.
 pub fn status(target: &Target, relay: &RelayInvocation) -> Standing {
     examine(target, relay).standing
+}
+
+/// Run one integration operation on the blocking pool.
+///
+/// Every operation in this module reads a file and most of them write one
+/// with an `fsync`. None of that may happen on the reactor thread (the same
+/// rule `managed_launch` follows for injection), and routing them all through
+/// one helper is what keeps a later operation from quietly skipping it.
+pub async fn off_the_reactor<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(outcome) => Some(outcome),
+        // The blocking pool is gone or the work panicked. Neither is an
+        // answer about the user's configuration, and inventing one would be
+        // worse than saying nothing.
+        Err(error) => {
+            tracing::warn!(%error, "an integration operation did not complete");
+            None
+        }
+    }
 }
 
 /// Install Corral's entries, or report why not.
@@ -197,16 +224,16 @@ pub fn uninstall(
 /// drift is not spent.
 pub async fn repair(
     state: &std::sync::Arc<crate::state::DaemonState>,
-    target: &Target,
-    relay: &RelayInvocation,
+    target: Target,
+    relay: RelayInvocation,
     now: SystemTime,
-    state_dir: &std::path::Path,
+    state_dir: PathBuf,
 ) -> Result<Standing, corral_state::StateError> {
     let provider = match corral_core::ProviderId::new(target.provider().as_str()) {
         Ok(provider) => provider,
         Err(error) => {
             tracing::warn!(%error, "a provider name this build declares is not a usable provider id");
-            return Ok(status(target, relay));
+            return Ok(examined(&target, &relay).await);
         }
     };
     let intent = state.integration_intent(provider.clone()).await?;
@@ -217,10 +244,10 @@ pub async fn repair(
         // No decision is not a decision to install. During PR7 dogfood the
         // only thing that installs is an explicit `corral integration enable`
         // (grill Q2), so a daemon start finds nothing to maintain here.
-        return Ok(status(target, relay));
+        return Ok(examined(&target, &relay).await);
     }
 
-    let standing = status(target, relay);
+    let standing = examined(&target, &relay).await;
     let drift = match standing {
         Standing::NotInstalled => RepairableDrift::Missing,
         Standing::Drifted(drift) => drift,
@@ -239,7 +266,10 @@ pub async fn repair(
         });
     }
 
-    let repaired = install(target, relay, now, state_dir);
+    let Some(repaired) = off_the_reactor(move || install(&target, &relay, now, &state_dir)).await
+    else {
+        return Ok(standing);
+    };
     if matches!(repaired, Standing::Installed) {
         // Recorded only on success: a refused merge must not spend the budget
         // a real recurrence needs.
@@ -267,7 +297,7 @@ pub async fn repair_at_startup(state: std::sync::Arc<crate::state::DaemonState>)
             );
             continue;
         };
-        match repair(&state, &target, &relay, now, &state_dir).await {
+        match repair(&state, target, relay, now, state_dir.clone()).await {
             Ok(Standing::Installed) => {}
             Ok(standing) => tracing::info!(
                 provider = provider.as_str(),
@@ -294,6 +324,18 @@ fn write_entries(
     file::replace(target, &original, now, state_dir, |document| {
         document.install(relay)
     })
+}
+
+/// `status`, off the reactor, for the callers that are already async.
+///
+/// A read that could not be performed is reported as not installed rather
+/// than as a refusal: nothing was found and nothing was examined, and naming
+/// a trigger would blame the user's file for the daemon's own failure.
+async fn examined(target: &Target, relay: &RelayInvocation) -> Standing {
+    let (target, relay) = (target.clone(), relay.clone());
+    off_the_reactor(move || status(&target, &relay))
+        .await
+        .unwrap_or(Standing::NotInstalled)
 }
 
 fn examine(target: &Target, relay: &RelayInvocation) -> Examined {

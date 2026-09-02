@@ -91,6 +91,15 @@ server — so the rules are sealed by the matrix as measured fact, never
 assumed from the binary's name. Start time disambiguates pid reuse
 (measured: microsecond resolution on macOS).
 
+**Where this mechanism exists.** Ruled 2026-09-02 (grill Q8′): Linux supplies
+every field through `/proc`, and macOS observes no processes at all — none of
+the three ways to reach the facts there was judged worth its price. The
+consequence is not hidden behind the mechanism: on macOS the sweep has no
+table and a delivery has nothing to corroborate it, so no external session is
+discovered, and promoting an uncorroborated one anyway is exactly what Q6′
+forbids. `Unobservable` is a first-class state and never collapses into
+`Gone`, so what macOS loses is awareness, never truthfulness.
+
 The post-spike ruling (grill Q5′) seals the grammar in two halves. Sealed
 now, on the 2026-09-02 measurements:
 

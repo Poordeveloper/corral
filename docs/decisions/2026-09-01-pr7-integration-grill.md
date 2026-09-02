@@ -1,4 +1,4 @@
-# PR7 Integration Grill — structural rulings and acceptance (rounds 1–4)
+# PR7 Integration Grill — structural rulings, acceptance, and one implementation ruling (rounds 1–5)
 
 > Status: **closed** (2026-09-02). Rounds 1–2 froze the structural
 > rulings over the proposed ADR 0013 (global hook integration) and
@@ -10,6 +10,8 @@
 > A spike or matrix result that contradicts a load-bearing accepted
 > assumption explicitly reopens the ruling with the reason recorded —
 > never a silent edit; ordinary matrix expansion reopens nothing.
+> Round 5 rules one question implementation raised rather than the grill:
+> where ADR 0014 D2's observation mechanism exists at all.
 > Governing principle, ruled in Q1:
 >
 > Decision authority may precede empirical completion;
@@ -1782,5 +1784,36 @@ fail-closed 包住，缺测只会造成少认，不会造成乱认；而 dotfile
 
 到这里 grill 可以正式结束，不需要下一轮 founder 裁决。
 ```
+
+# Round 5 — implementation ruling (2026-09-02)
+
+Raised during implementation, not by the grill: ADR 0014 D2's claim ladder
+needs `(pid, start time, executable)` and the difference between "gone" and
+"not permitted". Linux supplies all of it through `/proc` with the standard
+library alone. macOS supplies none of it without one of three things the
+repository had not agreed to — `libproc`'s unconditional `bindgen` build
+dependency, making libclang a build requirement for every developer and CI
+job; `sysinfo`, which exposes neither the microsecond start time nor the
+gone/not-permitted distinction; or a named unsafe boundary crate, which the
+workspace lint says must be named in an ADR first. Put to the founder rather
+than chosen (`AGENTS.md`: surface the conflict, never silently redesign).
+
+| Q | Ruling |
+|---|---|
+| Q8′ | **Stop macOS process observation.** None of the three routes is taken. `platform::process` answers `Unobservable` on macOS, which is a first-class state and never collapses into `Gone`. Consequence, recorded where it is decided rather than left to be discovered: **no external session is discovered on macOS at all** — the sweep has no table to read, and a delivery's identity has nothing to corroborate it, so promoting one anyway would be exactly the ghost-minting Q6′ forbade. Corral on macOS sees the sessions it launched and no others. Linux discovery is unaffected. |
+
+Founder ruling, verbatim:
+
+```text
+停止macOS 进程观测
+```
+
+## What this leaves open
+
+Whether macOS discovery is revisited, and on which of the three routes, is
+not decided here — the ruling stops the work, it does not choose a future.
+Any of them remains available to a later phase that wants to pay its price,
+and the code fails the build the moment macOS starts reaching any state but
+`Unobservable`, so a change of mind cannot leave a stale claim behind.
 
 The grill is closed. Nothing remains open in this record.
