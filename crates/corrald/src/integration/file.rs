@@ -297,7 +297,12 @@ pub(super) fn replace(
     if let Some(bytes) = &original.original {
         back_up(target, bytes, now, state_dir)?;
     }
-    publish(&original.location, &candidate, original.identity)
+    publish(
+        target.path(),
+        &original.location,
+        &candidate,
+        original.identity,
+    )
 }
 
 fn clone_of(document: &Document) -> Document {
@@ -345,6 +350,12 @@ fn validate(provider: KnownProvider, candidate: &str) -> Result<(), Trigger> {
 ///
 /// A disclosed recovery artifact, not a byte-for-byte restore promise
 /// (ADR 0006 refused that promise and this does not reinstate it).
+///
+/// One backup per mutation, never one per second: the name carries the
+/// moment for a person to find it by, and a second mutation in the same
+/// moment — an enable and a disable back to back — takes the next free name
+/// rather than the first backup's place, which held the bytes the user had
+/// before either.
 fn back_up(target: &Target, bytes: &str, now: SystemTime, state_dir: &Path) -> Result<(), Trigger> {
     let directory = state_dir.join(BACKUP_DIR);
     std::fs::create_dir_all(&directory).map_err(|error| Trigger::NotWritable {
@@ -358,11 +369,42 @@ fn back_up(target: &Target, bytes: &str, now: SystemTime, state_dir: &Path) -> R
         || "configuration".to_owned(),
         |name| name.to_string_lossy().into_owned(),
     );
-    let backup = directory.join(format!("{}-{stamp}-{name}", target.provider().as_str()));
-    std::fs::write(&backup, bytes).map_err(|error| Trigger::NotWritable {
+    let stem = format!("{}-{stamp}-{name}", target.provider().as_str());
+    let not_writable = |error: std::io::Error| Trigger::NotWritable {
         detail: format!("the backup could not be written: {error}"),
-    })
+    };
+    let mut file = None;
+    for attempt in 0..BACKUPS_PER_MOMENT {
+        let backup = match attempt {
+            0 => directory.join(&stem),
+            taken => directory.join(format!("{stem}.{taken}")),
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)
+        {
+            Ok(opened) => {
+                file = Some(opened);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(not_writable(error)),
+        }
+    }
+    let Some(mut file) = file else {
+        return Err(Trigger::NotWritable {
+            detail: format!("every backup name for this moment is taken: {stem}"),
+        });
+    };
+    file.write_all(bytes.as_bytes()).map_err(not_writable)
 }
+
+/// How many backups one second can hold before a mutation is refused rather
+/// than allowed to overwrite one. Two is the realistic number; the bound
+/// exists so a name that is taken for a reason other than a backup — a
+/// directory, say — ends the search instead of extending it forever.
+const BACKUPS_PER_MOMENT: u32 = 64;
 
 /// Where copies of a user's configuration taken before a mutation live.
 const BACKUP_DIR: &str = "integration-backups";
@@ -376,11 +418,20 @@ const BACKUP_DIR: &str = "integration-backups";
 /// renames exactly what it wrote, and a name already taken is a refusal rather
 /// than a file to reuse.
 ///
-/// The identity check sits between the temporary file and the rename, as late
-/// as it can: a provider that reserialized its own settings in that window
+/// The checks sit between the temporary file and the rename, as late as they
+/// can. The configured path must still name the file that was read: a
+/// dotfiles manager that re-pointed the link in the window would otherwise
+/// have the old file edited and an installation reported that the user's
+/// configuration does not carry. And that file's identity must be the one
+/// read from: a provider that reserialized its own settings in the window
 /// published a file this operation never read, and renaming over it would
 /// silently discard the provider's write.
-fn publish(path: &Path, candidate: &str, expected: Option<Identity>) -> Result<(), Trigger> {
+fn publish(
+    configured: &Path,
+    path: &Path,
+    candidate: &str,
+    expected: Option<Identity>,
+) -> Result<(), Trigger> {
     let directory = path.parent().ok_or_else(|| Trigger::NotWritable {
         detail: "the configuration path has no directory".to_owned(),
     })?;
@@ -408,7 +459,14 @@ fn publish(path: &Path, candidate: &str, expected: Option<Identity>) -> Result<(
         return Err(not_writable(error));
     }
 
-    if current_identity(path) != expected {
+    let still_named = match location_of(configured) {
+        Ok(location) => location == path,
+        Err(trigger) => {
+            let _ = std::fs::remove_file(&partial);
+            return Err(trigger);
+        }
+    };
+    if !still_named || current_identity(path) != expected {
         let _ = std::fs::remove_file(&partial);
         return Err(Trigger::ChangedUnderCorral);
     }

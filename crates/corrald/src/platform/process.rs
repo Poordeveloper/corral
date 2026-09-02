@@ -130,7 +130,6 @@ mod implementation {
 #[cfg(target_os = "linux")]
 mod implementation {
     use super::{Observation, ProcessIdentity};
-    use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
     /// The kernel's tick rate, which `/proc/<pid>/stat` reports start time

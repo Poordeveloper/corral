@@ -226,6 +226,40 @@ fn a_mutation_backs_up_what_it_is_about_to_change() {
     );
 }
 
+/// An enable and a disable within one second are two mutations, and each
+/// keeps the copy it took: the second must not land on the first's name and
+/// lose the bytes the user had before either.
+#[test]
+fn two_mutations_in_one_second_keep_both_backups() {
+    let scratch = Scratch::new("backup-same-second");
+    let target = scratch.target(KnownProvider::Claude);
+    scratch.seed(&target, A_USERS_CLAUDE_SETTINGS);
+
+    install(
+        &target,
+        &relay(KnownProvider::Claude),
+        now(),
+        &scratch.state_dir(),
+    );
+    let installed = scratch.read(&target);
+    uninstall(
+        &target,
+        &relay(KnownProvider::Claude),
+        now(),
+        &scratch.state_dir(),
+    );
+
+    let mut backups = std::fs::read_dir(file::backup_dir(&scratch.state_dir()))
+        .expect("the backup directory")
+        .map(|entry| std::fs::read_to_string(entry.expect("an entry").path()).expect("read"))
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 2, "one backup per mutation");
+    backups.sort();
+    let mut expected = vec![A_USERS_CLAUDE_SETTINGS.to_owned(), installed];
+    expected.sort();
+    assert_eq!(backups, expected);
+}
+
 #[test]
 fn uninstall_returns_the_file_to_what_the_user_had() {
     let scratch = Scratch::new("uninstall");
@@ -591,6 +625,50 @@ fn a_linked_configuration_is_edited_through_the_link_and_the_link_survives() {
         std::fs::read_to_string(&repository).expect("read"),
         A_USERS_CODEX_CONFIG,
     );
+}
+
+/// The link is re-pointed while Corral writes — a dotfiles manager switching
+/// profiles, atomically, the way such tools do. The file Corral read is then
+/// no longer the user's configuration: editing it would report an
+/// installation the configured path does not carry, so the write stops and
+/// neither file is touched.
+#[test]
+fn a_link_re_pointed_while_corral_writes_aborts_rather_than_editing_the_old_file() {
+    let scratch = Scratch::new("symlink-repointed");
+    let target = scratch.target(KnownProvider::Codex);
+    let dotfiles = scratch.root.join("dotfiles");
+    std::fs::create_dir_all(&dotfiles).expect("the repository");
+    let before = dotfiles.join("work.toml");
+    let after = dotfiles.join("home.toml");
+    std::fs::write(&before, A_USERS_CODEX_CONFIG).expect("the first profile");
+    std::fs::write(&after, "# the other profile\n").expect("the second profile");
+    std::fs::create_dir_all(target.path().parent().expect("a directory")).expect("the home");
+    std::os::unix::fs::symlink(&before, target.path()).expect("the user's link");
+    let original = file::read(&target).expect("read").expect("a file");
+    let switching = target.path().with_extension("toml.switching");
+    std::os::unix::fs::symlink(&after, &switching).expect("the manager's new link");
+    std::fs::rename(&switching, target.path()).expect("the manager's switch");
+
+    let outcome = file::replace(
+        &target,
+        &original,
+        now(),
+        &scratch.state_dir(),
+        |document| document.install(&relay(KnownProvider::Codex)),
+    );
+
+    assert_eq!(outcome, Err(Trigger::ChangedUnderCorral));
+    assert_eq!(
+        std::fs::read_to_string(&before).expect("read"),
+        A_USERS_CODEX_CONFIG,
+        "the file the link no longer names was edited",
+    );
+    assert_eq!(
+        std::fs::read_to_string(&after).expect("read"),
+        "# the other profile\n",
+        "the file the link now names was written without being read",
+    );
+    assert_eq!(std::fs::read_link(target.path()).expect("the link"), after);
 }
 
 /// A link to nothing is refused, not resolved. Where the user's configuration
