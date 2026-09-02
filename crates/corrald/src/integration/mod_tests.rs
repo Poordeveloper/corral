@@ -3,6 +3,7 @@ use super::*;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use crate::provider::launch::RelayInvocation;
 
@@ -258,6 +259,138 @@ fn two_mutations_in_one_second_keep_both_backups() {
     let mut expected = vec![A_USERS_CLAUDE_SETTINGS.to_owned(), installed];
     expected.sort();
     assert_eq!(backups, expected);
+}
+
+/// Retention is bounded (ADR 0013 D3): past the bound the oldest copies of a
+/// file go, the newest stay, and nothing that is not a copy of that file is
+/// touched — not another provider's backups, not a file somebody left there.
+#[test]
+fn backups_of_one_file_are_bounded_and_the_newest_are_the_ones_kept() {
+    let scratch = Scratch::new("backup-retention");
+    let target = scratch.target(KnownProvider::Claude);
+    scratch.seed(&target, A_USERS_CLAUDE_SETTINGS);
+    let directory = file::backup_dir(&scratch.state_dir());
+    std::fs::create_dir_all(&directory).expect("the backup directory");
+    let start = now();
+    let stamp = |seconds: u64| {
+        start
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_secs()
+            + seconds
+    };
+    let somebody_elses = directory.join(format!("claude-{}-settings.json.orig", stamp(0)));
+    let the_other_providers = directory.join(format!("codex-{}-config.toml", stamp(0)));
+    std::fs::write(&somebody_elses, "theirs").expect("their file");
+    std::fs::write(&the_other_providers, "codex").expect("the other provider's backup");
+
+    let mut before_last = String::new();
+    for mutation in 0..=file::BACKUPS_RETAINED as u64 {
+        before_last = scratch.read(&target);
+        let at = start + Duration::from_secs(mutation);
+        if mutation % 2 == 0 {
+            install(
+                &target,
+                &relay(KnownProvider::Claude),
+                at,
+                &scratch.state_dir(),
+            );
+        } else {
+            uninstall(
+                &target,
+                &relay(KnownProvider::Claude),
+                at,
+                &scratch.state_dir(),
+            );
+        }
+    }
+
+    let mut names = std::fs::read_dir(&directory)
+        .expect("the backup directory")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .into_string()
+                .expect("utf-8")
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    let mut expected = (1..=file::BACKUPS_RETAINED as u64)
+        .map(|seconds| format!("claude-{}-settings.json", stamp(seconds)))
+        .collect::<Vec<_>>();
+    expected.push(format!("claude-{}-settings.json.orig", stamp(0)));
+    expected.push(format!("codex-{}-config.toml", stamp(0)));
+    expected.sort();
+    assert_eq!(names, expected, "the oldest copy went and nothing else did");
+    let newest = directory.join(format!(
+        "claude-{}-settings.json",
+        stamp(file::BACKUPS_RETAINED as u64)
+    ));
+    assert_eq!(std::fs::read_to_string(newest).expect("read"), before_last);
+    assert_eq!(
+        std::fs::read_to_string(somebody_elses).expect("read"),
+        "theirs"
+    );
+    assert_eq!(
+        std::fs::read_to_string(the_other_providers).expect("read"),
+        "codex"
+    );
+}
+
+/// Within one second the names count up and never fill a gap retention
+/// opened: a freed name taken again would sort as the oldest copy and be the
+/// next to go — the copy just taken, which is the one the mutation owes.
+#[test]
+fn copies_taken_in_one_second_past_the_bound_keep_the_newest() {
+    let scratch = Scratch::new("backup-retention-same-second");
+    let target = scratch.target(KnownProvider::Claude);
+    scratch.seed(&target, A_USERS_CLAUDE_SETTINGS);
+    let mutations = file::BACKUPS_RETAINED + 3;
+
+    let mut before_last = String::new();
+    for mutation in 0..mutations {
+        before_last = scratch.read(&target);
+        if mutation % 2 == 0 {
+            install(
+                &target,
+                &relay(KnownProvider::Claude),
+                now(),
+                &scratch.state_dir(),
+            );
+        } else {
+            uninstall(
+                &target,
+                &relay(KnownProvider::Claude),
+                now(),
+                &scratch.state_dir(),
+            );
+        }
+    }
+
+    let directory = file::backup_dir(&scratch.state_dir());
+    let stamp = now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_secs();
+    let mut names = std::fs::read_dir(&directory)
+        .expect("the backup directory")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .into_string()
+                .expect("utf-8")
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    let mut expected = (mutations - file::BACKUPS_RETAINED..mutations)
+        .map(|attempt| format!("claude-{stamp}-settings.json.{attempt}"))
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(names, expected);
+    let newest = directory.join(format!("claude-{stamp}-settings.json.{}", mutations - 1));
+    assert_eq!(std::fs::read_to_string(newest).expect("read"), before_last);
 }
 
 #[test]

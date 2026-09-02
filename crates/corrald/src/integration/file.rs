@@ -353,9 +353,13 @@ fn validate(provider: KnownProvider, candidate: &str) -> Result<(), Trigger> {
 ///
 /// One backup per mutation, never one per second: the name carries the
 /// moment for a person to find it by, and a second mutation in the same
-/// moment — an enable and a disable back to back — takes the next free name
+/// moment — an enable and a disable back to back — takes the next name
 /// rather than the first backup's place, which held the bytes the user had
 /// before either.
+///
+/// Retention is bounded (ADR 0013 D3): once this file has more copies than
+/// are kept, the oldest go. Only this file's copies, and only the names this
+/// module wrote — anything else in the directory is somebody's and stays.
 fn back_up(target: &Target, bytes: &str, now: SystemTime, state_dir: &Path) -> Result<(), Trigger> {
     let directory = state_dir.join(BACKUP_DIR);
     std::fs::create_dir_all(&directory).map_err(|error| Trigger::NotWritable {
@@ -369,16 +373,23 @@ fn back_up(target: &Target, bytes: &str, now: SystemTime, state_dir: &Path) -> R
         || "configuration".to_owned(),
         |name| name.to_string_lossy().into_owned(),
     );
-    let stem = format!("{}-{stamp}-{name}", target.provider().as_str());
+    let provider = target.provider().as_str();
+    let mut kept = backups_of(&directory, provider, &name)?;
     let not_writable = |error: std::io::Error| Trigger::NotWritable {
         detail: format!("the backup could not be written: {error}"),
     };
+    // Past the highest number this second already holds, never into a gap:
+    // a name freed by retention and taken again would sort as the oldest
+    // copy and be the next to go — the copy just taken.
+    let first = kept
+        .iter()
+        .filter(|(moment, _)| moment.stamp == stamp)
+        .map(|(moment, _)| moment.attempt + 1)
+        .max()
+        .unwrap_or(0);
     let mut file = None;
-    for attempt in 0..BACKUPS_PER_MOMENT {
-        let backup = match attempt {
-            0 => directory.join(&stem),
-            taken => directory.join(format!("{stem}.{taken}")),
-        };
+    for attempt in first..first.saturating_add(BACKUPS_PER_MOMENT) {
+        let backup = directory.join(BackupMoment { stamp, attempt }.file_name(provider, &name));
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -394,10 +405,92 @@ fn back_up(target: &Target, bytes: &str, now: SystemTime, state_dir: &Path) -> R
     }
     let Some(mut file) = file else {
         return Err(Trigger::NotWritable {
-            detail: format!("every backup name for this moment is taken: {stem}"),
+            detail: format!(
+                "every backup name for this moment is taken: {provider}-{stamp}-{name}"
+            ),
         });
     };
-    file.write_all(bytes.as_bytes()).map_err(not_writable)
+    file.write_all(bytes.as_bytes()).map_err(not_writable)?;
+
+    // A copy that will not go refuses the mutation: the bound is part of the
+    // backup contract, and a state directory that will not give up a file is
+    // broken in a way to hear about before more is written into it.
+    if kept.len() >= BACKUPS_RETAINED {
+        kept.sort();
+        for (_, stale) in kept.drain(..kept.len() + 1 - BACKUPS_RETAINED) {
+            match std::fs::remove_file(&stale) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(Trigger::NotWritable {
+                        detail: format!(
+                            "a stale backup could not be removed: {}: {error}",
+                            stale.display()
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every copy of one file the backup directory holds, by the moment its
+/// name carries.
+///
+/// A regular file with a name this module writes for this file, and nothing
+/// else: a directory or a link under such a name is not a backup, is not
+/// counted, and is never removed.
+fn backups_of(
+    directory: &Path,
+    provider: &str,
+    name: &str,
+) -> Result<Vec<(BackupMoment, PathBuf)>, Trigger> {
+    let unreadable = |error: std::io::Error| Trigger::NotWritable {
+        detail: format!("the backup directory could not be read: {error}"),
+    };
+    let mut backups = Vec::new();
+    for entry in std::fs::read_dir(directory).map_err(unreadable)? {
+        let entry = entry.map_err(unreadable)?;
+        let Some(moment) =
+            BackupMoment::parse(&entry.file_name().to_string_lossy(), provider, name)
+        else {
+            continue;
+        };
+        if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            backups.push((moment, entry.path()));
+        }
+    }
+    Ok(backups)
+}
+
+/// The order a backup's name carries: the second it was taken in and its
+/// place among the copies taken that second. Sorting on it is sorting by
+/// age, because names within a second only ever count up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BackupMoment {
+    stamp: u64,
+    attempt: u32,
+}
+
+impl BackupMoment {
+    fn file_name(self, provider: &str, name: &str) -> String {
+        match self.attempt {
+            0 => format!("{provider}-{}-{name}", self.stamp),
+            attempt => format!("{provider}-{}-{name}.{attempt}", self.stamp),
+        }
+    }
+
+    fn parse(file_name: &str, provider: &str, name: &str) -> Option<Self> {
+        let rest = file_name.strip_prefix(provider)?.strip_prefix('-')?;
+        let (stamp, rest) = rest.split_once('-')?;
+        let stamp = stamp.parse().ok()?;
+        let attempt = match rest.strip_prefix(name)? {
+            "" => 0,
+            suffix => suffix.strip_prefix('.')?.parse().ok()?,
+        };
+        Some(Self { stamp, attempt })
+    }
 }
 
 /// How many backups one second can hold before a mutation is refused rather
@@ -405,6 +498,13 @@ fn back_up(target: &Target, bytes: &str, now: SystemTime, state_dir: &Path) -> R
 /// exists so a name that is taken for a reason other than a backup — a
 /// directory, say — ends the search instead of extending it forever.
 const BACKUPS_PER_MOMENT: u32 = 64;
+
+/// How many copies of one configuration file are kept.
+///
+/// A dogfood-tunable policy default. The repair breaker allows three
+/// automatic mutations a day per drift, so this holds the better part of a
+/// week of the worst case alongside the user's own enables and disables.
+pub(super) const BACKUPS_RETAINED: usize = 20;
 
 /// Where copies of a user's configuration taken before a mutation live.
 const BACKUP_DIR: &str = "integration-backups";
