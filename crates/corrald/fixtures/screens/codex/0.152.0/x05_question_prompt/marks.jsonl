@@ -1,0 +1,12 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788354409689824739, "offset": 0}
+{"quiet_s": 2, "last_output_ns": 1788354417577244788, "name": "quiet", "t_ns": 1788354419578655014, "offset": 7416}
+{"name": "prompt_ready", "t_ns": 1788354419578730062, "offset": 7416}
+{"name": "submitted", "t_ns": 1788354423246049652, "offset": 16885}
+{"name": "question_visible", "t_ns": 1788354425246641067, "offset": 24534}
+{"quiet_s": 3, "last_output_ns": 1788354429253986420, "name": "quiet", "t_ns": 1788354432256631668, "offset": 30604}
+{"name": "question_settled", "t_ns": 1788354432256725071, "offset": 30604}
+{"name": "answered", "t_ns": 1788354432657386108, "offset": 30879}
+{"name": "notify_turn_complete", "t_ns": 1788354432658211763, "offset": 30879}
+{"quiet_s": 3, "last_output_ns": 1788354434604616568, "name": "quiet", "t_ns": 1788354437607623619, "offset": 38938}
+{"name": "ready_after", "t_ns": 1788354437607691693, "offset": 38938}
+{"name": "end", "t_ns": 1788354438195711899, "offset": 40803}

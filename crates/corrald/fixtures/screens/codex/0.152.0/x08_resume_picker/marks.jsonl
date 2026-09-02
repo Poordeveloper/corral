@@ -1,0 +1,4 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788354501462146474, "offset": 0}
+{"quiet_s": 1, "last_output_ns": 1788354502943631623, "name": "quiet", "t_ns": 1788354505463635027, "offset": 1766}
+{"name": "resume_picker", "t_ns": 1788354505463703935, "offset": 1766}
+{"name": "end", "t_ns": 1788354510206816516, "offset": 3432}

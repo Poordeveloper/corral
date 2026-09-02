@@ -1,0 +1,35 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788353872321449624, "offset": 0}
+{"name": "prompt_ready", "t_ns": 1788353873578309116, "offset": 1717}
+{"quiet_s": 3, "last_output_ns": 1788353875557365671, "name": "quiet", "t_ns": 1788353878559628204, "offset": 5544}
+{"name": "ready", "t_ns": 1788353878559696755, "offset": 5544}
+{"name": "compact_submitted", "t_ns": 1788353878959890213, "offset": 6196}
+{"name": "pre_compact_hook", "t_ns": 1788353879048476376, "offset": 7966}
+{"name": "compacting", "t_ns": 1788353880048624946, "offset": 8848}
+{"quiet_s": 3, "last_output_ns": 1788353881598363492, "name": "quiet", "t_ns": 1788353884600631120, "offset": 8964}
+{"name": "after_compact", "t_ns": 1788353884600707457, "offset": 8964}
+{"name": "resume_picker", "t_ns": 1788353887001026846, "offset": 13525}
+{"quiet_s": 1, "last_output_ns": 1788353885113067968, "name": "quiet", "t_ns": 1788353888001619277, "offset": 13525}
+{"name": "resume_picker_settled", "t_ns": 1788353888001690861, "offset": 13525}
+{"quiet_s": 1, "last_output_ns": 1788353888085601375, "name": "quiet", "t_ns": 1788353890002635810, "offset": 16152}
+{"name": "after_picker_esc", "t_ns": 1788353890002691419, "offset": 16152}
+{"quiet_s": 1, "last_output_ns": 1788353890015876672, "name": "quiet", "t_ns": 1788353892003645222, "offset": 17106}
+{"name": "help_overlay", "t_ns": 1788353892003712686, "offset": 17106}
+{"quiet_s": 1, "last_output_ns": 1788353892063404264, "name": "quiet", "t_ns": 1788353894004633555, "offset": 17406}
+{"name": "after_help_esc", "t_ns": 1788353894004711672, "offset": 17406}
+{"rows": 30, "cols": 100, "name": "resize", "t_ns": 1788353894004775328, "offset": 17406}
+{"quiet_s": 1, "last_output_ns": 1788353894016542368, "name": "quiet", "t_ns": 1788353896005623410, "offset": 19797}
+{"name": "after_resize_small", "t_ns": 1788353896005690653, "offset": 19797}
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788353896005749190, "offset": 19797}
+{"quiet_s": 1, "last_output_ns": 1788353896016097163, "name": "quiet", "t_ns": 1788353898006625871, "offset": 22429}
+{"name": "after_resize_back", "t_ns": 1788353898006694521, "offset": 22429}
+{"name": "typed_no_enter", "t_ns": 1788353900953918867, "offset": 24516}
+{"quiet_s": 1, "last_output_ns": 1788353900897652683, "name": "quiet", "t_ns": 1788353901954618523, "offset": 24516}
+{"name": "typed_settled", "t_ns": 1788353901954693948, "offset": 24516}
+{"quiet_s": 1, "last_output_ns": 1788353901963504408, "name": "quiet", "t_ns": 1788353903455633579, "offset": 24699}
+{"name": "cleared", "t_ns": 1788353903455701840, "offset": 24699}
+{"name": "pasted", "t_ns": 1788353903455760661, "offset": 24699}
+{"quiet_s": 1, "last_output_ns": 1788353903468564952, "name": "quiet", "t_ns": 1788353904469621339, "offset": 24870}
+{"name": "paste_settled", "t_ns": 1788353904469685228, "offset": 24870}
+{"quiet_s": 1, "last_output_ns": 1788353904484711513, "name": "quiet", "t_ns": 1788353905970631011, "offset": 24920}
+{"name": "cleared_2", "t_ns": 1788353905970702682, "offset": 24920}
+{"name": "end", "t_ns": 1788353907463861195, "offset": 28291}

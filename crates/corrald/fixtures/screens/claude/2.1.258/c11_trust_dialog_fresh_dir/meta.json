@@ -1,0 +1,22 @@
+{
+ "argv": [
+  "claude",
+  "--model",
+  "haiku",
+  "--settings",
+  "/matrix/out/c11_trust_dialog_fresh_dir/settings.json"
+ ],
+ "cwd": "/root/proj-fresh-pr8",
+ "rows": 40,
+ "cols": 120,
+ "t0_ns": 1788354219846344189,
+ "env": {
+  "COLORTERM": "truecolor",
+  "HOME": "/root",
+  "LANG": "C.UTF-8",
+  "PATH": "/root/.local/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
+  "SHELL": "/bin/bash",
+  "TERM": "xterm-256color",
+  "USER": "root"
+ }
+}

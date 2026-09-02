@@ -1,0 +1,32 @@
+1268985 mark resize
+1294750 started pid=1315651
+6720740164 wait_for 'gpt-\\S+ (low|medium|high|minimal|xhigh)' matched at +3628
+11234997435 mark quiet
+11235052360 mark prompt_ready
+16182010051 wait_hook matched record 0
+19184970578 mark quiet
+19185013683 mark ready
+21611977743 mark quiet
+21612006041 mark help
+23613030806 mark quiet
+23613063802 mark after_help
+23613116253 mark resize
+25613999861 mark quiet
+25614032877 mark after_resize_small
+25614090471 mark resize
+27614976286 mark quiet
+27615021192 mark after_resize_back
+30562062675 mark typed_no_enter
+31562989473 mark quiet
+31563019863 mark typed_settled
+33063958143 mark quiet
+33063976494 mark cleared
+33064019021 mark pasted
+34067986187 mark quiet
+34068015584 mark paste_settled
+35568972121 mark quiet
+35569000078 mark cleared_2
+36070123320 mark compact_submitted
+53036990428 mark quiet
+53037018665 mark after_compact
+53636948360 mark end

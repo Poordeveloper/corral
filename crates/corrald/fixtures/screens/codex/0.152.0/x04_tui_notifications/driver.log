@@ -1,0 +1,17 @@
+1132099 mark resize
+1165865 started pid=1318992
+5283183308 wait_for 'gpt-\\S+ (low|medium|high|minimal|xhigh)' matched at +4848
+10085361914 mark quiet
+10085395886 mark prompt_ready
+12822553070 mark submitted
+12822608732 mark focus_out
+36890667495 wait_for '(?i)approv|allow|permission|Yes' matched at +101280
+38890963182 mark approval_prompt_visible
+68900629606 mark quiet_timeout
+68900695290 mark approved
+68901126965 wait_hook matched record 0
+68901152035 mark notify_turn_complete
+129514567010 mark quiet_timeout
+129514607602 mark ready_after
+129514665782 mark focus_in
+142045746270 mark end

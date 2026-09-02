@@ -1,0 +1,19 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788353731835810536, "offset": 0}
+{"name": "prompt_ready", "t_ns": 1788353733014227105, "offset": 1706}
+{"name": "submitted", "t_ns": 1788353733414500117, "offset": 2082}
+{"name": "hook_timeout", "t_ns": 1788353855336575051, "offset": 20361}
+{"name": "permission_prompt_visible", "t_ns": 1788353856836794669, "offset": 20361}
+{"name": "approved", "t_ns": 1788353856836895697, "offset": 20361}
+{"last_output_ns": 1788353856837122570, "name": "tool_running_0", "t_ns": 1788353857837073563, "offset": 20365}
+{"last_output_ns": 1788353856837122570, "name": "tool_running_1", "t_ns": 1788353858837255771, "offset": 20365}
+{"last_output_ns": 1788353856837122570, "name": "tool_running_2", "t_ns": 1788353859837446177, "offset": 20365}
+{"last_output_ns": 1788353856837122570, "name": "tool_running_3", "t_ns": 1788353860837634691, "offset": 20365}
+{"last_output_ns": 1788353856837122570, "name": "tool_running_4", "t_ns": 1788353861837828147, "offset": 20365}
+{"last_output_ns": 1788353856837122570, "name": "tool_running_5", "t_ns": 1788353862838001236, "offset": 20365}
+{"last_output_ns": 1788353856837122570, "name": "tool_running_6", "t_ns": 1788353863838177282, "offset": 20365}
+{"last_output_ns": 1788353856837122570, "name": "tool_running_7", "t_ns": 1788353864838387643, "offset": 20365}
+{"name": "post_tool_use", "t_ns": 1788353864839051503, "offset": 20365}
+{"name": "stop_hook", "t_ns": 1788353864839508497, "offset": 20365}
+{"quiet_s": 3, "last_output_ns": 1788353856837122570, "name": "quiet", "t_ns": 1788353867841640044, "offset": 20365}
+{"name": "ready_after_stop", "t_ns": 1788353867841721305, "offset": 20365}
+{"name": "end", "t_ns": 1788353869149158092, "offset": 23735}

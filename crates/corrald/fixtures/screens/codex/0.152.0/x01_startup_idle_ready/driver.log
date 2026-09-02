@@ -1,0 +1,16 @@
+1098164 mark resize
+1125002 started pid=1316226
+4431415520 wait_for 'gpt-\\S+ (low|medium|high|minimal|xhigh)' matched at +4980
+11545278838 mark quiet
+11545329536 mark prompt_ready
+12398384850 mark submitted
+12898597878 mark working_0
+13465166958 mark working_1
+13965372208 mark working_2
+14465578553 mark working_3
+17073116806 wait_hook matched record 0
+17073166197 mark notify_turn_complete
+24084285934 mark quiet
+24084314851 mark ready_after_turn
+89084503688 mark idle_65s
+89638087231 mark end

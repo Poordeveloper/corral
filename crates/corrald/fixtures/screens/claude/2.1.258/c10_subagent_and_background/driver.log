@@ -1,0 +1,22 @@
+1178156 mark resize
+1201211 started pid=1313493
+1258878297 wait_for '❯|manual mode on|auto mode on' matched at +807
+1258949868 mark prompt_ready
+1659312848 mark submitted_subagent
+16499344429 wait_hook matched record 10
+16499414595 mark stop_hook_1
+19528204178 mark quiet
+19528266867 mark ready_1
+24528465853 mark five_s_after_ready_1
+24928736949 mark submitted_background
+27110740117 wait_hook matched record 13
+147167536009 wait_hook TIMEOUT
+147167601645 mark hook_timeout
+148667853598 mark permission_prompt
+148668715677 wait_hook matched record 15
+148668768074 mark stop_hook_2
+151671217998 mark quiet
+151671262002 mark ready_2
+171671432263 mark twenty_s_after_ready_2
+172493396235 wait_hook matched record 21
+172858543629 mark end

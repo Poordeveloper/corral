@@ -1,0 +1,12 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788353448556538764, "offset": 0}
+{"name": "prompt_ready", "t_ns": 1788353449868708130, "offset": 1706}
+{"name": "submitted", "t_ns": 1788353450269132203, "offset": 2125}
+{"name": "permission_prompt_visible", "t_ns": 1788353454384128892, "offset": 8394}
+{"name": "quiet_timeout", "t_ns": 1788353484497530335, "offset": 12344}
+{"name": "rejected_esc", "t_ns": 1788353484497646488, "offset": 12344}
+{"name": "after_reject", "t_ns": 1788353486497797339, "offset": 13620}
+{"name": "hook_timeout", "t_ns": 1788353546535241242, "offset": 13620}
+{"name": "stop_hook", "t_ns": 1788353546535299697, "offset": 13620}
+{"quiet_s": 3, "last_output_ns": 1788353484596873175, "name": "quiet", "t_ns": 1788353549537625445, "offset": 13620}
+{"name": "ready_after_reject", "t_ns": 1788353549537697168, "offset": 13620}
+{"name": "end", "t_ns": 1788353550599337221, "offset": 16990}

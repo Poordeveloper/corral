@@ -1,0 +1,9 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788354219847462533, "offset": 0}
+{"name": "trust_dialog_visible", "t_ns": 1788354221906497927, "offset": 1271}
+{"quiet_s": 2, "last_output_ns": 1788354220410110354, "name": "quiet", "t_ns": 1788354223908621011, "offset": 1271}
+{"name": "trust_dialog_settled", "t_ns": 1788354223908690815, "offset": 1271}
+{"name": "trusted", "t_ns": 1788354223908767978, "offset": 1271}
+{"name": "quiet_timeout", "t_ns": 1788354224462923513, "offset": 1366}
+{"name": "prompt_ready", "t_ns": 1788354224463089980, "offset": 1366}
+{"name": "hook_timeout", "t_ns": 1788354224463975523, "offset": 1373}
+{"name": "end", "t_ns": 1788354224464072824, "offset": 1373}

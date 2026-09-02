@@ -1,0 +1,26 @@
+1177936 mark resize
+1195193 started pid=1311882
+1179389998 wait_for '❯|manual mode on|auto mode on' matched at +1056
+1179454023 mark prompt_ready
+1579730656 mark submitted
+3450303713 wait_hook matched record 2
+123501710246 wait_hook TIMEOUT
+123501828856 mark hook_timeout
+125002043909 mark permission_prompt_visible
+125002117009 mark approved
+126002306141 mark tool_running_0
+127002492045 mark tool_running_1
+128002677406 mark tool_running_2
+129002872429 mark tool_running_3
+130003055977 mark tool_running_4
+131003235761 mark tool_running_5
+132003417179 mark tool_running_6
+133003636997 mark tool_running_7
+133004219210 wait_hook matched record 3
+133004265453 mark post_tool_use
+133004623923 wait_hook matched record 4
+133004714738 mark stop_hook
+136006894658 mark quiet
+136006922930 mark ready_after_stop
+136827452110 wait_hook matched record 7
+137314399849 mark end

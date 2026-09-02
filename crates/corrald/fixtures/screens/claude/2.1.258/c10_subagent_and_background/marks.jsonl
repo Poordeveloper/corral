@@ -1,0 +1,15 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788354043815427230, "offset": 0}
+{"name": "prompt_ready", "t_ns": 1788354045073374570, "offset": 1443}
+{"name": "submitted_subagent", "t_ns": 1788354045473746625, "offset": 1927}
+{"name": "stop_hook_1", "t_ns": 1788354060313847378, "offset": 27849}
+{"quiet_s": 3, "last_output_ns": 1788354060339973403, "name": "quiet", "t_ns": 1788354063342620566, "offset": 28695}
+{"name": "ready_1", "t_ns": 1788354063342707565, "offset": 28695}
+{"name": "five_s_after_ready_1", "t_ns": 1788354068342875694, "offset": 28695}
+{"name": "submitted_background", "t_ns": 1788354068743146512, "offset": 28975}
+{"name": "hook_timeout", "t_ns": 1788354190982041145, "offset": 43415}
+{"name": "permission_prompt", "t_ns": 1788354192482243107, "offset": 43415}
+{"name": "stop_hook_2", "t_ns": 1788354192483214400, "offset": 43415}
+{"quiet_s": 3, "last_output_ns": 1788354192483285870, "name": "quiet", "t_ns": 1788354195485631631, "offset": 43419}
+{"name": "ready_2", "t_ns": 1788354195485712846, "offset": 43419}
+{"name": "twenty_s_after_ready_2", "t_ns": 1788354215485855697, "offset": 43419}
+{"name": "end", "t_ns": 1788354216672919989, "offset": 46789}

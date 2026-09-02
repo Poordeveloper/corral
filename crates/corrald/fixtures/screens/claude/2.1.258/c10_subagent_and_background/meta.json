@@ -1,0 +1,22 @@
+{
+ "argv": [
+  "claude",
+  "--model",
+  "haiku",
+  "--settings",
+  "/matrix/out/c10_subagent_and_background/settings.json"
+ ],
+ "cwd": "/root/proj",
+ "rows": 40,
+ "cols": 120,
+ "t0_ns": 1788354043814470677,
+ "env": {
+  "COLORTERM": "truecolor",
+  "HOME": "/root",
+  "LANG": "C.UTF-8",
+  "PATH": "/root/.local/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
+  "SHELL": "/bin/bash",
+  "TERM": "xterm-256color",
+  "USER": "root"
+ }
+}

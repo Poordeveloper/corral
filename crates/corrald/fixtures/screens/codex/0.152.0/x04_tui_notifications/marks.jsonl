@@ -1,0 +1,13 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788355240786256882, "offset": 0}
+{"quiet_s": 2, "last_output_ns": 1788355248774078457, "name": "quiet", "t_ns": 1788355250870626653, "offset": 6981}
+{"name": "prompt_ready", "t_ns": 1788355250870711558, "offset": 6981}
+{"name": "submitted", "t_ns": 1788355253607844895, "offset": 13621}
+{"name": "focus_out", "t_ns": 1788355253607922795, "offset": 13621}
+{"name": "approval_prompt_visible", "t_ns": 1788355279676229991, "offset": 102046}
+{"name": "quiet_timeout", "t_ns": 1788355309685920779, "offset": 103036}
+{"name": "approved", "t_ns": 1788355309686004823, "offset": 103036}
+{"name": "notify_turn_complete", "t_ns": 1788355309686476929, "offset": 103036}
+{"name": "quiet_timeout", "t_ns": 1788355370299867233, "offset": 190512}
+{"name": "ready_after", "t_ns": 1788355370299929246, "offset": 190512}
+{"name": "focus_in", "t_ns": 1788355370299983799, "offset": 190512}
+{"name": "end", "t_ns": 1788355382831042727, "offset": 217287}

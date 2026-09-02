@@ -1,0 +1,40 @@
+1635744 mark resize
+1670435 started pid=1312614
+1258205613 wait_for '❯|manual mode on|auto mode on' matched at +1056
+1258295367 mark prompt_ready
+3234858272 wait_hook matched record 2
+6239610132 mark quiet
+6239637743 mark ready
+6639866500 mark compact_submitted
+6728382276 wait_hook matched record 3
+6728448992 mark pre_compact_hook
+7728618712 mark compacting
+12280623804 mark quiet
+12280651021 mark after_compact
+14681009192 mark resume_picker
+15681604153 mark quiet
+15681633193 mark resume_picker_settled
+17682606930 mark quiet
+17682629699 mark after_picker_esc
+19683625643 mark quiet
+19683661519 mark help_overlay
+21684619573 mark quiet
+21684665033 mark after_help_esc
+21684724257 mark resize
+23685605251 mark quiet
+23685633301 mark after_resize_small
+23685697184 mark resize
+25686609797 mark quiet
+25686647793 mark after_resize_back
+28633903088 mark typed_no_enter
+29634606091 mark quiet
+29634639866 mark typed_settled
+31135616140 mark quiet
+31135644517 mark cleared
+31135700627 mark pasted
+32149598590 mark quiet
+32149630176 mark paste_settled
+33650613882 mark quiet
+33650643227 mark cleared_2
+34769595590 wait_hook matched record 4
+35143843296 mark end
