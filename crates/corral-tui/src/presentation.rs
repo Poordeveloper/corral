@@ -33,6 +33,26 @@ const UNVERIFIED: &str = "Runtime unverified";
 /// process died (grill Q7).
 const NO_SCREEN: &str = "Screen unavailable";
 
+/// Where a session came from, in the user's words.
+///
+/// Only when Corral reliably knows: an origin it guessed would be the
+/// "never a guessed terminal host" rule broken by another name
+/// (`PRODUCT.md` §8). A session Corral launched says nothing — that is the
+/// ordinary case, and labelling it would make the exception invisible by
+/// making everything a label.
+const OUTSIDE_CORRAL: &str = "Running outside Corral";
+
+/// What a row says about a session Corral found rather than started, before
+/// anything it did has reached Corral.
+///
+/// `PRODUCT.md` §9's words exactly, and deliberately not §6's "Limited
+/// awareness": that names a provider whose integration is disabled or whose
+/// merge failed safe, which is a fact about Corral's configuration. This one
+/// is a session that simply has not acted yet, and it resolves itself the
+/// moment it does. Promising no more than that is the point — no imminent
+/// status, no heuristic pre-fill.
+const WARMING_UP: &str = "Status is limited until new activity arrives from this session.";
+
 /// The strongest main state Corral may claim for a session today.
 ///
 /// Two of the five (`PRODUCT.md` §4). Working, Needs You and Ready need
@@ -67,6 +87,13 @@ pub struct SessionPresentation {
     /// retires the older and an `awaiting_input` is not still here after a
     /// turn started.
     pub agent: Option<String>,
+    /// Where the session came from, when the daemon reliably knows and it is
+    /// worth saying. Absent for a session Corral launched, and absent again
+    /// for an origin this build has no word for.
+    pub origin: Option<&'static str>,
+    /// Present when Corral has found a session but nothing it did has reached
+    /// Corral yet. It goes away on its own, when the session acts.
+    pub warming_up: Option<&'static str>,
 }
 
 /// What a surface may say about one listed session.
@@ -105,6 +132,29 @@ pub fn present_at(item: &SessionListItem, now: SystemTime) -> SessionPresentatio
             Some(TerminalAccess::Available) | None => None,
         },
         agent: agent_line(item, now),
+        origin: match item.origin.as_deref() {
+            Some(corral_protocol::method::ORIGIN_DISCOVERED) => Some(OUTSIDE_CORRAL),
+            // Managed says nothing, and so does an origin this build has no
+            // word for: an unrecognized value is unknown rather than guessed
+            // at, the same rule `execution_state` follows.
+            _ => None,
+        },
+        // A session Corral did not launch has no provider identity until a
+        // delivery corroborates one. That is not a degraded runtime — the row
+        // keeps whatever execution truth it has — and it is not a
+        // configuration problem either: it is a session that has not acted
+        // yet, and the line says exactly that.
+        warming_up: match (item.origin.as_deref(), &item.provider) {
+            (Some(corral_protocol::method::ORIGIN_DISCOVERED), provider)
+                if provider
+                    .as_ref()
+                    .and_then(|facts| facts.external_id.as_ref())
+                    .is_none() =>
+            {
+                Some(WARMING_UP)
+            }
+            _ => None,
+        },
     }
 }
 
@@ -198,6 +248,10 @@ impl SessionPresentation {
     /// other about which one matters (grill Q2).
     pub fn beneath(&self) -> Vec<String> {
         let mut lines = Vec::new();
+        // Origin first: it is the most durable thing about the row and the
+        // one that explains the rest of what it does and does not say.
+        lines.extend(self.origin.map(str::to_owned));
+        lines.extend(self.warming_up.map(str::to_owned));
         lines.extend(self.screen.map(str::to_owned));
         lines.extend(self.agent.clone());
         lines

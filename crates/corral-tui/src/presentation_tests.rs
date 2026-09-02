@@ -352,3 +352,83 @@ fn the_lines_beneath_are_the_screen_line_then_the_report() {
         ],
     );
 }
+
+// Snapshot coverage for the rows a person actually reads (workflow §6, the
+// mandate that activates at PR7). A hand-written assertion proves the two
+// lines its author remembered; a snapshot proves the whole row, and a change
+// to any of it has to be looked at.
+
+/// Every line of a row, in the order a surface prints them, as one block.
+fn rendered(item: &SessionListItem) -> String {
+    let shown = present_at(item, SystemTime::UNIX_EPOCH + Duration::from_secs(1_000));
+    let mut block = shown.state_line();
+    for line in shown.beneath() {
+        block.push_str("\n  ");
+        block.push_str(&line);
+    }
+    if let Some(refusal) = shown.refuses_open() {
+        block.push_str(&format!("\n  [open refused] {refusal}"));
+    }
+    block
+}
+
+fn external(execution_state: &str, external_id: Option<&str>) -> SessionListItem {
+    SessionListItem {
+        session_id: "s".to_owned(),
+        title: "claude".to_owned(),
+        execution_state: execution_state.to_owned(),
+        terminal_access: Some(TerminalAccess::Unavailable),
+        provider: Some(corral_protocol::method::ProviderFacts {
+            name: "claude".to_owned(),
+            external_id: external_id.map(str::to_owned),
+        }),
+        agent_event: None,
+        origin: Some(corral_protocol::method::ORIGIN_DISCOVERED.to_owned()),
+        location_hint: None,
+    }
+}
+
+/// A session Corral found that has not acted yet: it is running, Corral says
+/// where it came from, promises no more than that the status resolves when it
+/// acts, and refuses Open with the reason already on the row.
+#[test]
+fn a_discovered_session_without_identity_renders_honestly() {
+    insta::assert_snapshot!(rendered(&external("running", None)));
+}
+
+/// The same session once a delivery has given it an identity. The origin
+/// stays — it is still not Corral's session — and the warming-up line goes,
+/// because the session has now acted.
+#[test]
+fn a_discovered_session_with_identity_drops_the_warming_up_line() {
+    insta::assert_snapshot!(rendered(&external("running", Some("session-abc"))));
+}
+
+/// A discovered session whose runtime Corral can no longer verify. Execution
+/// truth degrades on its own axis and the origin is unaffected.
+#[test]
+fn a_discovered_session_corral_cannot_verify_renders_honestly() {
+    insta::assert_snapshot!(rendered(&external("unknown", None)));
+}
+
+/// A session Corral launched says nothing about its origin: labelling the
+/// ordinary case would make the exception invisible by making everything a
+/// label.
+#[test]
+fn a_managed_session_carries_no_origin_line() {
+    let mut item = external("running", Some("session-abc"));
+    item.origin = Some(corral_protocol::method::ORIGIN_MANAGED.to_owned());
+    item.terminal_access = Some(TerminalAccess::Available);
+
+    insta::assert_snapshot!(rendered(&item));
+}
+
+/// An origin this build has no word for is unknown rather than guessed at —
+/// the same rule `execution_state` follows.
+#[test]
+fn an_origin_from_a_later_build_renders_as_no_origin_at_all() {
+    let mut item = external("running", Some("session-abc"));
+    item.origin = Some("from-a-later-corral".to_owned());
+
+    insta::assert_snapshot!(rendered(&item));
+}

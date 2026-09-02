@@ -1,0 +1,8 @@
+---
+source: crates/corral-tui/src/presentation_tests.rs
+assertion_line: 433
+expression: rendered(&item)
+---
+Running · Status unknown
+  Screen unavailable
+  [open refused] Screen unavailable

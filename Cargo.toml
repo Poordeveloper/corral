@@ -92,6 +92,15 @@ tokio = { version = "1.48", default-features = false, features = [
     "time",
 ] }
 
+# Snapshot testing for the terminal surfaces. The mandate activates at PR7
+# (`docs/ENGINEERING_WORKFLOW.md` §6): a rendered row is a user-visible
+# contract, and a hand-written assertion about it proves the two lines an
+# author remembered rather than the whole thing a person sees. Alternatives
+# considered: keeping hand-written assertions, which is what let the wording
+# drift the PR7 rows had to re-establish; and a bespoke golden-file harness,
+# which is this crate minus the review tooling.
+insta = { version = "1.48", default-features = false }
+
 # Format-preserving TOML, for the one file Corral edits that legally carries
 # the user's own comments and layout: Codex's `config.toml` (ADR 0013 D3, and
 # the 2026-09-02 spike that measured Codex preserving what it did not write).

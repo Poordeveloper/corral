@@ -1,0 +1,10 @@
+---
+source: crates/corral-tui/src/presentation_tests.rs
+assertion_line: 396
+expression: "rendered(&external(\"running\", None))"
+---
+Running · Status unknown
+  Running outside Corral
+  Status is limited until new activity arrives from this session.
+  Screen unavailable
+  [open refused] Screen unavailable
