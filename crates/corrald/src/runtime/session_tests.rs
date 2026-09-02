@@ -648,7 +648,7 @@ fn the_last_output_instant_is_published_once_the_child_draws() {
 /// claim without asking the screen.
 #[test]
 fn a_settled_screen_publishes_its_reading() {
-    let (manifest, _) = crate::detection::parse(
+    let (manifest, _) = crate::detection::manifest::parse(
         "schema = 1\nmin_engine_version = 1\nversion = \"t\"\nprovider = \"test\"\n[[rule]]\nid = \"hello\"\nasserts = \"turn_complete\"\nregion = \"whole_screen\"\nall = [\"hello\"]\n",
     )
     .expect("manifest");

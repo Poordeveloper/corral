@@ -526,7 +526,7 @@ fn the_summary_carries_totals_and_unacknowledged_per_class() {
             unacknowledged: 0,
         },
     };
-    let encoded = serde_json::to_value(&summary).expect("encode");
+    let encoded = serde_json::to_value(summary).expect("encode");
     assert_eq!(
         encoded,
         json!({"needs_you": {"total": 3, "unacknowledged": 2}, "ready": {"total": 1, "unacknowledged": 0}})

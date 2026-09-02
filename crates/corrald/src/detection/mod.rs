@@ -1,14 +1,11 @@
 //! Screen detection: versioned manifest data over the emulator the daemon owns
 //! (ADR 0015 D6).
 
-mod manifest;
+pub(crate) mod manifest;
 
 use std::path::Path;
 
-pub use manifest::{
-    ENGINE_VERSION, Loadout, Manifest, ManifestRefused, OverrideRefused, Reading, Region, Rule,
-    RuleRefused, SCHEMA, Screen, evaluate, load, parse,
-};
+pub use manifest::{Loadout, Manifest, Screen, evaluate, load};
 
 /// The manifests compiled into this build, one per provider.
 const BUILT_IN: [&str; 2] = [

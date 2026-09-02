@@ -29,7 +29,7 @@ fn daemon(name: &str) -> (Arc<DaemonState>, std::path::PathBuf) {
 #[test]
 fn a_sealed_screen_reading_becomes_the_sessions_main_state() {
     let (state, directory) = daemon("sealed-reading");
-    let (manifest, _) = crate::detection::parse(
+    let (manifest, _) = crate::detection::manifest::parse(
         "schema = 1\nmin_engine_version = 1\nversion = \"t\"\nprovider = \"test\"\n\
          [[rule]]\nid = \"ready\"\nasserts = \"turn_complete\"\nregion = \"whole_screen\"\n\
          all = [\"done\"]\nsealed_by = \"synthetic\"\n",

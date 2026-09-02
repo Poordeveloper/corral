@@ -287,8 +287,8 @@ async fn attention(connection: &mut Connection, action: AttentionAction) -> Exit
                 return ExitCode::SUCCESS;
             }
             println!(
-                "{:<12}{:>12}{:>12}{:>8}{:>10}  {}",
-                "day", "transitions", "needs you", "ready", "disputes", ""
+                "{:<12}{:>12}{:>12}{:>8}{:>10}",
+                "day", "transitions", "needs you", "ready", "disputes"
             );
             for day in &report.days {
                 println!(
