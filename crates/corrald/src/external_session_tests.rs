@@ -138,10 +138,9 @@ async fn an_uncorroborated_delivery_mints_nothing() {
     );
 }
 
-/// One event, two channels, one fact. A managed session's global entry fires
-/// alongside its injected one — measured 2026-09-02, milliseconds apart and
-/// in an unstable order — and the second must never make a second Session or
-/// a second Run.
+/// An external session reports on every turn, and every delivery after the
+/// first names an identity Corral already holds. The second must never make
+/// a second Session or a second Run.
 #[tokio::test]
 async fn a_second_delivery_of_one_identity_confirms_rather_than_duplicates() {
     let registry = registry("dedupe");

@@ -34,10 +34,9 @@ pub enum Discovered {
     /// A Session Corral knew, with no Run in progress, now has one on the
     /// runtime that corroborated this delivery.
     Run,
-    /// The identity was already known and its Run already in progress —
-    /// usually because this is a managed session whose global entry fired
-    /// alongside its injected one. Confirmed and nothing minted: one event,
-    /// two channels, one fact (ADR 0014 D4).
+    /// The identity was already known and its Run already in progress: the
+    /// second and every later delivery of an external session. Confirmed and
+    /// nothing minted.
     AlreadyKnown,
 }
 
@@ -66,6 +65,35 @@ pub async fn discovered(
         );
         return Ok(None);
     };
+
+    // A runtime this daemon is running itself is not a discovery, whatever
+    // its global entry reports. The launch attributes that runtime, through
+    // the injected entry and its token, and it may not have yet: the two
+    // entries fire milliseconds apart in an unstable order (measured
+    // 2026-09-02), and a global delivery taken in first would mint a second
+    // Session for the identity and leave the managed Session refused its own
+    // for good. Told apart the way the sweep tells them apart — by the
+    // process group the daemon created the child as — and withheld when the
+    // daemon cannot say which children are its own, because a fact it cannot
+    // file under the right Session is not one to guess at.
+    match state.with_runtime(|runtime| runtime.owned.groups()) {
+        Some(owned) if !owned.contains(&process.group) => {}
+        Some(_) => {
+            debug!(
+                provider = provider.as_str(),
+                pid = process.pid,
+                "an external delivery corroborated a runtime Corral is running itself",
+            );
+            return Ok(None);
+        }
+        None => {
+            warn!(
+                provider = provider.as_str(),
+                "an external delivery could not be told from a managed one; withheld",
+            );
+            return Ok(None);
+        }
+    }
 
     let Ok(named) = ProviderId::new(provider.as_str()) else {
         warn!("a provider name this build declares is not a usable provider id");
@@ -104,12 +132,10 @@ pub async fn discovered(
             }
             Ok(Some(Discovered::Session))
         }
-        // The identity is already bound. That is the ordinary outcome for a
-        // managed session — the global entry and the injected one both fire
-        // for each event (measured 2026-09-02) — and for the second and every
-        // later delivery of an external one. A Run in progress is left alone:
-        // a second Run for a runtime that already has one would be a
-        // duplicate episode, not a discovery.
+        // The identity is already bound: the second and every later delivery
+        // of an external session. A Run in progress is left alone: a second
+        // Run for a runtime that already has one would be a duplicate
+        // episode, not a discovery.
         //
         // A known identity is not a completed discovery, though. The Session
         // and its provider binding commit before the runtime and its Run do,

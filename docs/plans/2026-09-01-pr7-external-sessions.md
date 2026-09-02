@@ -176,6 +176,17 @@ Corral's when read. Consequence: a provider a person starts by hand inside
 a Corral-hosted shell has a job-control group of its own and is listed as
 running outside Corral, which is true.
 
+Discovery applies the same exclusion before it mints anything. A managed
+session's global entry fires alongside its injected one, milliseconds apart
+in an unstable order, and the two are ingested serially in arrival order;
+a global delivery taken in first, corroborated by the daemon's own child,
+would otherwise create a second Session for the identity and leave the
+managed Session refused its own for good. So a corroborated runtime in an
+owned group is the launch's to attribute, through its token, and discovery
+withholds — as it does when the daemon cannot say which children are its
+own, since a fact it cannot file under the right Session is not one to
+guess at.
+
 The integration writer serializes per provider: an enable, disable, or
 startup repair is intent recorded and then the file brought to it, held
 under one turn across the whole sequence, because the write's identity
