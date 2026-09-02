@@ -154,6 +154,13 @@ pub async fn serve(
         lifecycle.subscribe(),
     ));
 
+    // What the providers' own stores hold, at start and on a cadence, for
+    // every provider whose layout the matrix sealed (ADR 0016 D1).
+    tokio::spawn(crate::history::enumerate_until_shutdown(
+        Arc::clone(&state),
+        lifecycle.subscribe(),
+    ));
+
     // The freshness tick: claims rot against their horizons whether or not
     // anything arrives, and only a clock notices (ADR 0015 D4).
     tokio::spawn(crate::attention::tick_until_shutdown(

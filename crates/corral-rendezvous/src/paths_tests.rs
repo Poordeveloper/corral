@@ -26,6 +26,7 @@ fn derives_every_artifact_from_the_account_home() {
         paths.diagnostics_dir(),
         Path::new("/home/example/.corral/diagnostics")
     );
+    assert_eq!(paths.account_home(), Path::new("/home/example"));
 }
 
 /// The account home only supplies the root; the layout under it is one

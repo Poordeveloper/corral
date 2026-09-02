@@ -494,7 +494,8 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
             .map(|session| {
                 let reported = runtime.reported.get(session.session).cloned();
                 let attention = attention_facts(&runtime.attention, session.session);
-                (session, reported, attention)
+                let last_active = runtime.history.last_active(session.session);
+                (session, reported, attention, last_active)
             })
             .collect::<Vec<_>>();
         let externally: Vec<Option<method::AttentionFacts>> = external
@@ -515,8 +516,8 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
 
     let mut sessions: Vec<serde_json::Value> = described
         .into_iter()
-        .map(|(session, reported, attention)| {
-            encode_session(&session, reported.as_ref(), attention)
+        .map(|(session, reported, attention, last_active)| {
+            encode_session(&session, reported.as_ref(), attention, last_active)
         })
         .collect();
     // After the managed rows: the runtimes outside Corral. A session Corral
@@ -529,6 +530,12 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
             .zip(externally)
             .map(|(candidate, attention)| encode_external(candidate, attention)),
     );
+    // Last, in their own non-live tier by recency (grill Q18): what the
+    // providers' stores hold that nothing above already showed.
+    let history = state
+        .with_runtime(|runtime| runtime.history.rows())
+        .unwrap_or_default();
+    sessions.extend(history.iter().map(encode_history));
     match serde_json::to_value(SessionListResult { sessions }) {
         Ok(value) => Frame::result(id, value),
         Err(source) => Frame::error(
@@ -860,10 +867,42 @@ fn attention_facts(
     })
 }
 
+fn unix_ms(at: std::time::SystemTime) -> i64 {
+    at.duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+/// A session found in a provider's store and nowhere else: no runtime, no
+/// Run, execution unknown, and the identity the store gave it (ADR 0016 D2).
+fn encode_history(row: &crate::history::HistoryRow) -> serde_json::Value {
+    serde_json::to_value(SessionListItem {
+        session_id: row.session.to_string(),
+        title: row.entry.provider.as_str().to_owned(),
+        // Corral observed no runtime and no end: unknown is the truth, and
+        // `exited` would be a claim nothing supports.
+        execution_state: "unknown".to_owned(),
+        terminal_access: Some(corral_protocol::method::TerminalAccess::Unavailable),
+        provider: Some(ProviderFacts {
+            name: row.entry.provider.as_str().to_owned(),
+            external_id: Some(row.entry.external_id.as_str().to_owned()),
+        }),
+        agent_event: None,
+        origin: Some(method::ORIGIN_HISTORY.to_owned()),
+        // Never the encoded directory name as a path (grill Q25).
+        location_hint: None,
+        attention: None,
+        last_active_unix_ms: Some(unix_ms(row.entry.last_active)),
+    })
+    .unwrap_or_else(|_| serde_json::json!({}))
+}
+
 fn encode_session(
     session: &ManagedSession,
     reported: Option<&ReportedSession>,
     attention: Option<method::AttentionFacts>,
+    last_active: Option<std::time::SystemTime>,
 ) -> serde_json::Value {
     serde_json::to_value(SessionListItem {
         session_id: session.session.to_string(),
@@ -892,6 +931,7 @@ fn encode_session(
         origin: Some(method::ORIGIN_MANAGED.to_owned()),
         location_hint: None,
         attention,
+        last_active_unix_ms: last_active.map(unix_ms),
     })
     .unwrap_or_else(|_| serde_json::json!({}))
 }
@@ -937,6 +977,7 @@ fn encode_external(
         // this runtime was found to be carrying. A runtime nothing has named
         // yet is no Session, and has nothing to be in a state about.
         attention,
+        last_active_unix_ms: None,
     })
     .unwrap_or_else(|_| serde_json::json!({}))
 }

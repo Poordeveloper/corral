@@ -599,12 +599,20 @@ pub struct SessionListItem {
         skip_serializing_if = "Option::is_none"
     )]
     pub attention: Option<AttentionFacts>,
+    /// When the provider's store last recorded activity for this session, on
+    /// the daemon's clock. Absent means Corral has no such fact, never that
+    /// the session was never active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active_unix_ms: Option<i64>,
 }
 
 /// The origins this build names. Open on the decode side; see
 /// `SessionListItem::origin`.
 pub const ORIGIN_MANAGED: &str = "managed";
 pub const ORIGIN_DISCOVERED: &str = "discovered";
+/// Found in the provider's own session store and nowhere else yet: no
+/// runtime, no Run, execution unknown (ADR 0016 D2).
+pub const ORIGIN_HISTORY: &str = "history";
 
 /// `session.list`'s result.
 ///

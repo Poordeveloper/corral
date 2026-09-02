@@ -131,6 +131,10 @@ pub struct DaemonState {
     /// (ADR 0015 D6). Read once; a changed manifest means a restart.
     detection: crate::detection::Loadout,
 
+    /// The account home the providers keep their session stores under, once
+    /// the daemon knows it. Absent means no store is enumerated.
+    account_home: Mutex<Option<PathBuf>>,
+
     /// The attention journal, once the daemon has a diagnostics directory to
     /// put it in. Absent means nothing is journaled — a test daemon, or a
     /// directory that could not be made — and derivation carries on either
@@ -162,6 +166,10 @@ pub struct Runtime {
     /// reason: nothing derived is durable, and a restart reads Unknown until a
     /// session acts (ADR 0015 D8).
     pub attention: crate::attention::Ledger,
+    /// What the providers' own stores hold that Corral does not otherwise
+    /// know, and the recency they record for what it does. Live: a restart
+    /// re-enumerates rather than replays (ADR 0016 D2).
+    pub history: crate::history::HistoryRows,
 }
 
 impl DaemonState {
@@ -203,6 +211,7 @@ impl DaemonState {
             resuming: Mutex::new(HashSet::new()),
             commands: InFlightCommands::new(),
             detection: crate::detection::load_built_in(Some(&state_dir.join("manifests"))),
+            account_home: Mutex::new(None),
             journal: Mutex::new(None),
             runtime: Mutex::new(Runtime::default()),
         })
@@ -216,6 +225,17 @@ impl DaemonState {
         self.detection
             .manifest(provider.as_str())
             .map(|manifest| Arc::new(manifest.clone()))
+    }
+
+    /// Tell this daemon where the account's provider stores live.
+    pub fn attach_account_home(&self, home: PathBuf) {
+        if let Ok(mut slot) = self.account_home.lock() {
+            *slot = Some(home);
+        }
+    }
+
+    pub fn account_home(&self) -> Option<PathBuf> {
+        self.account_home.lock().ok().and_then(|slot| slot.clone())
     }
 
     /// Give this daemon its attention journal.
@@ -489,6 +509,17 @@ impl DaemonState {
     /// The turn an integration operation takes before it writes.
     pub fn integration_turns(&self) -> &crate::integration::WriteTurns {
         &self.integration_turns
+    }
+
+    /// The Session an external identity resolves to under any binding kind,
+    /// which history enumeration asks before it makes a row (ADR 0016 D2).
+    pub async fn session_by_external_id(
+        self: &Arc<Self>,
+        provider: corral_core::ProviderId,
+        external_id: ExternalId,
+    ) -> Result<Option<CorralSessionId>, StateError> {
+        self.off_the_reactor(move |store| store.session_by_external_id(&provider, &external_id))
+            .await
     }
 
     /// The bindings recorded against one Session.

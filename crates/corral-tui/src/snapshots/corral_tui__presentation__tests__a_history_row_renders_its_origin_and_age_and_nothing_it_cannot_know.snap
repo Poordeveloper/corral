@@ -1,0 +1,9 @@
+---
+source: crates/corral-tui/src/presentation_tests.rs
+expression: "rendered(&history_row(\"claude\", 0))"
+---
+Status unknown
+  Found in Claude history
+  Last active 16m ago
+  Screen unavailable
+  [open refused] Screen unavailable

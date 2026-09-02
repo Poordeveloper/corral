@@ -131,6 +131,7 @@ fn start() -> Result<ExitCode, StartupError> {
         DaemonState::open(paths.registry(), paths.launch_dir(), paths.state_dir())
             .map_err(StartupError::State)?,
     );
+    state.attach_account_home(paths.account_home().to_path_buf());
     // Diagnostics beside state, never inside it, and never a startup failure:
     // a daemon that cannot journal still derives (ADR 0015 D8).
     match crate::attention::Journal::open(

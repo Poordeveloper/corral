@@ -156,6 +156,7 @@ fn an_unknown_terminal_access_is_left_off_the_wire() {
         origin: None,
         location_hint: None,
         attention: None,
+        last_active_unix_ms: None,
     };
 
     let encoded = serde_json::to_value(&item).expect("encode");
@@ -177,6 +178,7 @@ fn absent_provider_facts_are_left_off_the_wire() {
         origin: None,
         location_hint: None,
         attention: None,
+        last_active_unix_ms: None,
     };
 
     let encoded = serde_json::to_value(&item).expect("encode");
@@ -452,6 +454,7 @@ fn a_list_item_carries_the_daemons_attention_claim() {
                 acknowledged: false,
             }],
         }),
+        last_active_unix_ms: None,
     };
     let encoded = serde_json::to_value(&item).expect("encode");
     assert_eq!(encoded["attention"]["state"], json!("needs_you"));
@@ -632,4 +635,23 @@ fn a_dispute_names_an_item_when_it_can_and_learns_whether_it_was_stale() {
     );
     assert_eq!(ATTENTION_REPORT, "attention.report");
     assert_eq!(ATTENTION_DISPUTE, "attention.dispute");
+}
+
+/// A history row says where it came from and when it was last active, and
+/// an older peer reads it as an unknown-origin row with unknown execution.
+#[test]
+fn a_history_row_carries_its_origin_and_recency() {
+    assert_eq!(ORIGIN_HISTORY, "history");
+    let decoded: SessionListItem = serde_json::from_value(json!({
+        "session_id": "s", "title": "Claude Code", "execution_state": "unknown",
+        "origin": "history", "last_active_unix_ms": 1_788_350_400_000_i64
+    }))
+    .expect("decode");
+    assert_eq!(decoded.origin.as_deref(), Some(ORIGIN_HISTORY));
+    assert_eq!(decoded.last_active_unix_ms, Some(1_788_350_400_000));
+    let older: SessionListItem = serde_json::from_value(json!({
+        "session_id": "s", "title": "Claude Code", "execution_state": "unknown"
+    }))
+    .expect("decode");
+    assert_eq!(older.last_active_unix_ms, None);
 }

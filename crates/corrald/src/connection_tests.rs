@@ -901,3 +901,36 @@ async fn a_record_lost_while_nothing_could_be_written_is_not_forgotten_by_a_rest
     assert_eq!(day["incomplete"], true);
     assert_eq!(day["disputes"], 0);
 }
+
+/// A history row is listed under its own stable id, in its own tier after
+/// the live rows, with its origin and the store's recency (ADR 0016 D2).
+#[tokio::test]
+async fn a_history_row_is_listed_with_its_origin_and_recency() {
+    let registry = Registry::new("history-row");
+    let at = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_788_350_400);
+    registry.state.with_runtime(|runtime| {
+        runtime.history.replace(
+            crate::provider::KnownProvider::Claude,
+            vec![crate::history::HistoryEntry {
+                provider: crate::provider::KnownProvider::Claude,
+                external_id: corral_core::ExternalId::new("session-abc").expect("usable"),
+                last_active: at,
+                store_label: "-root-proj".to_owned(),
+                path: std::path::PathBuf::from("/store/session-abc.jsonl"),
+            }],
+            Vec::new(),
+        );
+    });
+
+    let value = result_value(dispatch(&request(method::SESSION_LIST, None), &registry.state).await);
+    let rows = value["sessions"].as_array().expect("sessions");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["origin"], "history");
+    assert_eq!(rows[0]["execution_state"], "unknown");
+    assert_eq!(rows[0]["provider"]["external_id"], "session-abc");
+    assert_eq!(rows[0]["last_active_unix_ms"], 1_788_350_400_000_i64);
+    assert!(
+        rows[0].get("location_hint").is_none(),
+        "never the encoded name as a path"
+    );
+}

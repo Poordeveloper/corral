@@ -14,6 +14,7 @@ fn listed(execution_state: &str, terminal_access: Option<TerminalAccess>) -> Ses
         origin: None,
         location_hint: None,
         attention: None,
+        last_active_unix_ms: None,
     }
 }
 
@@ -390,6 +391,7 @@ fn external(execution_state: &str, external_id: Option<&str>) -> SessionListItem
         origin: Some(corral_protocol::method::ORIGIN_DISCOVERED.to_owned()),
         location_hint: None,
         attention: None,
+        last_active_unix_ms: None,
     }
 }
 
@@ -456,6 +458,7 @@ fn attended(state: AttentionWireState, items: Vec<AttentionItemFacts>) -> Sessio
             last_known: None,
             items,
         }),
+        last_active_unix_ms: None,
     }
 }
 
@@ -584,4 +587,48 @@ fn an_exit_under_a_pending_request_renders_the_disclosure() {
         at_unix_ms: 0,
     });
     insta::assert_snapshot!(rendered(&item));
+}
+
+fn history_row(provider: &str, last_active_unix_ms: i64) -> SessionListItem {
+    SessionListItem {
+        session_id: "0f9b6c1a-3333-4333-8333-000000000003".to_owned(),
+        title: provider.to_owned(),
+        execution_state: "unknown".to_owned(),
+        terminal_access: Some(TerminalAccess::Unavailable),
+        provider: Some(corral_protocol::method::ProviderFacts {
+            name: provider.to_owned(),
+            external_id: Some("session-abc".to_owned()),
+        }),
+        agent_event: None,
+        origin: Some(corral_protocol::method::ORIGIN_HISTORY.to_owned()),
+        location_hint: None,
+        attention: None,
+        last_active_unix_ms: Some(last_active_unix_ms),
+    }
+}
+
+/// A pure history row says where it was found and when it was last active,
+/// and nothing about a runtime or a location (ADR 0016 D1, grill Q25).
+#[test]
+fn a_history_row_renders_its_origin_and_age_and_nothing_it_cannot_know() {
+    let presented = present_at(
+        &history_row("claude", 0),
+        SystemTime::UNIX_EPOCH + Duration::from_secs(2 * 60 * 60),
+    );
+    assert_eq!(presented.state_line(), "Status unknown");
+    assert_eq!(
+        presented.found_in.as_deref(),
+        Some("Found in Claude history")
+    );
+    assert!(
+        presented
+            .beneath()
+            .contains(&"Last active 2h ago".to_owned())
+    );
+    assert_eq!(
+        presented.refuses_continue(),
+        None,
+        "a history row may be continued"
+    );
+    insta::assert_snapshot!(rendered(&history_row("claude", 0)));
 }
