@@ -403,6 +403,7 @@ async fn ingest_external(
         identity,
         corroboration,
         delivered.observed_at,
+        Some(report.fact),
     )
     .await?;
     Ok(())

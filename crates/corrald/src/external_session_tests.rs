@@ -72,6 +72,7 @@ async fn a_corroborated_delivery_makes_a_session_visible() {
         identity("session-abc"),
         reached(4321, at(500)),
         at(900),
+        None,
     )
     .await
     .expect("recorded");
@@ -91,6 +92,7 @@ async fn the_run_starts_when_the_runtime_started_not_when_corral_looked() {
         identity("session-abc"),
         reached(4321, at(500)),
         at(900),
+        None,
     )
     .await
     .expect("recorded");
@@ -121,6 +123,7 @@ async fn an_uncorroborated_delivery_mints_nothing() {
             identity("thread-title-generation"),
             corroboration,
             at(900),
+            None,
         )
         .await
         .expect("recorded");
@@ -150,6 +153,7 @@ async fn a_second_delivery_of_one_identity_confirms_rather_than_duplicates() {
         identity("session-abc"),
         reached(4321, at(500)),
         at(900),
+        None,
     )
     .await
     .expect("recorded");
@@ -160,6 +164,7 @@ async fn a_second_delivery_of_one_identity_confirms_rather_than_duplicates() {
         identity("session-abc"),
         reached(4321, at(500)),
         at(901),
+        None,
     )
     .await
     .expect("recorded");
@@ -207,6 +212,7 @@ async fn a_session_left_without_a_run_gets_one_on_the_next_delivery() {
         identity("session-abc"),
         reached(4321, at(500)),
         at(901),
+        None,
     )
     .await
     .expect("recorded");
@@ -292,6 +298,7 @@ async fn a_discovery_shows_the_runtime_under_its_session() {
         identity("session-abc"),
         reached(4321, at(500)),
         at(900),
+        None,
     )
     .await
     .expect("recorded");
@@ -322,6 +329,7 @@ async fn a_runtime_seen_gone_ends_the_run_it_was_in() {
         identity("session-abc"),
         reached(4321, at(500)),
         at(900),
+        None,
     )
     .await
     .expect("recorded");
@@ -349,6 +357,7 @@ async fn two_identities_are_two_sessions_even_from_one_process() {
             identity(name),
             reached(4321, at(500)),
             at(900),
+            None,
         )
         .await
         .expect("recorded");
@@ -389,6 +398,7 @@ async fn a_discovered_runtime_never_becomes_a_control_capable_binding() {
         identity("session-abc"),
         reached(4321, at(500)),
         at(900),
+        None,
     )
     .await
     .expect("recorded");
@@ -417,6 +427,7 @@ async fn a_restart_resolves_every_external_run_it_recorded() {
         identity("session-abc"),
         reached(u32::MAX - 1, at(500)),
         at(900),
+        None,
     )
     .await
     .expect("recorded");

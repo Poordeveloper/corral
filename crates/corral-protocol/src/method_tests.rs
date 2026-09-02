@@ -456,9 +456,15 @@ fn a_list_item_carries_the_daemons_attention_claim() {
     let encoded = serde_json::to_value(&item).expect("encode");
     assert_eq!(encoded["attention"]["state"], json!("needs_you"));
     assert_eq!(encoded["attention"]["since_unix_ms"], json!(1_000));
-    assert_eq!(encoded["attention"]["items"][0]["reason"], json!("needs_input"));
+    assert_eq!(
+        encoded["attention"]["items"][0]["reason"],
+        json!("needs_input")
+    );
     let decoded: SessionListItem = serde_json::from_value(encoded).expect("decode");
-    assert_eq!(decoded.attention.expect("attention").state, AttentionWireState::NeedsYou);
+    assert_eq!(
+        decoded.attention.expect("attention").state,
+        AttentionWireState::NeedsYou
+    );
 }
 
 /// A state a newer daemon named decodes as no claim: the client renders
@@ -471,7 +477,10 @@ fn an_attention_state_this_build_does_not_know_decodes_as_no_claim() {
     }))
     .expect("decode");
     let attention = decoded.attention.expect("attention");
-    assert_eq!(attention.state, AttentionWireState::Unrecognized("meditating".into()));
+    assert_eq!(
+        attention.state,
+        AttentionWireState::Unrecognized("meditating".into())
+    );
     assert_eq!(attention.state.as_claim(), None);
 }
 
@@ -492,7 +501,10 @@ fn last_known_rides_beneath_unknown() {
     let facts = AttentionFacts {
         state: AttentionWireState::Unknown,
         since_unix_ms: 9_000,
-        last_known: Some(LastKnownFacts { state: AttentionWireState::NeedsYou, at_unix_ms: 3_000 }),
+        last_known: Some(LastKnownFacts {
+            state: AttentionWireState::NeedsYou,
+            at_unix_ms: 3_000,
+        }),
         items: Vec::new(),
     };
     let encoded = serde_json::to_value(&facts).expect("encode");
@@ -505,11 +517,20 @@ fn last_known_rides_beneath_unknown() {
 #[test]
 fn the_summary_carries_totals_and_unacknowledged_per_class() {
     let summary = AttentionSummaryResult {
-        needs_you: AttentionCount { total: 3, unacknowledged: 2 },
-        ready: AttentionCount { total: 1, unacknowledged: 0 },
+        needs_you: AttentionCount {
+            total: 3,
+            unacknowledged: 2,
+        },
+        ready: AttentionCount {
+            total: 1,
+            unacknowledged: 0,
+        },
     };
     let encoded = serde_json::to_value(&summary).expect("encode");
-    assert_eq!(encoded, json!({"needs_you": {"total": 3, "unacknowledged": 2}, "ready": {"total": 1, "unacknowledged": 0}}));
+    assert_eq!(
+        encoded,
+        json!({"needs_you": {"total": 3, "unacknowledged": 2}, "ready": {"total": 1, "unacknowledged": 0}})
+    );
     let decoded: AttentionSummaryResult = serde_json::from_value(json!({
         "needs_you": {"total": 3, "unacknowledged": 2}, "ready": {"total": 1, "unacknowledged": 0}, "later": {}
     }))
@@ -522,9 +543,12 @@ fn the_summary_carries_totals_and_unacknowledged_per_class() {
 #[test]
 fn attention_acknowledge_names_a_session_and_an_item() {
     let decoded: AttentionAcknowledgeParams =
-        serde_json::from_value(json!({"session_id": "s", "attention_item_id": "i"})).expect("decode");
+        serde_json::from_value(json!({"session_id": "s", "attention_item_id": "i"}))
+            .expect("decode");
     assert_eq!(decoded.attention_item_id, "i");
-    assert!(serde_json::from_value::<AttentionAcknowledgeParams>(json!({"session_id": "s"})).is_err());
+    assert!(
+        serde_json::from_value::<AttentionAcknowledgeParams>(json!({"session_id": "s"})).is_err()
+    );
 }
 
 #[test]
@@ -548,7 +572,10 @@ fn every_attention_state_and_reason_survives_the_wire() {
         let decoded: AttentionWireState = serde_json::from_value(encoded).expect("decode");
         assert_eq!(decoded, state);
     }
-    for reason in [AttentionReasonWire::NeedsInput, AttentionReasonWire::TurnComplete] {
+    for reason in [
+        AttentionReasonWire::NeedsInput,
+        AttentionReasonWire::TurnComplete,
+    ] {
         let encoded = serde_json::to_value(&reason).expect("encode");
         let decoded: AttentionReasonWire = serde_json::from_value(encoded).expect("decode");
         assert_eq!(decoded, reason);

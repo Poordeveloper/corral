@@ -2,10 +2,11 @@ use std::time::{Duration, SystemTime};
 
 use super::*;
 
-/// A last reliable fact is shown beneath Unknown and nowhere else
+/// A last reliable fact is shown beneath Unknown, and beneath Exited when a
+/// request was pending — "Exited before you responded" — and nowhere else
 /// (`PRODUCT.md` §4): the constructors make any other pairing unwritable.
 #[test]
-fn a_last_known_fact_exists_only_beneath_unknown() {
+fn a_last_known_fact_exists_only_beneath_unknown_or_exited() {
     let then = SystemTime::UNIX_EPOCH;
     let rotted = AttentionState::unknown(
         then + Duration::from_secs(60),
@@ -19,6 +20,13 @@ fn a_last_known_fact_exists_only_beneath_unknown() {
 
     let working = AttentionState::asserted(MainState::Working, then);
     assert_eq!(working.last_known(), None);
+
+    let exited = AttentionState::exited(then, Some(LastKnown::new(MainState::NeedsYou, then)));
+    assert_eq!(exited.main(), MainState::Exited);
+    assert_eq!(
+        exited.last_known().map(|known| known.state()),
+        Some(MainState::NeedsYou)
+    );
 }
 
 /// Exited and Unknown are not semantic assertions; `asserted` refuses them so

@@ -87,10 +87,11 @@ impl LastKnown {
 }
 
 /// A Session's derived attention state: the main state, since when, and —
-/// only beneath Unknown — what was last reliably known.
+/// only beneath Unknown, or beneath Exited when a request was pending — what
+/// was last reliably known.
 ///
-/// Two constructors rather than public fields so the pairing is unwritable:
-/// a last-known fact beside Working would be a second claim beside the first.
+/// Constructors rather than public fields so the pairing is unwritable: a
+/// last-known fact beside Working would be a second claim beside the first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AttentionState {
     main: MainState,
@@ -107,6 +108,18 @@ impl AttentionState {
             main,
             since,
             last_known: None,
+        }
+    }
+
+    /// The runtime ended, with the request that was pending when it did —
+    /// "Exited before you responded" — neither shown live nor faked as
+    /// answered (`PRODUCT.md` §4).
+    #[must_use]
+    pub fn exited(since: SystemTime, pending: Option<LastKnown>) -> Self {
+        Self {
+            main: MainState::Exited,
+            since,
+            last_known: pending,
         }
     }
 

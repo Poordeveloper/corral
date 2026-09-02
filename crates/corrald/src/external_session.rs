@@ -51,6 +51,7 @@ pub async fn discovered(
     identity: ExternalId,
     corroboration: Corroboration,
     observed_at: SystemTime,
+    fact: Option<crate::provider::AgentFactKind>,
 ) -> Result<Option<Discovered>, StateError> {
     let Corroboration::Reached { process, .. } = corroboration else {
         // Payload identity with no corroboration is honest discovery
@@ -119,6 +120,7 @@ pub async fn discovered(
 
     match resolution {
         SessionResolution::Created { session, binding } => {
+            observe_fact(state, provider, session.id(), fact, observed_at);
             info!(
                 session = %session.id(),
                 binding = %binding.id(),
@@ -143,6 +145,7 @@ pub async fn discovered(
         // no Run — which every later delivery would otherwise confirm and
         // never repair. So the Run is ensured rather than assumed.
         SessionResolution::Existing { session, .. } => {
+            observe_fact(state, provider, session.id(), fact, observed_at);
             if has_live_run(state, session.id()).await? {
                 debug!(
                     session = %session.id(),
@@ -160,6 +163,33 @@ pub async fn discovered(
             }
         }
     }
+}
+
+/// The corroborated fact as a claim about the Session it was filed under.
+///
+/// Attested association — the identity is the provider's, the process was
+/// observed — on a runtime Corral does not own: no screen, no activity, and
+/// whether the event is version-sealed is the sealing table's answer
+/// (ADR 0015 D3, ADR 0014 D3).
+fn observe_fact(
+    state: &Arc<DaemonState>,
+    provider: KnownProvider,
+    session: corral_core::CorralSessionId,
+    fact: Option<crate::provider::AgentFactKind>,
+    observed_at: SystemTime,
+) {
+    let Some(claim) = fact.and_then(|fact| {
+        crate::attention::hook_fact_claim(
+            provider,
+            fact,
+            None,
+            corral_core::Assurance::Attested,
+            corral_core::Channel::ExternalRuntime,
+        )
+    }) else {
+        return;
+    };
+    state.with_runtime(|runtime| runtime.attention.observe(session, claim, observed_at));
 }
 
 /// Put the Session on the live table, in the row its runtime is shown as.

@@ -6,7 +6,7 @@
 
 use std::time::SystemTime;
 
-use corral_core::{AttentionItemId, AttentionReason, AttentionState, MainState};
+use corral_core::{AttentionItemId, AttentionReason, AttentionState, LastKnown, MainState};
 
 use super::Derived;
 
@@ -128,7 +128,15 @@ impl SessionAttention {
             }
             return Transition::Unchanged;
         }
-        self.state = derived.into_state(now);
+        self.state = match (to, self.item) {
+            // The request was pending when the runtime ended: kept beneath
+            // Exited so the row can say so, never shown live, never faked as
+            // answered.
+            (MainState::Exited, Some(item)) if item.reason == AttentionReason::NeedsInput => {
+                AttentionState::exited(now, Some(LastKnown::new(MainState::NeedsYou, item.since)))
+            }
+            _ => derived.into_state(now),
+        };
         let ended = self.item.take().map(|item| Transition::ItemEnded {
             item: item.id,
             end: match to {
