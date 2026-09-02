@@ -236,11 +236,19 @@ fn a_second_thread_in_one_runtime_contests_the_identity() {
 
     let mut client = RawClient::connect(&account.socket());
     client.establish();
-    // The contest is observable as the withdrawal of the current claim.
+    // The contest is observable as the withdrawal of the current claim — but
+    // only once the log holds it. Both turns render the same live fact, and
+    // the first turn's fact is published before its identity is established,
+    // so "no id yet, turn ended" is also what the first turn looks like for a
+    // moment; a wait that stopped there would read the first identity landing
+    // instead of the second withdrawing it. The withdrawal follows the durable
+    // contest, so both together mean a settled session.
     wait_until(provider::DELIVERED, || {
-        listed(&sessions(&mut client, 1), &session).is_some_and(|listed| {
-            external_id(listed).is_none() && agent_event_kind(listed) == Some("turn_ended")
-        })
+        recorded_kinds(&account.registry())
+            .iter()
+            .any(|kind| kind == "binding-contested")
+            && listed(&sessions(&mut client, 1), &session)
+                .is_some_and(|listed| external_id(listed).is_none())
     });
 
     let all = sessions(&mut client, 2);
@@ -250,6 +258,11 @@ fn a_second_thread_in_one_runtime_contests_the_identity() {
         provider_name(row),
         Some("codex"),
         "the product is still known"
+    );
+    assert_eq!(
+        agent_event_kind(row),
+        Some("turn_ended"),
+        "facts belonging to the managed runtime keep arriving",
     );
     let kinds = recorded_kinds(&account.registry());
     assert_eq!(
