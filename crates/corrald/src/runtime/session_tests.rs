@@ -628,3 +628,17 @@ fn sessions_started_in_the_same_instant_fall_back_to_a_deterministic_order() {
         expected,
     );
 }
+
+/// The screen thread publishes when the child last drew, so the attention
+/// engine can turn output into an activity claim without asking the screen.
+#[test]
+fn the_last_output_instant_is_published_once_the_child_draws() {
+    let running = started("printf hello; sleep 30");
+    let handle = running.handle.as_ref().expect("a handle");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while handle.last_output_at().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let drawn = handle.last_output_at().expect("the child drew");
+    assert!(drawn <= std::time::SystemTime::now());
+}

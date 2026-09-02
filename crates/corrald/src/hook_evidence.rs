@@ -421,7 +421,21 @@ async fn apply(
         kind: report.fact,
         observed_at,
     };
-    state.with_runtime(|runtime| runtime.reported.reported(session, provider, fact, arrived));
+    state.with_runtime(|runtime| {
+        runtime.reported.reported(session, provider, fact, arrived);
+        // The same fact as a claim: this launch's token puts the event on a
+        // runtime Corral constructed, and whether the event is version-sealed
+        // is the sealing table's answer, not this path's (ADR 0015 D3).
+        if let Some(claim) = crate::attention::hook_fact_claim(
+            provider,
+            fact.kind,
+            None,
+            corral_core::Assurance::Deterministic,
+            corral_core::Channel::CorralOwnedPty,
+        ) {
+            runtime.attention.observe(session, claim, observed_at);
+        }
+    });
 
     let Some(reported_id) = report.identity.clone() else {
         return Ok(());

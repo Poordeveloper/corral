@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::{Instant, SystemTime};
 
@@ -139,6 +139,22 @@ struct Published {
     poisoned: Arc<AtomicBool>,
     /// Set once, as that thread's last act (ADR 0007 L2).
     screen: Arc<OnceLock<FinalScreen>>,
+    /// When the child last drew, in milliseconds since the Unix epoch, or 0
+    /// before it has. Output within the echo window after a keystroke Corral
+    /// wrote is not the child drawing; it is the person typing.
+    last_output_ms: Arc<AtomicU64>,
+    last_input_ms: Arc<AtomicU64>,
+}
+
+/// How long after a keystroke Corral wrote its echo may arrive without being
+/// read as the agent drawing. A false Working, never a false Needs You, and
+/// tuning rather than contract (plan A2).
+const ECHO_WINDOW_MS: u64 = 150;
+
+fn unix_ms(at: std::time::SystemTime) -> u64 {
+    at.duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// The screen a run left behind, published when its screen thread ends.
@@ -319,10 +335,22 @@ impl SessionHandle {
     /// because only it knows its replica's live mode bits (`ARCHITECTURE.md`
     /// §3).
     pub fn write_input(&self, bytes: Vec<u8>) -> Result<(), InputRefused> {
+        self.published
+            .last_input_ms
+            .store(unix_ms(std::time::SystemTime::now()), Ordering::Release);
         match self.ask(Ask::Input(bytes)) {
             Ok(()) => Ok(()),
             Err(SessionGone) if self.recorded().is_ok() => Err(InputRefused::RunEnded),
             Err(SessionGone) => Err(InputRefused::RuntimeGone),
+        }
+    }
+
+    /// When the child last drew, without asking the screen — `None` before it
+    /// has, and never advanced by the echo of a keystroke Corral wrote.
+    pub fn last_output_at(&self) -> Option<std::time::SystemTime> {
+        match self.published.last_output_ms.load(Ordering::Acquire) {
+            0 => None,
+            ms => Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(ms)),
         }
     }
 
@@ -661,6 +689,8 @@ impl PendingSession {
             geometry: Arc::new(AtomicU32::new(pack_geometry(geometry))),
             poisoned: Arc::new(AtomicBool::new(false)),
             screen: Arc::new(OnceLock::new()),
+            last_output_ms: Arc::new(AtomicU64::new(0)),
+            last_input_ms: Arc::new(AtomicU64::new(0)),
         };
 
         // Writing to a PTY blocks when the child stops reading, and the child
@@ -858,6 +888,12 @@ fn serve_screen(
     while let Ok(ask) = questions.recv() {
         match ask {
             Ask::Output(chunk) => {
+                let now_ms = unix_ms(std::time::SystemTime::now());
+                if now_ms.saturating_sub(published.last_input_ms.load(Ordering::Acquire))
+                    > ECHO_WINDOW_MS
+                {
+                    published.last_output_ms.store(now_ms, Ordering::Release);
+                }
                 let reply = terminal.consume(&chunk);
                 let sequence = stream.advance();
                 // Not delivered once the screen is poisoned: the daemon can no

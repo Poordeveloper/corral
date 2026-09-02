@@ -334,3 +334,125 @@ fn an_unusable_agent_name_is_not_echoed_into_the_refusal() {
     // that a person should be told less.
     assert!(unknown_provider("cursor").contains("cursor"));
 }
+
+// ---------------------------------------------------------------- attention
+
+fn result_value(dispatch: Dispatch) -> serde_json::Value {
+    match dispatch {
+        Dispatch::Reply(Frame::Response(response)) => match response.outcome {
+            Outcome::Result(value) => value,
+            Outcome::Error(error) => panic!("expected a result, got {error:?}"),
+        },
+        Dispatch::Reply(other) => panic!("expected a response, got {other:?}"),
+        Dispatch::ReplyThenClose(_) | Dispatch::FailClosed(_) => panic!("expected a reply"),
+    }
+}
+
+fn sealed_hook(asserts: corral_core::SemanticState) -> corral_core::Claim {
+    corral_core::Claim {
+        source: corral_core::EvidenceSource::ProviderHook,
+        association: corral_core::Assurance::Deterministic,
+        channel: corral_core::Channel::CorralOwnedPty,
+        sealing: corral_core::Sealing::Sealed,
+        asserts,
+    }
+}
+
+/// The summary is the daemon's projection of its current items.
+#[tokio::test]
+async fn attention_summary_counts_the_ledgers_items() {
+    let registry = Registry::new("attention-summary");
+    let session = corral_core::CorralSessionId::mint();
+    let now = std::time::SystemTime::now();
+    registry.state.with_runtime(|runtime| {
+        runtime.attention.observe(
+            session,
+            sealed_hook(corral_core::SemanticState::NeedsYou),
+            now,
+        );
+        runtime
+            .attention
+            .tick(now, |_| crate::runtime::ExecutionState::Running);
+    });
+
+    let value =
+        result_value(dispatch(&request(method::ATTENTION_SUMMARY, None), &registry.state).await);
+    assert_eq!(value["needs_you"]["total"], 1);
+    assert_eq!(value["needs_you"]["unacknowledged"], 1);
+    assert_eq!(value["ready"]["total"], 0);
+}
+
+/// A stale id is refused with its own code and acknowledges nothing.
+#[tokio::test]
+async fn acknowledging_a_stale_item_is_refused_and_changes_nothing() {
+    let registry = Registry::new("attention-ack-stale");
+    let session = corral_core::CorralSessionId::mint();
+    let now = std::time::SystemTime::now();
+    registry.state.with_runtime(|runtime| {
+        runtime.attention.observe(
+            session,
+            sealed_hook(corral_core::SemanticState::NeedsYou),
+            now,
+        );
+        runtime
+            .attention
+            .tick(now, |_| crate::runtime::ExecutionState::Running);
+    });
+
+    let stale = corral_core::AttentionItemId::mint();
+    let (code, close) = error_code(
+        dispatch(
+            &request(
+                method::ATTENTION_ACKNOWLEDGE,
+                Some(json!({"session_id": session.to_string(), "attention_item_id": stale.to_string()})),
+            ),
+            &registry.state,
+        )
+        .await,
+    );
+    assert_eq!(code, ErrorCode::StaleAttentionItem);
+    assert!(!close);
+    let value =
+        result_value(dispatch(&request(method::ATTENTION_SUMMARY, None), &registry.state).await);
+    assert_eq!(value["needs_you"]["unacknowledged"], 1);
+}
+
+#[tokio::test]
+async fn acknowledging_the_current_item_clears_it_from_the_badge() {
+    let registry = Registry::new("attention-ack");
+    let session = corral_core::CorralSessionId::mint();
+    let now = std::time::SystemTime::now();
+    let item = registry
+        .state
+        .with_runtime(|runtime| {
+            runtime
+                .attention
+                .observe(session, sealed_hook(corral_core::SemanticState::Ready), now);
+            runtime
+                .attention
+                .tick(now, |_| crate::runtime::ExecutionState::Running);
+            runtime
+                .attention
+                .state(session)
+                .and_then(|(_, item)| item)
+                .map(|item| item.id())
+        })
+        .flatten()
+        .expect("an item");
+
+    let value = result_value(
+        dispatch(
+            &request(
+                method::ATTENTION_ACKNOWLEDGE,
+                Some(json!({"session_id": session.to_string(), "attention_item_id": item.to_string()})),
+            ),
+            &registry.state,
+        )
+        .await,
+    );
+    assert_eq!(value, json!({}));
+    let summary =
+        result_value(dispatch(&request(method::ATTENTION_SUMMARY, None), &registry.state).await);
+    assert_eq!(summary["ready"]["total"], 1);
+    assert_eq!(summary["ready"]["unacknowledged"], 0);
+}

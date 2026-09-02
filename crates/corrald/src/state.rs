@@ -126,6 +126,11 @@ pub struct DaemonState {
 
     /// The mutating commands this daemon is executing right now.
     commands: InFlightCommands,
+    /// The attention journal, once the daemon has a diagnostics directory to
+    /// put it in. Absent means nothing is journaled — a test daemon, or a
+    /// directory that could not be made — and derivation carries on either
+    /// way: diagnostics never gate product state.
+    journal: Mutex<Option<crate::attention::Journal>>,
     /// The sessions this daemon is running, and the tokens it has issued for
     /// their terminals.
     ///
@@ -148,6 +153,10 @@ pub struct Runtime {
     /// restart loses it and the rows return to bare runtime truth
     /// (ADR 0004 D7).
     pub reported: ReportedSessions,
+    /// Every Session's claims and derived attention state. Live for the same
+    /// reason: nothing derived is durable, and a restart reads Unknown until a
+    /// session acts (ADR 0015 D8).
+    pub attention: crate::attention::Ledger,
 }
 
 impl DaemonState {
@@ -188,8 +197,36 @@ impl DaemonState {
             incoming: Mutex::new(Some(incoming)),
             resuming: Mutex::new(HashSet::new()),
             commands: InFlightCommands::new(),
+            journal: Mutex::new(None),
             runtime: Mutex::new(Runtime::default()),
         })
+    }
+
+    /// Give this daemon its attention journal.
+    pub fn attach_journal(&self, journal: crate::attention::Journal) {
+        if let Ok(mut slot) = self.journal.lock() {
+            *slot = Some(journal);
+        }
+    }
+
+    /// Append records to the journal, if there is one. Blocking: the one
+    /// caller runs off the reactor.
+    pub fn journal_append(
+        &self,
+        now: std::time::SystemTime,
+        records: Vec<crate::attention::Record>,
+    ) {
+        let Ok(mut slot) = self.journal.lock() else {
+            return;
+        };
+        let Some(journal) = slot.as_mut() else {
+            return;
+        };
+        for record in records {
+            if let Err(source) = journal.append(now, record) {
+                tracing::warn!(%source, "an attention journal record could not be written");
+            }
+        }
     }
 
     /// This node's identity.

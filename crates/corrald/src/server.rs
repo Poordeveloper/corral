@@ -154,6 +154,13 @@ pub async fn serve(
         lifecycle.subscribe(),
     ));
 
+    // The freshness tick: claims rot against their horizons whether or not
+    // anything arrives, and only a clock notices (ADR 0015 D4).
+    tokio::spawn(crate::attention::tick_until_shutdown(
+        Arc::clone(&state),
+        lifecycle.subscribe(),
+    ));
+
     info!(endpoint = %socket.display(), "corrald is serving");
 
     let accepting = Arc::clone(&lifecycle);

@@ -128,6 +128,16 @@ fn start() -> Result<ExitCode, StartupError> {
         DaemonState::open(paths.registry(), paths.launch_dir(), paths.state_dir())
             .map_err(StartupError::State)?,
     );
+    // Diagnostics beside state, never inside it, and never a startup failure:
+    // a daemon that cannot journal still derives (ADR 0015 D8).
+    match crate::attention::Journal::open(
+        paths.diagnostics_dir(),
+        crate::attention::Budget::default(),
+        std::time::SystemTime::now(),
+    ) {
+        Ok(journal) => state.attach_journal(journal),
+        Err(source) => tracing::warn!(%source, "the attention journal could not be opened"),
+    }
 
     // Before the endpoint is bound, and only by the daemon holding the claim.
     // Every managed episode still open belongs to a daemon that is gone, and a
