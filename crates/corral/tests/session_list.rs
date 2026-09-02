@@ -145,8 +145,12 @@ fn the_list_opens_a_session_and_comes_back_to_a_current_one() {
     assert!(terminal.wait_for_exit().success());
 }
 
-/// Open is refused before the keystroke, not after it. The row stays, and its
-/// execution state keeps saying the process is running (grill Q7).
+/// Open is refused before the keystroke, not after it. The row stays, and
+/// nothing about it claims the process ended (grill Q7). What it reads is
+/// whichever the daemon's evidence supports at that moment: `Working` while
+/// the output the script just wrote is fresh PTY activity, `Running · Status
+/// unknown` once that has rotted — both true, and which one is a matter of
+/// milliseconds under load (seen under `./scripts/verify` on 2026-09-02).
 #[test]
 fn a_session_whose_screen_cannot_be_served_refuses_to_be_opened() {
     let account = TestAccount::new("tui-no-screen");
@@ -164,8 +168,14 @@ fn a_session_whose_screen_cannot_be_served_refuses_to_be_opened() {
     let still_listed = frame_after(&terminal, refused);
 
     assert!(
-        still_listed.contains("Running · Status unknown"),
+        still_listed.contains("  sh")
+            && (still_listed.contains("Running · Status unknown")
+                || still_listed.contains("Working")),
         "a screen Corral cannot serve was turned into a claim about the process:\n{still_listed}"
+    );
+    assert!(
+        !still_listed.contains("Exited") && !still_listed.contains("Unverifiable"),
+        "a screen Corral cannot serve was turned into an ending:\n{still_listed}"
     );
     assert!(said > 0);
 
