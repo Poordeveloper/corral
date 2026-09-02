@@ -18,7 +18,7 @@
 //! which is the honest answer for evidence that never earned durability
 //! (ADR 0014 D5).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
@@ -36,9 +36,10 @@ pub struct RuntimeCandidate {
     ///
     /// Minted once per incarnation and kept for as long as the runtime is
     /// seen, so a row does not change identity under the user between passes.
-    /// It is not a Session: nothing durable is written under it, and it is
-    /// replaced by the real Session identity if a delivery ever arrives
-    /// (`ARCHITECTURE.md` §1 — the provider-id-keyed record wins).
+    /// It is not a Session: nothing durable is written under it, and the
+    /// provider-id-keyed record a delivery mints is the one that wins
+    /// (`ARCHITECTURE.md` §1) — listing that record in this row's place is
+    /// the surfacing follow-up the plan names.
     provisional_id: CorralSessionId,
 }
 
@@ -62,8 +63,16 @@ impl RuntimeCandidate {
 /// What one pass over the process table concluded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pass {
-    /// The table was read, and these are the provider runtimes on it.
-    Read(Vec<RuntimeCandidate>),
+    /// The table was read.
+    Read {
+        /// The provider runtimes on it.
+        found: Vec<RuntimeCandidate>,
+        /// Pids the listing named that could not be inspected: this account
+        /// may not look at them, or this build cannot. Neither answer says
+        /// the process stopped, so a runtime held under one of these pids is
+        /// not retired by its absence from `found`.
+        uninspected: HashSet<u32>,
+    },
     /// The table could not be enumerated. Not an empty machine: reading this
     /// as "nothing is running" would retire every runtime the last pass found.
     Unavailable,
@@ -85,22 +94,30 @@ pub fn once() -> Pass {
         return Pass::Unavailable;
     };
     let mut found = Vec::new();
+    let mut uninspected = HashSet::new();
     for pid in pids {
-        let Observation::Identified(process) = process::observe(pid) else {
-            // Gone between the listing and the look, or not this account's.
-            // Both are ordinary on a live machine and neither is a finding.
-            continue;
-        };
-        let Some(provider) = recognition::provider_of(&process.executable) else {
-            continue;
-        };
-        found.push(RuntimeCandidate {
-            provider,
-            process: *process,
-            provisional_id: CorralSessionId::mint(),
-        });
+        match process::observe(pid) {
+            Observation::Identified(process) => {
+                let Some(provider) = recognition::provider_of(&process.executable) else {
+                    continue;
+                };
+                found.push(RuntimeCandidate {
+                    provider,
+                    process: *process,
+                    provisional_id: CorralSessionId::mint(),
+                });
+            }
+            // Gone between the listing and the look. Ordinary on a live
+            // machine, and the one answer that positively says so.
+            Observation::Gone => {}
+            // Not a finding, and not the absence of one either: a process
+            // this account may not look at is still a process.
+            Observation::NotPermitted | Observation::Unobservable => {
+                uninspected.insert(pid);
+            }
+        }
     }
-    Pass::Read(found)
+    Pass::Read { found, uninspected }
 }
 
 /// The provider runtimes this daemon currently believes are running.
@@ -136,11 +153,12 @@ impl Incarnation {
 pub struct Changes {
     /// Runtimes this pass saw for the first time.
     pub appeared: Vec<RuntimeCandidate>,
-    /// Runtimes the last pass held and this one did not find.
+    /// Runtimes the last pass held and this one established are not there.
     ///
-    /// Only ever produced by a pass that actually read the table. A pass that
-    /// could not enumerate retires nothing, because "I could not look" is not
-    /// evidence that anything stopped.
+    /// Only ever produced by a pass that actually read the table, and never
+    /// for a pid that pass could not inspect: "I could not look" is not
+    /// evidence that anything stopped, whether it is the whole table or one
+    /// process.
     pub gone: Vec<RuntimeCandidate>,
 }
 
@@ -152,7 +170,7 @@ impl SeenRuntimes {
 
     /// Fold one pass in, and say what changed.
     pub fn absorb(&mut self, pass: Pass) -> Changes {
-        let Pass::Read(found) = pass else {
+        let Pass::Read { found, uninspected } = pass else {
             return Changes::default();
         };
         let mut still_here = HashMap::with_capacity(found.len());
@@ -172,7 +190,17 @@ impl SeenRuntimes {
                 }
             }
         }
-        let gone = self.held.drain().map(|(_, candidate)| candidate).collect();
+        // A runtime whose pid this pass could not inspect stays held: unknown
+        // is not gone. It is retired when a pass sees its pid absent, or sees
+        // the pid carrying something else.
+        let mut gone = Vec::new();
+        for (key, candidate) in self.held.drain() {
+            if uninspected.contains(&key.pid) {
+                still_here.insert(key, candidate);
+            } else {
+                gone.push(candidate);
+            }
+        }
         self.held = still_here;
         Changes { appeared, gone }
     }

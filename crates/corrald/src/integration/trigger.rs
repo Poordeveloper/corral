@@ -27,10 +27,11 @@ pub enum Trigger {
     NewerIntegrationVersion { version: u32 },
     /// The file or its directory cannot be written safely.
     NotWritable { detail: String },
-    /// The file changed between the read this operation reasoned about and
-    /// the rename that would have replaced it. Corral loses that race on
-    /// purpose (ADR 0013 D3).
-    ChangedWhileWriting,
+    /// Another writer was at the file: it changed while Corral was reading
+    /// it, or between the read this operation reasoned about and the rename
+    /// that would have replaced it. Corral loses that race on purpose
+    /// (ADR 0013 D3).
+    ChangedUnderCorral,
     /// The content Corral was about to publish does not parse. The last gate
     /// before an atomic replacement, and the one that keeps a Corral bug from
     /// reaching a user's provider as a broken file (grill Q2′).
@@ -76,9 +77,9 @@ impl fmt::Display for Trigger {
                     "the configuration file cannot be written ({detail})"
                 )
             }
-            Self::ChangedWhileWriting => write!(
+            Self::ChangedUnderCorral => write!(
                 formatter,
-                "the configuration file changed while Corral was writing it; Corral stopped rather than overwrite the other change"
+                "the configuration file changed while Corral was working on it; Corral stopped rather than act on a stale read or overwrite the other change"
             ),
             Self::CandidateRejected { detail } => write!(
                 formatter,

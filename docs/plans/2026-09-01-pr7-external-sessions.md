@@ -107,7 +107,9 @@ on a Corral-owned process confirms and mints nothing (D4 dedupe).
 cadence enumerates processes and recognizes provider executables; only the
 sealed recognizer produces a user-visible provisional row, carrying no
 identity and offering no terminal (grill Q5/Q6′). A pass that cannot read
-the table retires nothing. Loss of an observed `(pid, start_time)` ends the
+the table retires nothing, and a pid a pass could not inspect retires
+nothing either: only a pid seen absent, or seen carrying something else,
+is positive evidence. Loss of an observed `(pid, start_time)` ends the
 external Run `Exited(Unknown)`; reconciliation after daemon loss re-verifies
 every formerly live external Run and reports exited or `Unverifiable`.
 Enumeration goes through `platform::process`, which reads `/proc` on Linux
@@ -123,7 +125,15 @@ Landing it inside an already large change would put two durable reviews
 behind one approval. Today the case is reachable and degrades honestly: a
 runtime already bound to another Session leaves the new Session visible with
 no Run, and the daemon says that is what happened rather than logging a
-generic failure.
+generic failure. That refusal is the one store answer discovery tolerates;
+every other is propagated. The adjacent case — a known Session whose Run is
+still open on one runtime while a delivery is corroborated by another (the
+user resumed it in a new process before the old Run was reconciled) — is
+left as found until the D7 change: the new runtime is not recorded and the
+open Run is closed by the next restart's re-verification. A known Session
+with *no* open Run does get its Run recorded on the corroborating runtime,
+so a discovery whose second half failed against a busy store is completed
+by the next delivery rather than confirmed forever.
 
 **7. Surfacing.** Additive session facts on the client protocol: origin
 (managed / discovered) and a runtime-location/cwd hint, absent meaning
@@ -269,6 +279,14 @@ disruption is a stop on the default-install shape.
 
 ## Follow-ups
 
+- `session.list` emits managed sessions and the sweep's provisional rows,
+  but not the durable Sessions discovery mints: a delivery that promotes a
+  runtime to an identified Session leaves the identity-less sweep row in
+  place and lists nothing under the real identity. The client side already
+  renders a discovered row with identity (snapshot
+  `a_discovered_session_with_identity_drops_the_warming_up_line`); the
+  daemon side is the gap. Own task, before the dogfood A-window: the row a
+  person sees must carry the identity Corral holds.
 - The full discovery coverage-audit harness (ROADMAP §9.2) beyond the
   matrix's host scenarios — release-gate machinery, own task.
 - Launch-time handshake ("not managed until a hook arrived") from the PR5

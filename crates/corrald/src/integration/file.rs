@@ -14,9 +14,9 @@
 //! a format-preserving editor — the provider preserves what it did not write,
 //! and the user's comments are legal and theirs.
 
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde_json::Value;
@@ -39,6 +39,9 @@ const CREATED_MODE: u32 = 0o644;
 /// What was read, and what it means.
 pub(super) struct Read {
     document: Document,
+    /// The file the bytes came from, which is the file a replacement goes
+    /// over: the configured path, or the file it is a link to.
+    location: PathBuf,
     /// What the file looked like when it was read, and `None` when there was
     /// no file. The write compares against it immediately before renaming.
     identity: Option<Identity>,
@@ -80,24 +83,65 @@ impl Identity {
 /// fresh machine and not a failure: both providers ship without one
 /// (measured 2026-09-02).
 pub(super) fn read(target: &Target) -> Result<Option<Read>, Trigger> {
-    let raw = match std::fs::read_to_string(target.path()) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(Trigger::NotWritable {
-                detail: error.to_string(),
-            });
+    let location = location_of(target.path())?;
+    let mut file = match std::fs::File::open(&location) {
+        Ok(file) => file,
+        // Only the configured path may be absent. A link whose file vanished
+        // between resolving it and opening it is not "no file yet": creating
+        // one at the configured path would replace the link.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && location == target.path() => {
+            return Ok(None);
         }
+        Err(error) => return Err(not_writable(error)),
     };
-    let identity = std::fs::metadata(target.path())
-        .ok()
-        .map(|data| Identity::of(&data));
+    // Bytes and identity from the one descriptor, and the identity taken on
+    // both sides of the read. A provider that renames a new file into place
+    // cannot then leave Corral holding one file's bytes under the other's
+    // identity, and a provider writing in place is caught by the two
+    // readings disagreeing — a prefix of a document can parse, and a
+    // candidate built from one would publish the truncation.
+    let before = file.metadata().map_err(not_writable)?;
+    let mut raw = String::new();
+    file.read_to_string(&mut raw).map_err(not_writable)?;
+    let identity = Identity::of(&file.metadata().map_err(not_writable)?);
+    if Identity::of(&before) != identity {
+        return Err(Trigger::ChangedUnderCorral);
+    }
     let document = parse(target.provider(), &raw)?;
     Ok(Some(Read {
         document,
-        identity,
+        location,
+        identity: Some(identity),
         original: Some(raw),
     }))
+}
+
+/// The file the configured path actually names.
+///
+/// A dotfiles user keeps `~/.claude/settings.json` as a link into a
+/// repository. Following it is what keeps that arrangement intact: the
+/// replacement is renamed over the file the link names, and the link stays
+/// as the user made it. A link to nothing is refused rather than resolved,
+/// because where the user's configuration should come to exist is not
+/// Corral's to decide.
+fn location_of(path: &Path) -> Result<PathBuf, Trigger> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(error) => Err(not_writable(error)),
+        Ok(data) if !data.file_type().is_symlink() => Ok(path.to_path_buf()),
+        Ok(_) => std::fs::canonicalize(path).map_err(|error| Trigger::NotWritable {
+            detail: format!(
+                "{} is a symbolic link that could not be followed ({error})",
+                path.display()
+            ),
+        }),
+    }
+}
+
+fn not_writable(error: std::io::Error) -> Trigger {
+    Trigger::NotWritable {
+        detail: error.to_string(),
+    }
 }
 
 fn parse(provider: KnownProvider, raw: &str) -> Result<Document, Trigger> {
@@ -133,6 +177,7 @@ impl Read {
         };
         Self {
             document,
+            location: target.path().to_path_buf(),
             identity: None,
             original: None,
         }
@@ -252,7 +297,7 @@ pub(super) fn replace(
     if let Some(bytes) = &original.original {
         back_up(target, bytes, now, state_dir)?;
     }
-    publish(target, &candidate, original.identity)
+    publish(&original.location, &candidate, original.identity)
 }
 
 fn clone_of(document: &Document) -> Document {
@@ -322,14 +367,13 @@ fn back_up(target: &Target, bytes: &str, now: SystemTime, state_dir: &Path) -> R
 /// Where copies of a user's configuration taken before a mutation live.
 const BACKUP_DIR: &str = "integration-backups";
 
-/// Write the candidate beside the target and rename it into place.
+/// Write the candidate beside the file and rename it into place.
 ///
 /// The identity check sits between the temporary file and the rename, as late
 /// as it can: a provider that reserialized its own settings in that window
 /// published a file this operation never read, and renaming over it would
 /// silently discard the provider's write.
-fn publish(target: &Target, candidate: &str, expected: Option<Identity>) -> Result<(), Trigger> {
-    let path = target.path();
+fn publish(path: &Path, candidate: &str, expected: Option<Identity>) -> Result<(), Trigger> {
     let directory = path.parent().ok_or_else(|| Trigger::NotWritable {
         detail: "the configuration path has no directory".to_owned(),
     })?;
@@ -366,7 +410,7 @@ fn publish(target: &Target, candidate: &str, expected: Option<Identity>) -> Resu
 
     if current_identity(path) != expected {
         let _ = std::fs::remove_file(&partial);
-        return Err(Trigger::ChangedWhileWriting);
+        return Err(Trigger::ChangedUnderCorral);
     }
     std::fs::rename(&partial, path).map_err(|error| {
         let _ = std::fs::remove_file(&partial);

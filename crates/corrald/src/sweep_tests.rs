@@ -20,11 +20,19 @@ fn candidate(pid: u32, started: u64, provider: KnownProvider) -> RuntimeCandidat
     }
 }
 
+/// A pass that read the table and could inspect every pid on it.
+fn read(found: Vec<RuntimeCandidate>) -> Pass {
+    Pass::Read {
+        found,
+        uninspected: HashSet::new(),
+    }
+}
+
 #[test]
 fn a_first_pass_reports_everything_it_found_as_new() {
     let mut seen = SeenRuntimes::new();
 
-    let changes = seen.absorb(Pass::Read(vec![
+    let changes = seen.absorb(read(vec![
         candidate(10, 100, KnownProvider::Claude),
         candidate(20, 200, KnownProvider::Codex),
     ]));
@@ -39,9 +47,9 @@ fn a_first_pass_reports_everything_it_found_as_new() {
 #[test]
 fn seeing_the_same_runtime_again_changes_nothing() {
     let mut seen = SeenRuntimes::new();
-    seen.absorb(Pass::Read(vec![candidate(10, 100, KnownProvider::Claude)]));
+    seen.absorb(read(vec![candidate(10, 100, KnownProvider::Claude)]));
 
-    let changes = seen.absorb(Pass::Read(vec![candidate(10, 100, KnownProvider::Claude)]));
+    let changes = seen.absorb(read(vec![candidate(10, 100, KnownProvider::Claude)]));
 
     assert_eq!(changes, Changes::default());
 }
@@ -49,12 +57,12 @@ fn seeing_the_same_runtime_again_changes_nothing() {
 #[test]
 fn a_runtime_that_is_no_longer_there_is_reported_gone() {
     let mut seen = SeenRuntimes::new();
-    seen.absorb(Pass::Read(vec![
+    seen.absorb(read(vec![
         candidate(10, 100, KnownProvider::Claude),
         candidate(20, 200, KnownProvider::Codex),
     ]));
 
-    let changes = seen.absorb(Pass::Read(vec![candidate(10, 100, KnownProvider::Claude)]));
+    let changes = seen.absorb(read(vec![candidate(10, 100, KnownProvider::Claude)]));
 
     assert!(changes.appeared.is_empty());
     assert_eq!(changes.gone.len(), 1);
@@ -67,9 +75,9 @@ fn a_runtime_that_is_no_longer_there_is_reported_gone() {
 #[test]
 fn a_reused_pid_is_a_new_runtime_and_the_old_one_is_gone() {
     let mut seen = SeenRuntimes::new();
-    seen.absorb(Pass::Read(vec![candidate(10, 100, KnownProvider::Claude)]));
+    seen.absorb(read(vec![candidate(10, 100, KnownProvider::Claude)]));
 
-    let changes = seen.absorb(Pass::Read(vec![candidate(10, 900, KnownProvider::Claude)]));
+    let changes = seen.absorb(read(vec![candidate(10, 900, KnownProvider::Claude)]));
 
     assert_eq!(changes.appeared.len(), 1);
     assert_eq!(changes.appeared[0].process().started, at(900));
@@ -84,12 +92,36 @@ fn a_reused_pid_is_a_new_runtime_and_the_old_one_is_gone() {
 #[test]
 fn a_pass_that_cannot_read_the_table_retires_nothing() {
     let mut seen = SeenRuntimes::new();
-    seen.absorb(Pass::Read(vec![candidate(10, 100, KnownProvider::Claude)]));
+    seen.absorb(read(vec![candidate(10, 100, KnownProvider::Claude)]));
 
     let changes = seen.absorb(Pass::Unavailable);
 
     assert_eq!(changes, Changes::default());
     assert_eq!(seen.all().count(), 1);
+}
+
+/// The same rule for one process as for the whole table. A pid the listing
+/// names but this account may not inspect is a process that is still there,
+/// so the runtime held under it is neither retired nor reported gone —
+/// until a pass sees the pid absent, which is the positive answer.
+#[test]
+fn a_runtime_whose_pid_cannot_be_inspected_is_kept_until_it_is_seen_gone() {
+    let mut seen = SeenRuntimes::new();
+    seen.absorb(read(vec![candidate(10, 100, KnownProvider::Claude)]));
+
+    let changes = seen.absorb(Pass::Read {
+        found: Vec::new(),
+        uninspected: HashSet::from([10]),
+    });
+
+    assert_eq!(changes, Changes::default());
+    assert_eq!(seen.all().count(), 1);
+
+    let changes = seen.absorb(read(Vec::new()));
+
+    assert_eq!(changes.gone.len(), 1);
+    assert_eq!(changes.gone[0].process().pid, 10);
+    assert_eq!(seen.all().count(), 0);
 }
 
 /// On a platform this build cannot observe, a pass says so rather than
@@ -106,7 +138,7 @@ fn a_pass_on_an_unobservable_platform_is_unavailable() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_pass_reads_the_table_and_recognizes_only_providers() {
-    let Pass::Read(found) = once() else {
+    let Pass::Read { found, .. } = once() else {
         panic!("this platform can read the process table");
     };
 
@@ -124,12 +156,12 @@ fn the_shared_table_survives_a_poisoned_holder() {
     let shared = SharedSeenRuntimes::new();
     let poisoner = shared.clone();
     let _ = std::thread::spawn(move || {
-        poisoner.absorb(Pass::Read(vec![candidate(10, 100, KnownProvider::Claude)]));
+        poisoner.absorb(read(vec![candidate(10, 100, KnownProvider::Claude)]));
         panic!("a holder panicked mid-use");
     })
     .join();
 
-    shared.absorb(Pass::Read(vec![
+    shared.absorb(read(vec![
         candidate(10, 100, KnownProvider::Claude),
         candidate(20, 200, KnownProvider::Codex),
     ]));
@@ -144,11 +176,11 @@ fn a_runtime_keeps_its_row_identity_across_passes() {
     let mut seen = SeenRuntimes::new();
     let first = candidate(10, 100, KnownProvider::Claude);
     let shown_as = first.provisional_id();
-    seen.absorb(Pass::Read(vec![first]));
+    seen.absorb(read(vec![first]));
 
     // A later pass mints a fresh candidate for the same process, as a real
     // pass does.
-    seen.absorb(Pass::Read(vec![candidate(10, 100, KnownProvider::Claude)]));
+    seen.absorb(read(vec![candidate(10, 100, KnownProvider::Claude)]));
 
     assert_eq!(
         seen.all().next().expect("the runtime").provisional_id(),

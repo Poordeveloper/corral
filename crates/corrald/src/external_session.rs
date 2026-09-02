@@ -17,7 +17,7 @@ use corral_core::{
     Assurance, BindingKey, BindingKind, Evidence, EvidenceSource, ExitCause, ExternalId,
     OccurrenceTime, Provenance, ProviderId, RunEnd, RunId,
 };
-use corral_state::{SessionResolution, StateError};
+use corral_state::{BindingResolution, Refusal, SessionResolution, StateError};
 use tracing::{debug, info, warn};
 
 use crate::ancestry::Corroboration;
@@ -31,9 +31,13 @@ pub enum Discovered {
     /// A Session Corral had never seen, with a Run recorded from the
     /// runtime's own start time.
     Session,
-    /// The identity was already known — usually because this is a managed
-    /// session whose global entry fired alongside its injected one. Confirmed
-    /// and nothing minted: one event, two channels, one fact (ADR 0014 D4).
+    /// A Session Corral knew, with no Run in progress, now has one on the
+    /// runtime that corroborated this delivery.
+    Run,
+    /// The identity was already known and its Run already in progress —
+    /// usually because this is a managed session whose global entry fired
+    /// alongside its injected one. Confirmed and nothing minted: one event,
+    /// two channels, one fact (ADR 0014 D4).
     AlreadyKnown,
 }
 
@@ -85,7 +89,7 @@ pub async fn discovered(
         .resolve_or_create_session(key, Provenance::Discovered, evidence, observed_at)
         .await?;
 
-    let session = match resolution {
+    match resolution {
         SessionResolution::Created { session, binding } => {
             info!(
                 session = %session.id(),
@@ -93,26 +97,63 @@ pub async fn discovered(
                 provider = provider.as_str(),
                 "a session running outside Corral is now visible",
             );
-            session
+            record_run(state, session.id(), named, &process, observed_at).await?;
+            Ok(Some(Discovered::Session))
         }
         // The identity is already bound. That is the ordinary outcome for a
         // managed session — the global entry and the injected one both fire
         // for each event (measured 2026-09-02) — and for the second and every
-        // later delivery of an external one. Nothing is minted: a second Run
-        // for a runtime that already has one would be a duplicate episode,
-        // not a discovery.
+        // later delivery of an external one. A Run in progress is left alone:
+        // a second Run for a runtime that already has one would be a
+        // duplicate episode, not a discovery.
+        //
+        // A known identity is not a completed discovery, though. The Session
+        // and its provider binding commit before the runtime and its Run do,
+        // and a store that was busy for the second half leaves a Session with
+        // no Run — which every later delivery would otherwise confirm and
+        // never repair. So the Run is ensured rather than assumed.
         SessionResolution::Existing { session, .. } => {
-            debug!(
-                session = %session.id(),
-                provider = provider.as_str(),
-                "an external delivery confirmed an identity Corral already holds",
-            );
-            return Ok(Some(Discovered::AlreadyKnown));
+            if has_live_run(state, session.id()).await? {
+                debug!(
+                    session = %session.id(),
+                    provider = provider.as_str(),
+                    "an external delivery confirmed an identity Corral already holds",
+                );
+                return Ok(Some(Discovered::AlreadyKnown));
+            }
+            match record_run(state, session.id(), named, &process, observed_at).await? {
+                RuntimeRecord::Run => Ok(Some(Discovered::Run)),
+                RuntimeRecord::Withheld => Ok(Some(Discovered::AlreadyKnown)),
+            }
         }
-    };
+    }
+}
 
-    record_run(state, session.id(), named, &process, observed_at).await?;
-    Ok(Some(Discovered::Session))
+/// Whether the Session has a Run with no recorded end.
+///
+/// A live Run on any runtime binding — managed or discovered — is a Run this
+/// delivery must not duplicate. One on a runtime other than the one that
+/// corroborated this delivery is the provider carrying a session it already
+/// carried somewhere else, which ADR 0014 D7 rules on and this build leaves
+/// as it found it.
+async fn has_live_run(
+    state: &Arc<DaemonState>,
+    session: corral_core::CorralSessionId,
+) -> Result<bool, StateError> {
+    Ok(state
+        .runs_of(session)
+        .await?
+        .iter()
+        .any(|run| run.ended_at().is_none()))
+}
+
+/// What binding the observed runtime came to.
+enum RuntimeRecord {
+    /// The runtime is bound to this Session and its Run is recorded.
+    Run,
+    /// No Run was filed under this Session, and the cause was logged where
+    /// it was found.
+    Withheld,
 }
 
 /// Bind the observed process and record the Run it is already in.
@@ -127,10 +168,10 @@ async fn record_run(
     provider: ProviderId,
     process: &ProcessIdentity,
     observed_at: SystemTime,
-) -> Result<(), StateError> {
+) -> Result<RuntimeRecord, StateError> {
     let Ok(incarnation) = ExternalId::new(incarnation_of(process)) else {
         warn!("an observed process could not be named as an external identity");
-        return Ok(());
+        return Ok(RuntimeRecord::Withheld);
     };
     let key = BindingKey::new(state.node(), BindingKind::Runtime, provider, incarnation);
     let evidence = Evidence::new(
@@ -142,26 +183,31 @@ async fn record_run(
         .bind(session, key, Provenance::Discovered, evidence, observed_at)
         .await
     {
-        Ok(
-            corral_state::BindingResolution::Created(binding)
-            | corral_state::BindingResolution::Existing(binding),
-        ) => binding.id(),
-        Err(error) => {
-            // The common cause is succession: this runtime is already bound to
-            // another Session, because the provider changed which session it
-            // carries without the process ending. ADR 0014 D7 rules what that
-            // should do — the prior Run ends `SessionChanged`, the successor
-            // starts, in one transaction — and this build does not do it yet,
-            // so the honest outcome is a visible Session with no Run rather
-            // than a Run filed against a runtime that is carrying something
-            // else. Named here so it reads as the unimplemented case it is.
-            warn!(
-                %error,
-                %session,
-                "an external runtime is already bound to another session;                  succession is not implemented, so this session has no run",
-            );
-            return Ok(());
+        Ok(BindingResolution::Created(binding) | BindingResolution::Existing(binding)) => {
+            binding.id()
         }
+        // Succession: this runtime is already bound to another Session,
+        // because the provider changed which session it carries without the
+        // process ending. ADR 0014 D7 rules what that should do — the prior
+        // Run ends `SessionChanged`, the successor starts, in one transaction
+        // — and this build does not do it yet, so the honest outcome is a
+        // visible Session with no Run rather than a Run filed against a
+        // runtime that is carrying something else. This one refusal is the
+        // tolerated case; every other answer from the store is the store's
+        // own, and a fatal one must not read as ordinary succession.
+        Err(StateError::Refused(Refusal::BindingClaimedByAnotherSession {
+            session: holder,
+            ..
+        })) => {
+            warn!(
+                %session,
+                %holder,
+                "an external runtime is already bound to another session; \
+                 succession is not implemented, so this session has no run",
+            );
+            return Ok(RuntimeRecord::Withheld);
+        }
+        Err(error) => return Err(error),
     };
     state
         .record_run_started(
@@ -171,7 +217,7 @@ async fn record_run(
             OccurrenceTime::Authoritative(process.started),
         )
         .await?;
-    Ok(())
+    Ok(RuntimeRecord::Run)
 }
 
 /// A name for one process incarnation.

@@ -175,6 +175,90 @@ async fn a_second_delivery_of_one_identity_confirms_rather_than_duplicates() {
     assert_eq!(runs.len(), 1);
 }
 
+/// A known identity is not a completed discovery. The Session and its
+/// provider binding commit before the runtime and its Run do, so a store
+/// that was busy for the second half leaves a Session with no Run — and a
+/// delivery that then merely "confirmed" the identity would leave it that
+/// way for good. The next corroborated delivery records the Run.
+#[tokio::test]
+async fn a_session_left_without_a_run_gets_one_on_the_next_delivery() {
+    let registry = registry("partial-discovery");
+    // The first half of a discovery, exactly as `discovered` performs it.
+    let key = BindingKey::new(
+        registry.state.node(),
+        BindingKind::ProviderSession,
+        ProviderId::new("claude").expect("a provider"),
+        identity("session-abc"),
+    );
+    registry
+        .state
+        .resolve_or_create_session(
+            key,
+            Provenance::Discovered,
+            Evidence::new(EvidenceSource::ProviderHook, Assurance::Attested, at(900)),
+            at(900),
+        )
+        .await
+        .expect("the session and its identity");
+
+    let outcome = discovered(
+        &registry.state,
+        KnownProvider::Claude,
+        identity("session-abc"),
+        reached(4321, at(500)),
+        at(901),
+    )
+    .await
+    .expect("recorded");
+
+    assert_eq!(outcome, Some(Discovered::Run));
+    let sessions = registry.state.sessions().await.expect("sessions");
+    assert_eq!(sessions.len(), 1);
+    let runs = registry
+        .state
+        .runs_of(sessions[0].id())
+        .await
+        .expect("runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].started_at(),
+        corral_core::OccurrenceTime::Authoritative(at(500)),
+    );
+}
+
+/// The one store answer discovery tolerates is "this runtime is another
+/// Session's" — succession, which ADR 0014 D7 rules on and this build does
+/// not implement. Every other answer is the store's own and reaches the
+/// caller: a store that cannot vouch for durable truth must not be read as
+/// ordinary succession and logged past.
+#[tokio::test]
+async fn a_store_refusal_that_is_not_succession_reaches_the_caller() {
+    let registry = registry("store-refusal");
+    let nobody = corral_core::CorralSessionId::mint();
+
+    let outcome = record_run(
+        &registry.state,
+        nobody,
+        ProviderId::new("claude").expect("a provider"),
+        &ProcessIdentity {
+            pid: 4321,
+            parent: 1,
+            started: at(500),
+            executable: PathBuf::from("/usr/local/bin/claude"),
+        },
+        at(900),
+    )
+    .await;
+
+    assert!(
+        matches!(
+            outcome,
+            Err(StateError::Refused(Refusal::UnknownSession(session))) if session == nobody
+        ),
+        "the store's refusal was swallowed",
+    );
+}
+
 /// Two provider identities are two Sessions. Nothing correlates them by time
 /// or by the process they share — heuristics never bind.
 #[tokio::test]

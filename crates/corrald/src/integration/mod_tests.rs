@@ -392,11 +392,124 @@ fn a_file_replaced_while_corral_writes_aborts_rather_than_clobbering() {
         |document| document.install(&relay(KnownProvider::Claude)),
     );
 
-    assert_eq!(outcome, Err(Trigger::ChangedWhileWriting));
+    assert_eq!(outcome, Err(Trigger::ChangedUnderCorral));
     assert_eq!(
         scratch.read(&target),
         "{\"model\": \"written by the provider\"}"
     );
+}
+
+/// The same race when the provider publishes by rename: a new inode at the
+/// same path, which is the replacement an atomic writer makes. The identity
+/// Corral holds is the one it read from, so the file that appeared under it
+/// is a different file and the write stops.
+#[test]
+fn a_file_renamed_into_place_while_corral_writes_aborts_rather_than_clobbering() {
+    let scratch = Scratch::new("trigger-race-rename");
+    let target = scratch.target(KnownProvider::Claude);
+    scratch.seed(&target, A_USERS_CLAUDE_SETTINGS);
+    let original = file::read(&target).expect("read").expect("a file");
+    let providers_own = target.path().with_extension("json.provider-tmp");
+    std::fs::write(&providers_own, "{\"model\": \"written by the provider\"}")
+        .expect("the provider's temporary file");
+    std::fs::rename(&providers_own, target.path()).expect("the provider's rename");
+
+    let outcome = file::replace(
+        &target,
+        &original,
+        now(),
+        &scratch.state_dir(),
+        |document| document.install(&relay(KnownProvider::Claude)),
+    );
+
+    assert_eq!(outcome, Err(Trigger::ChangedUnderCorral));
+    assert_eq!(
+        scratch.read(&target),
+        "{\"model\": \"written by the provider\"}"
+    );
+}
+
+/// A dotfiles user's configuration is a link into a repository. Corral edits
+/// the file the link names and leaves the link as the user made it: a
+/// replacement that turned the link into a regular file would sever an
+/// arrangement uninstall could never put back, while the provider went on
+/// reading valid settings and nobody noticed.
+#[test]
+fn a_linked_configuration_is_edited_through_the_link_and_the_link_survives() {
+    let scratch = Scratch::new("symlink");
+    let target = scratch.target(KnownProvider::Codex);
+    let repository = scratch.root.join("dotfiles").join("codex.toml");
+    std::fs::create_dir_all(repository.parent().expect("a directory")).expect("the repository");
+    std::fs::write(&repository, A_USERS_CODEX_CONFIG).expect("the user's file");
+    std::fs::create_dir_all(target.path().parent().expect("a directory")).expect("the home");
+    std::os::unix::fs::symlink(&repository, target.path()).expect("the user's link");
+
+    let installed = install(
+        &target,
+        &relay(KnownProvider::Codex),
+        now(),
+        &scratch.state_dir(),
+    );
+
+    assert_eq!(installed, Standing::Installed);
+    assert!(is_symlink(target.path()), "the link was replaced by a file");
+    assert!(
+        std::fs::read_to_string(&repository)
+            .expect("read")
+            .contains("hook-relay"),
+        "the entry did not land in the file the link names",
+    );
+
+    let uninstalled = uninstall(
+        &target,
+        &relay(KnownProvider::Codex),
+        now(),
+        &scratch.state_dir(),
+    );
+
+    assert_eq!(uninstalled, Standing::NotInstalled);
+    assert!(is_symlink(target.path()), "the link was replaced by a file");
+    assert_eq!(
+        std::fs::read_to_string(&repository).expect("read"),
+        A_USERS_CODEX_CONFIG,
+    );
+}
+
+/// A link to nothing is refused, not resolved. Where the user's configuration
+/// should come to exist is their decision, and the link is left exactly as
+/// it was so they can make it.
+#[test]
+fn a_link_to_nothing_refuses_the_write_and_is_left_as_it_is() {
+    let scratch = Scratch::new("dangling-symlink");
+    let target = scratch.target(KnownProvider::Claude);
+    let nowhere = scratch.root.join("dotfiles").join("claude.json");
+    std::fs::create_dir_all(target.path().parent().expect("a directory")).expect("the home");
+    std::os::unix::fs::symlink(&nowhere, target.path()).expect("the user's link");
+
+    let standing = install(
+        &target,
+        &relay(KnownProvider::Claude),
+        now(),
+        &scratch.state_dir(),
+    );
+
+    assert!(
+        matches!(standing, Standing::Refused(Trigger::NotWritable { .. })),
+        "{standing:?}",
+    );
+    assert!(is_symlink(target.path()), "the link was replaced by a file");
+    assert_eq!(
+        std::fs::read_link(target.path()).expect("the link"),
+        nowhere
+    );
+    assert!(
+        !nowhere.exists(),
+        "corral chose where the configuration lives"
+    );
+}
+
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|data| data.file_type().is_symlink())
 }
 
 /// A directory Corral cannot write into refuses the write and changes
