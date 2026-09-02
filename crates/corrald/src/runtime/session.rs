@@ -602,6 +602,18 @@ impl PendingSession {
         self.began
     }
 
+    /// The child, as the daemon's own for as long as it is — knowable from
+    /// the spawn, not from the serve: the child is running from here, and a
+    /// sweep that met it before it was served must still know it is Corral's.
+    pub fn owned_child(&self) -> Arc<super::spawn::OwnedChild> {
+        self.runtime.as_ref().map_or_else(
+            // Filled at construction and taken only by `serve` or the
+            // destructor, both of which consume the value.
+            || unreachable!("a pending session always holds its runtime"),
+            |runtime| runtime.reaper.owned(),
+        )
+    }
+
     /// End a runtime whose Run never became a durable fact.
     ///
     /// The child is already running, so it is hung up and reaped here rather

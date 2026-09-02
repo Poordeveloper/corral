@@ -283,7 +283,26 @@ impl Binding {
     #[must_use]
     pub fn is_control_capable_runtime_binding(&self) -> bool {
         self.kind() == BindingKind::Runtime
+            && self.corral_may_drive_this_runtime()
             && self.control_eligibility() == ControlEligibility::Eligible
+    }
+
+    /// Whether Corral may act on the runtime this edge names, as opposed to
+    /// how sure it is that the edge is real.
+    ///
+    /// Two different questions, and assurance answers only the second. A
+    /// runtime binding with provenance `Discovered` names a process Corral
+    /// found: it holds no PTY for it, no child handle, nothing to signal as
+    /// its own — so an external session is read-only by *structure* rather
+    /// than by weak evidence, and no amount of corroboration promotes it
+    /// (ADR 0014 D6). A user's explicit link is the case that does grant it,
+    /// which is why the rule names provenance and not simply "Corral created
+    /// it" (`PRODUCT.md` §6).
+    fn corral_may_drive_this_runtime(&self) -> bool {
+        match self.provenance {
+            Provenance::CorralCreated | Provenance::UserLinked => true,
+            Provenance::Discovered => false,
+        }
     }
 
     /// Whether this binding respects the reserved `corral` provider namespace.

@@ -3,6 +3,12 @@
 //! `corrald` never daemonizes by forking. A client that auto-starts it spawns
 //! a fresh child, and that child detaches itself here before any runtime
 //! exists, so the daemon's whole life is one process with one lifecycle.
+//!
+//! Everything OS-shaped about processes lives under here, including reading
+//! the process table: the domain above is written once and the per-platform
+//! answers are all in `process`.
+
+pub mod process;
 
 use tracing::debug;
 

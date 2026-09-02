@@ -20,6 +20,7 @@ mod command;
 mod evidence;
 mod external_name;
 mod id;
+mod integration;
 mod run;
 mod session;
 
@@ -39,5 +40,9 @@ pub use command::{
 pub use evidence::{Evidence, EvidenceSource};
 pub use external_name::{ExternalId, MalformedExternalName, NameRefusal, ProviderId, ToolName};
 pub use id::{BindingId, CorralSessionId, MalformedId, NeedsInputRequestId, NodeId, RunId};
+pub use integration::{
+    ConfigTarget, IntegrationIntent, RepairAuthority, RepairBudget, RepairFingerprint,
+    RepairableDrift,
+};
 pub use run::{ExitCause, OccurrenceTime, Run, RunEnd, RunOrdinal};
 pub use session::{LineageRefused, Session, SessionLineage};

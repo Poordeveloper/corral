@@ -1,0 +1,6 @@
+---
+source: crates/corral-tui/src/presentation_tests.rs
+assertion_line: 423
+expression: rendered(&item)
+---
+Running · Status unknown

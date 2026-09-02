@@ -4,7 +4,7 @@ use super::*;
 
 fn delivery(payload: &[u8]) -> HookDelivery {
     HookDelivery::new(
-        "0123456789abcdef0123456789abcdef".to_owned(),
+        Some("0123456789abcdef0123456789abcdef".to_owned()),
         "claude".to_owned(),
         "0.0.0".to_owned(),
         payload,
@@ -53,7 +53,7 @@ fn a_payload_exactly_at_the_cap_is_carried() {
 fn a_payload_that_is_not_text_is_not_reported_as_oversize() {
     assert!(
         HookDelivery::new(
-            "t".to_owned(),
+            Some("t".to_owned()),
             "claude".to_owned(),
             "0.0.0".to_owned(),
             &[0xff, 0xfe]
@@ -137,7 +137,7 @@ fn unknown_envelope_fields_are_ignored() {
         "a_field_from_later": {"nested": true},
     });
     let decoded: HookDelivery = serde_json::from_value(wire).expect("decodable");
-    assert_eq!(decoded.launch_token, "abc");
+    assert_eq!(decoded.launch_token.as_deref(), Some("abc"));
     assert_eq!(decoded.payload.as_deref(), Some("{}"));
 }
 
@@ -213,4 +213,98 @@ fn the_largest_carryable_delivery_fits_one_frame() {
         "{} bytes",
         frame.len()
     );
+}
+
+// The token-less scope, and the skew it has to survive in both directions
+// (ADR 0014 D1).
+
+/// Absence is the global scope, not a token that went missing.
+#[test]
+fn a_delivery_from_a_globally_installed_entry_carries_no_token() {
+    let carried = HookDelivery::new(
+        None,
+        "claude".to_owned(),
+        "0.0.0".to_owned(),
+        br#"{"hook_event_name":"Stop"}"#,
+    )
+    .expect("a carryable payload");
+
+    assert!(carried.launch_token.is_none());
+    let wire = serde_json::to_value(&carried).expect("encodable");
+    assert!(
+        wire.get("launch_token").is_none(),
+        "an absent token is absent on the wire, never an empty string",
+    );
+}
+
+/// A daemon that predates the token-less scope requires the field, so the
+/// delivery does not decode there and is dropped with diagnostics. Degraded
+/// awareness on a mixed pair, never interference — and the relay exits 0
+/// either way.
+#[test]
+fn an_older_daemon_cannot_decode_a_token_less_delivery() {
+    /// The shape `HookDelivery` had before the token became optional.
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct BeforeGlobalScope {
+        hook_protocol_version: u32,
+        launch_token: String,
+        provider: String,
+        shim_version: String,
+    }
+
+    let wire = json!({
+        "hook_protocol_version": 1,
+        "provider": "claude",
+        "shim_version": "9.9.9",
+        "payload": "{}",
+    });
+
+    assert!(serde_json::from_value::<BeforeGlobalScope>(wire.clone()).is_err());
+    // The same bytes this build reads as the global scope.
+    let decoded: HookDelivery = serde_json::from_value(wire).expect("decodable here");
+    assert!(decoded.launch_token.is_none());
+}
+
+/// A relay that predates the self-observation fields sends none, and absence
+/// means unreported rather than a process with no parent.
+#[test]
+fn an_older_relays_delivery_reports_no_observation() {
+    let wire = json!({
+        "hook_protocol_version": 1,
+        "launch_token": "abc",
+        "provider": "claude",
+        "shim_version": "0.0.1",
+        "payload": "{}",
+    });
+
+    let decoded: HookDelivery = serde_json::from_value(wire).expect("decodable");
+    assert_eq!(decoded.relay_pid, None);
+    assert_eq!(decoded.relay_parent_pid, None);
+}
+
+#[test]
+fn where_the_relay_stood_survives_the_wire() {
+    let carried = delivery(b"{}").observed_at(4321, 4320);
+
+    let wire = serde_json::to_value(&carried).expect("encodable");
+    let decoded: HookDelivery = serde_json::from_value(wire).expect("decodable");
+
+    assert_eq!(decoded.relay_pid, Some(4321));
+    assert_eq!(decoded.relay_parent_pid, Some(4320));
+}
+
+/// The oversize marker is about the payload and says nothing about scope or
+/// about where the relay stood.
+#[test]
+fn dropping_an_oversize_payload_keeps_the_scope_and_the_observation() {
+    let carried = HookDelivery::new(None, "codex".to_owned(), "0.0.0".to_owned(), b"{}")
+        .expect("a carryable payload")
+        .observed_at(11, 10);
+
+    let marked = carried.without_payload();
+
+    assert!(marked.launch_token.is_none());
+    assert_eq!(marked.relay_pid, Some(11));
+    assert_eq!(marked.relay_parent_pid, Some(10));
 }

@@ -13,10 +13,16 @@
 //! lock and socket pathnames are rendezvous artifacts, not semantic state: a
 //! new `corrald` reconstructs nothing from its predecessor's runtime.
 
+/// Walking from a relay to the provider process that ran it (ADR 0014 D2).
+mod ancestry;
 mod connection;
+/// Sessions Corral found rather than started (ADR 0014).
+mod external_session;
 mod hook_endpoint;
 mod hook_evidence;
 mod in_flight;
+/// The one mutator of a user's own provider configuration (ADR 0013).
+mod integration;
 mod lifecycle;
 mod managed_launch;
 mod platform;
@@ -34,6 +40,8 @@ mod run_lifecycle;
 pub mod runtime;
 mod server;
 mod state;
+/// Finding provider runtimes that never sent Corral anything (ADR 0014 D2).
+mod sweep;
 mod terminal_channel;
 
 use std::fmt;
@@ -116,7 +124,8 @@ fn start() -> Result<ExitCode, StartupError> {
         .ensure_launch_dir()
         .map_err(StartupError::Rendezvous)?;
     let state = Arc::new(
-        DaemonState::open(paths.registry(), paths.launch_dir()).map_err(StartupError::State)?,
+        DaemonState::open(paths.registry(), paths.launch_dir(), paths.state_dir())
+            .map_err(StartupError::State)?,
     );
 
     // Before the endpoint is bound, and only by the daemon holding the claim.

@@ -30,6 +30,7 @@ fn registry(name: &str) -> Registry {
     let state = DaemonState::open(
         &directory.join("registry.sqlite3"),
         &directory.join("launch"),
+        &directory,
     )
     .expect("open");
     Registry {

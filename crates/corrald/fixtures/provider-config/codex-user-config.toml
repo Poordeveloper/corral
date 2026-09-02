@@ -1,0 +1,15 @@
+# my codex setup
+model = "gpt-5.6"
+
+# thinking harder on plans than on turns
+model_reasoning_effort = "medium"
+plan_mode_reasoning_effort = "high"
+
+[tui]
+notifications = false
+
+[projects."/Users/someone/work/a-project"]
+trust_level = "trusted"
+
+[projects."/Users/someone/work/another"]
+trust_level = "trusted"

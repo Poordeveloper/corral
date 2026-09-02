@@ -1,15 +1,16 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use corral_core::{
     Command, CommandFingerprint, CommandId, CommandKind, CorralSessionId, ProviderId, RunId,
 };
 
 use corral_protocol::method::{
-    self, AgentEvent, PingResult, ProviderFacts, SessionListItem, SessionListResult,
-    SessionNewParams, SessionNewResult, SessionResumeParams, SessionResumeResult,
-    TerminalAttachParams, TerminalAttachResult,
+    self, AgentEvent, IntegrationParams, IntegrationResult, PingResult, ProviderFacts,
+    SessionListItem, SessionListResult, SessionNewParams, SessionNewResult, SessionResumeParams,
+    SessionResumeResult, TerminalAttachParams, TerminalAttachResult,
 };
 use corral_protocol::{
     ClientHello, Compatibility, ConnectionRole, ErrorCode, Frame, FrameError, FrameReader,
@@ -22,11 +23,13 @@ use tokio::sync::watch;
 use tracing::{debug, error, warn};
 
 use crate::in_flight::{self, Claim, Concluded};
+use crate::integration;
 use crate::lifecycle::{EstablishedGuard, Lifecycle, ShutdownReason};
 use crate::managed_launch::{
     self, Committed, ResumeRefused, SessionOwnership, compose_provider_launch, resume_plan,
 };
 use crate::policy::DaemonPolicy;
+use crate::provider::launch::RelayInvocation;
 use crate::provider::{self, KnownProvider, ReportedSession};
 use crate::runtime::{
     AttachGrant, AttachToken, LaunchRequest, ManagedSession, PtyGeometry, TerminalAccess,
@@ -426,6 +429,19 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             )),
             Err(error) => Dispatch::FailClosed(error),
         },
+        // Status reads a file rather than the registry, but it is still a
+        // claim made in the daemon's name and the two mutations write durable
+        // intent, so all three take the same gate as any other request.
+        method::INTEGRATION_STATUS | method::INTEGRATION_ENABLE | method::INTEGRATION_DISABLE => {
+            match state.vouch().await {
+                Ok(Vouched::Yes) => integration_request(request, state).await,
+                Ok(Vouched::NotNow) => Dispatch::Reply(Frame::error(
+                    id,
+                    ProtocolError::new(ErrorCode::Busy, "the registry is held by another writer"),
+                )),
+                Err(error) => Dispatch::FailClosed(error),
+            }
+        }
         // A compatibility safety net, not how features are discovered: the
         // connection stays usable.
         other => Dispatch::Reply(Frame::error(
@@ -464,10 +480,15 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
         );
     };
 
-    let sessions: Vec<serde_json::Value> = described
+    let mut sessions: Vec<serde_json::Value> = described
         .iter()
         .map(|(session, reported)| encode_session(session, reported.as_ref()))
         .collect();
+    // After the managed rows: the runtimes outside Corral. A session Corral
+    // started reports through its own channel; these are the ones the
+    // process table showed or a token-less delivery corroborated, which is
+    // exactly the session a person most needs reminding of (ADR 0014 D2).
+    sessions.extend(state.seen_runtimes().snapshot().iter().map(encode_external));
     match serde_json::to_value(SessionListResult { sessions }) {
         Ok(value) => Frame::result(id, value),
         Err(source) => Frame::error(
@@ -504,6 +525,47 @@ fn encode_session(
         agent_event: reported
             .and_then(|reported| reported.latest)
             .and_then(|fact| AgentEvent::at(fact.kind.as_wire(), fact.observed_at)),
+        // Known by construction: this daemon started it.
+        origin: Some(method::ORIGIN_MANAGED.to_owned()),
+        location_hint: None,
+    })
+    .unwrap_or_else(|_| serde_json::json!({}))
+}
+
+/// One provider runtime outside Corral, as a row.
+///
+/// The row claims exactly what its evidence supports and no more. Runtime
+/// recognition alone says a supported provider runtime appears to be running
+/// here, and its execution state is the only thing the process table can
+/// speak to; such a row carries no provider identity, because the table
+/// holds none (grill Q5, Q6′). Identity arrives on the delivery path, and a
+/// runtime discovery has identified is shown under the Session it was found
+/// to be carrying, with that identity — the same row, no longer provisional.
+///
+/// Until then its `session_id` is the Corral identity minted for this
+/// runtime's incarnation, so the row is stable across passes without the pid
+/// ever becoming an identity.
+fn encode_external(candidate: &crate::sweep::RuntimeCandidate) -> serde_json::Value {
+    let identified = candidate.identified();
+    serde_json::to_value(SessionListItem {
+        session_id: identified
+            .map_or(candidate.provisional_id(), |identified| identified.session)
+            .to_string(),
+        title: candidate.provider().as_str().to_owned(),
+        // The process is there; nothing else about it is known.
+        execution_state: "running".to_owned(),
+        // Corral owns no terminal for a process it did not start, and the
+        // refusal is honest rather than a capability it might grow later.
+        terminal_access: Some(corral_protocol::method::TerminalAccess::Unavailable),
+        provider: Some(ProviderFacts {
+            name: candidate.provider().as_str().to_owned(),
+            // Absent is unknown, which is exactly right for a runtime no
+            // delivery has named yet.
+            external_id: identified.map(|identified| identified.external_id.as_str().to_owned()),
+        }),
+        agent_event: None,
+        origin: Some(method::ORIGIN_DISCOVERED.to_owned()),
+        location_hint: None,
     })
     .unwrap_or_else(|_| serde_json::json!({}))
 }
@@ -583,6 +645,169 @@ async fn session_new(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             Err(error) => Dispatch::FailClosed(error),
         },
     }
+}
+
+/// Serve `integration.status`, `integration.enable`, and
+/// `integration.disable`.
+///
+/// The daemon performs the operation; a client never writes a provider's
+/// configuration itself (ADR 0013 D1). The sequence each operation is —
+/// intent recorded, then the file brought to it — lives with the one mutator,
+/// which is also what keeps two connections' operations from interleaving.
+async fn integration_request(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
+    let id = request.id;
+    let invalid = |detail: String| ProtocolError::new(ErrorCode::InvalidParams, detail);
+
+    let params: IntegrationParams = match request.params.clone() {
+        Some(params) => match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(source) => {
+                return Dispatch::Reply(Frame::error(id, invalid(source.to_string())));
+            }
+        },
+        None => {
+            return Dispatch::Reply(Frame::error(
+                id,
+                invalid("an integration request needs a provider".to_owned()),
+            ));
+        }
+    };
+    let Some(provider) = KnownProvider::from_name(&params.provider) else {
+        return Dispatch::Reply(Frame::error(
+            id,
+            ProtocolError::new(
+                ErrorCode::UnknownProvider,
+                unknown_provider(&params.provider),
+            ),
+        ));
+    };
+    // Corral being unable to name itself is answered as a refusal with its
+    // cause, not as a protocol error: the client asked a well-formed question,
+    // and "Corral wrote nothing, here is why" is the honest answer to it.
+    let (target, relay) = match (
+        integration::Target::resolve(provider),
+        RelayInvocation::compose_global(provider),
+    ) {
+        (Ok(target), Ok(relay)) => (target, relay),
+        (Err(error), _) => {
+            return Dispatch::Reply(Frame::result(
+                id,
+                unresolvable_wire_value(provider, &error.to_string()),
+            ));
+        }
+        (Ok(_), Err(error)) => {
+            return Dispatch::Reply(Frame::result(
+                id,
+                unresolvable_wire_value(provider, &error.to_string()),
+            ));
+        }
+    };
+
+    let now = SystemTime::now();
+    // Every arm's work reads and usually writes a file with an `fsync`, and
+    // none of that may happen on the reactor: `corrald` runs one runtime
+    // thread, and a synchronous write on it stalls every other connection
+    // this daemon is serving.
+    let state_dir = state.state_dir().to_path_buf();
+    let standing = match request.method.as_str() {
+        method::INTEGRATION_STATUS => {
+            let (target, relay) = (target.clone(), relay.clone());
+            integration::off_the_reactor(move || integration::status(&target, &relay)).await
+        }
+        // Nothing is published on a store failure: the store can no longer
+        // vouch for the intent it was asked to record, and the daemon stops
+        // serving rather than answering from it (ADR 0002, Q14).
+        method::INTEGRATION_ENABLE => {
+            match integration::enable(state, target.clone(), relay.clone(), now, state_dir).await {
+                Ok(standing) => standing,
+                Err(error) => return Dispatch::FailClosed(error),
+            }
+        }
+        method::INTEGRATION_DISABLE => {
+            match integration::disable(state, target.clone(), relay.clone(), now, state_dir).await {
+                Ok(standing) => standing,
+                Err(error) => return Dispatch::FailClosed(error),
+            }
+        }
+        other => {
+            // Unreachable: dispatch routes exactly the three methods above.
+            // Answered rather than asserted, because a panic here would take
+            // the daemon down over a routing mistake.
+            return Dispatch::Reply(Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::MethodNotFound, format!("{other} is not served")),
+            ));
+        }
+    };
+
+    // The operation did not run at all — the blocking pool is gone, or the
+    // work panicked. Answering with a standing would be inventing a fact
+    // about the user's configuration; the honest reply is that the daemon
+    // could not act.
+    let Some(standing) = standing else {
+        return Dispatch::Reply(Frame::error(
+            id,
+            ProtocolError::new(
+                ErrorCode::Busy,
+                "the daemon could not perform the integration operation; try again",
+            ),
+        ));
+    };
+
+    Dispatch::Reply(Frame::result(
+        id,
+        integration_wire_value(provider, &target, &standing),
+    ))
+}
+
+/// The answer when Corral cannot name itself or the file it would write.
+fn unresolvable_wire_value(provider: KnownProvider, detail: &str) -> serde_json::Value {
+    let result = IntegrationResult {
+        provider: provider.as_str().to_owned(),
+        standing: method::STANDING_REFUSED.to_owned(),
+        claims_delivery: false,
+        detail: Some(
+            integration::Trigger::NotResolvable {
+                detail: detail.to_owned(),
+            }
+            .to_string(),
+        ),
+        path: None,
+    };
+    serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn integration_wire_value(
+    provider: KnownProvider,
+    target: &integration::Target,
+    standing: &integration::Standing,
+) -> serde_json::Value {
+    let (name, detail) = match standing {
+        integration::Standing::Installed => (method::STANDING_INSTALLED, None),
+        integration::Standing::NotInstalled => (method::STANDING_NOT_INSTALLED, None),
+        integration::Standing::Drifted(_) => (
+            method::STANDING_DRIFTED,
+            Some("Corral's entry is not the one this version writes".to_owned()),
+        ),
+        integration::Standing::Refused(trigger) => {
+            (method::STANDING_REFUSED, Some(trigger.to_string()))
+        }
+        integration::Standing::RepairWithheld { .. } => (
+            method::STANDING_REPAIR_WITHHELD,
+            Some(
+                "something keeps undoing Corral's integration, so Corral stopped repairing it"
+                    .to_owned(),
+            ),
+        ),
+    };
+    let result = IntegrationResult {
+        provider: provider.as_str().to_owned(),
+        standing: name.to_owned(),
+        claims_delivery: standing.claims_delivery(),
+        detail,
+        path: Some(target.path().display().to_string()),
+    };
+    serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({}))
 }
 
 /// Everything about a `session.new` that can be decided before anything runs.

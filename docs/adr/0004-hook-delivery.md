@@ -201,7 +201,15 @@ Deterministic — Claude minted the id, Corral did not hold it by
 construction.
 
 An event with no token, an unknown token, or another launch's token is
-dropped with diagnostics. A valid token whose payload names a different
+dropped with diagnostics.
+
+> **Superseded in part by ADR 0014 D1 (accepted 2026-09-02).** "No token"
+> stopped meaning one thing. A delivery from a *globally installed* entry
+> carries none because that entry outlives every launch and belongs to none,
+> and it is taken in on its own path under its own rules. The rest of this
+> paragraph is unchanged and still governs the managed channel: an unknown
+> token, another launch's token, and a token this build cannot read are all
+> dropped, because each of them names a launch and names it wrongly. A valid token whose payload names a different
 identity than previously confirmed is the D8 conflict: recorded durably,
 never merged, never moved by a payload claim alone. Never fall back to cwd
 or time correlation: heuristics never bind (`AGENTS.md` §Core model), and a

@@ -129,6 +129,31 @@ pub async fn serve(
         }
     }
 
+    // At startup, and nowhere on a timer: drift repair is a boundary
+    // operation, never a background normalization loop (ADR 0013 D5). It runs
+    // after the endpoint work because a provider file Corral cannot repair
+    // costs awareness, never the daemon — and only for a provider whose
+    // integration the user actually chose.
+    tokio::spawn(crate::integration::repair_at_startup(Arc::clone(&state)));
+
+    // The no-lying reconciliation law, with external sessions in its scope
+    // (ADR 0014 D5): a Run this node recorded before must not still be shown
+    // as running because the daemon restarted. Every one is re-verified, and
+    // a process this account cannot inspect ends `Unverifiable` rather than
+    // exited — unreachable is never stopped.
+    tokio::spawn(crate::external_session::reverify_external_runs(Arc::clone(
+        &state,
+    )));
+
+    // At start and on a bounded cadence, for the sessions that produce no
+    // events at all: a session idle since before Corral started would
+    // otherwise stay invisible for exactly as long as the user leaves it
+    // alone (ADR 0014 D2).
+    tokio::spawn(crate::sweep::sweep_until_shutdown(
+        Arc::clone(&state),
+        lifecycle.subscribe(),
+    ));
+
     info!(endpoint = %socket.display(), "corrald is serving");
 
     let accepting = Arc::clone(&lifecycle);

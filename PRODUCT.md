@@ -263,6 +263,13 @@ Pre-existing live sessions warm up honestly: "Running · Status unknown" with
 a one-time explanation, "Status is limited until new activity arrives from
 this session." No promise of imminent status, no heuristic pre-fill.
 
+**Where discovery works.** Discovery rests on observing the provider's
+process, and that observation exists on Linux and not on macOS (ruled
+2026-09-02; ADR 0014 D2). On macOS Corral shows the sessions it launched and
+says nothing about any others — it does not guess at them, and it does not
+present a session it cannot corroborate. What macOS loses is awareness, never
+truthfulness.
+
 ## 10. Provider support
 
 Supported means the latest stable release of a provider CLI plus the

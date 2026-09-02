@@ -344,3 +344,25 @@ fn a_closed_teardown_window_signals_nothing() {
     open.hang_up();
     let _ = runtime.reaper.wait();
 }
+
+/// A child is the daemon's own from the spawn until the reaper has waited —
+/// through the closing of the teardown window, which happens before the
+/// wait — and its number is nobody's after that.
+#[test]
+fn a_child_is_the_daemons_own_until_it_is_reaped() {
+    let runtime =
+        spawn(&request("/bin/sh", &["-c", "exit 0"]), GEOMETRY).expect("the child starts");
+    let owned = runtime.owned();
+    let group = runtime.child_group().expect("a pid");
+    let (_screen, mut reaper) = runtime.split();
+    let mut children = OwnedChildren::default();
+    children.register(Arc::clone(&owned));
+
+    assert_eq!(owned.group(), Some(group));
+    assert_eq!(children.groups(), HashSet::from([group.as_pid()]));
+
+    let _ = reaper.wait();
+
+    assert_eq!(owned.group(), None);
+    assert!(children.groups().is_empty(), "a reaped child is forgotten");
+}

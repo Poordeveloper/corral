@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use corral_core::{
-    Assurance, BindingKind, CommandFingerprint, CommandId, CommandKind, ControlEligibility,
-    EvidenceSource, ExitCause, ExternalId, ProviderId, RunOrdinal,
+    Assurance, BindingKind, CommandFingerprint, CommandId, CommandKind, ConfigTarget,
+    ControlEligibility, EvidenceSource, ExitCause, ExternalId, IntegrationIntent, ProviderId,
+    RepairAuthority, RepairBudget, RepairFingerprint, RepairableDrift, RunOrdinal,
 };
 
 use super::*;
@@ -320,6 +321,11 @@ fn a_session_holds_at_most_one_provider_session_binding() {
 
 /// Confirming a second runtime binding acquires control just as adding one
 /// does, so it meets the same rule.
+///
+/// The candidate is one the user linked: provenance is what says whether
+/// Corral may drive a runtime at all, so a *discovered* one could never
+/// acquire control however strong its evidence became, and confirming it
+/// would prove nothing about this rule (ADR 0014 D6).
 #[test]
 fn confirming_a_second_runtime_binding_is_refused() {
     let mut store = TestStore::new("confirm-second");
@@ -329,7 +335,7 @@ fn confirming_a_second_runtime_binding_is_refused() {
         .bind(
             session,
             key(node, BindingKind::Runtime, "run-b"),
-            Provenance::Discovered,
+            Provenance::UserLinked,
             suspected_runtime(),
             instant(12),
         )
@@ -2774,4 +2780,399 @@ fn an_older_confirmation_of_equal_standing_is_still_stale() {
 
     assert_eq!(answered.assurance(), Assurance::Deterministic);
     assert_eq!(answered.evidence().observed_at(), instant(100));
+}
+
+// Integration intent and repair authority: Corral-owned facts the event log is
+// deliberately not the carrier of (ADR 0013 D6, grill Q4′).
+
+fn claude() -> ProviderId {
+    ProviderId::new("claude").expect("usable")
+}
+
+fn missing_entry() -> RepairFingerprint {
+    RepairFingerprint::new(
+        claude(),
+        ConfigTarget::ClaudeUserSettings,
+        RepairableDrift::Missing,
+    )
+}
+
+const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+fn three_a_day() -> RepairBudget {
+    RepairBudget::new(3, DAY)
+}
+
+/// Absence is not a decision. A caller that read it as `Disabled` would let a
+/// fresh install claim the user opted out.
+#[test]
+fn a_provider_the_user_never_decided_about_has_no_recorded_intent() {
+    let mut store = TestStore::new("intent-absent");
+
+    assert_eq!(store.integration_intent(&claude()).expect("read"), None);
+}
+
+#[test]
+fn an_integration_decision_survives_the_process_that_made_it() {
+    let mut store = TestStore::new("intent-durable");
+    store
+        .set_integration_intent(&claude(), IntegrationIntent::Disabled, instant(400))
+        .expect("record the decision");
+
+    store.reopen();
+
+    let recorded = store
+        .integration_intent(&claude())
+        .expect("read")
+        .expect("a decision");
+    assert_eq!(recorded.intent(), IntegrationIntent::Disabled);
+    assert_eq!(recorded.changed_at(), instant(400));
+}
+
+#[test]
+fn deciding_again_replaces_the_decision_rather_than_accumulating_one() {
+    let mut store = TestStore::new("intent-replace");
+    store
+        .set_integration_intent(&claude(), IntegrationIntent::Enabled, instant(100))
+        .expect("enable");
+    store
+        .set_integration_intent(&claude(), IntegrationIntent::Disabled, instant(200))
+        .expect("disable");
+
+    let recorded = store
+        .integration_intent(&claude())
+        .expect("read")
+        .expect("a decision");
+    assert_eq!(recorded.intent(), IntegrationIntent::Disabled);
+    assert_eq!(recorded.changed_at(), instant(200));
+}
+
+/// Rebuilding projections must not touch a user decision: the log never
+/// carried it, so a replay that cleared it would forget rather than recompute.
+#[test]
+fn rebuilding_projections_leaves_integration_intent_alone() {
+    let mut store = TestStore::new("intent-rebuild");
+    store
+        .set_integration_intent(&claude(), IntegrationIntent::Disabled, instant(300))
+        .expect("record");
+
+    store.rebuild_projections().expect("rebuild");
+
+    let recorded = store
+        .integration_intent(&claude())
+        .expect("read")
+        .expect("a decision");
+    assert_eq!(recorded.intent(), IntegrationIntent::Disabled);
+}
+
+#[test]
+fn a_budget_admits_its_repairs_and_then_withdraws_authority() {
+    let mut store = TestStore::new("repair-budget");
+    let fingerprint = missing_entry();
+
+    for repair in 0..3 {
+        let authority = store
+            .authorize_repair(&fingerprint, instant(1_000 + repair), three_a_day())
+            .expect("authorize");
+        assert_eq!(
+            authority,
+            RepairAuthority::Available {
+                remaining: 3 - u32::try_from(repair).expect("small"),
+            }
+        );
+        store
+            .record_repair(&fingerprint, instant(1_000 + repair))
+            .expect("record");
+    }
+
+    let fourth = store
+        .authorize_repair(&fingerprint, instant(1_003), three_a_day())
+        .expect("authorize");
+    assert_eq!(
+        fourth,
+        RepairAuthority::Withdrawn {
+            since: instant(1_003)
+        }
+    );
+    assert!(!fourth.permits_repair());
+}
+
+/// The whole point of the sticky breaker: a dotfiles authority that repaints
+/// the file once a day must not get a fresh repair every day.
+#[test]
+fn a_withdrawn_authority_does_not_return_when_the_window_slides_past_it() {
+    let mut store = TestStore::new("repair-sticky-window");
+    let fingerprint = missing_entry();
+    for repair in 0..3 {
+        store
+            .authorize_repair(&fingerprint, instant(1_000 + repair), three_a_day())
+            .expect("authorize");
+        store
+            .record_repair(&fingerprint, instant(1_000 + repair))
+            .expect("record");
+    }
+    store
+        .authorize_repair(&fingerprint, instant(1_003), three_a_day())
+        .expect("open the breaker");
+
+    let a_week_later = instant(1_003 + 7 * DAY.as_secs());
+    let authority = store
+        .authorize_repair(&fingerprint, a_week_later, three_a_day())
+        .expect("authorize");
+
+    assert_eq!(
+        authority,
+        RepairAuthority::Withdrawn {
+            since: instant(1_003)
+        }
+    );
+}
+
+#[test]
+fn a_daemon_restart_does_not_re_arm_a_withdrawn_authority() {
+    let mut store = TestStore::new("repair-sticky-restart");
+    let fingerprint = missing_entry();
+    for repair in 0..3 {
+        store
+            .authorize_repair(&fingerprint, instant(1_000 + repair), three_a_day())
+            .expect("authorize");
+        store
+            .record_repair(&fingerprint, instant(1_000 + repair))
+            .expect("record");
+    }
+    store
+        .authorize_repair(&fingerprint, instant(1_003), three_a_day())
+        .expect("open the breaker");
+
+    store.reopen();
+
+    let authority = store
+        .authorize_repair(&fingerprint, instant(1_004), three_a_day())
+        .expect("authorize");
+    assert_eq!(
+        authority,
+        RepairAuthority::Withdrawn {
+            since: instant(1_003)
+        }
+    );
+}
+
+#[test]
+fn an_explicit_reconciliation_is_what_re_arms_repair() {
+    let mut store = TestStore::new("repair-restore");
+    let fingerprint = missing_entry();
+    for repair in 0..3 {
+        store
+            .authorize_repair(&fingerprint, instant(1_000 + repair), three_a_day())
+            .expect("authorize");
+        store
+            .record_repair(&fingerprint, instant(1_000 + repair))
+            .expect("record");
+    }
+    store
+        .authorize_repair(&fingerprint, instant(1_003), three_a_day())
+        .expect("open the breaker");
+
+    store
+        .restore_repair_authority(&fingerprint)
+        .expect("reconcile");
+
+    let authority = store
+        .authorize_repair(&fingerprint, instant(1_004), three_a_day())
+        .expect("authorize");
+    assert_eq!(authority, RepairAuthority::Available { remaining: 3 });
+}
+
+/// Repairs that fell out of the window are forgotten, so a provider that drops
+/// Corral's entry once a month is repaired every time.
+#[test]
+fn repairs_older_than_the_window_do_not_count_against_the_budget() {
+    let mut store = TestStore::new("repair-window");
+    let fingerprint = missing_entry();
+    for repair in 0..3 {
+        store
+            .authorize_repair(&fingerprint, instant(1_000 + repair), three_a_day())
+            .expect("authorize");
+        store
+            .record_repair(&fingerprint, instant(1_000 + repair))
+            .expect("record");
+    }
+
+    let next_month = instant(1_000 + 30 * DAY.as_secs());
+    let authority = store
+        .authorize_repair(&fingerprint, next_month, three_a_day())
+        .expect("authorize");
+
+    assert_eq!(authority, RepairAuthority::Available { remaining: 3 });
+}
+
+/// Two drift classes in one file are two recurrences. A provider rewrite
+/// eating the entry must not spend the budget an upgrade's stale
+/// representation needs.
+#[test]
+fn one_drift_class_cannot_exhaust_anothers_budget() {
+    let mut store = TestStore::new("repair-fingerprint");
+    let missing = missing_entry();
+    let stale = RepairFingerprint::new(
+        claude(),
+        ConfigTarget::ClaudeUserSettings,
+        RepairableDrift::OldRepresentation,
+    );
+    for repair in 0..3 {
+        store
+            .authorize_repair(&missing, instant(1_000 + repair), three_a_day())
+            .expect("authorize");
+        store
+            .record_repair(&missing, instant(1_000 + repair))
+            .expect("record");
+    }
+    store
+        .authorize_repair(&missing, instant(1_003), three_a_day())
+        .expect("open the breaker");
+
+    let authority = store
+        .authorize_repair(&stale, instant(1_004), three_a_day())
+        .expect("authorize");
+
+    assert_eq!(authority, RepairAuthority::Available { remaining: 3 });
+}
+
+fn continuation() -> Command {
+    Command::new(
+        CommandId::new(CorralSessionId::mint().to_string()).expect("usable"),
+        CommandFingerprint::builder(CommandKind::new("session.resume").expect("usable"))
+            .input("session", "discovered")
+            .build(),
+    )
+}
+
+/// A discovered runtime is somebody else's process. Corral holds no handle on
+/// it, so a continuation must never hang a managed Run under it — and, once
+/// the external Run has ended, that is exactly what picking it by assurance
+/// alone would do (ADR 0014 D6).
+#[test]
+fn a_continuation_never_lands_on_a_runtime_corral_only_discovered() {
+    let mut store = TestStore::new("discovered-runtime");
+    let node = store.node();
+    let discovered = store
+        .resolve_or_create_session(
+            key(node, BindingKind::ProviderSession, "provider-session-1"),
+            Provenance::Discovered,
+            Evidence::new(
+                EvidenceSource::ProviderHook,
+                Assurance::Attested,
+                instant(100),
+            ),
+            instant(100),
+        )
+        .expect("resolve");
+    let session = match discovered {
+        SessionResolution::Created { session, .. } => session.id(),
+        SessionResolution::Existing { session, .. } => session.id(),
+    };
+    store
+        .bind(
+            session,
+            key(node, BindingKind::Runtime, "pid-4321-500000000"),
+            Provenance::Discovered,
+            Evidence::new(
+                EvidenceSource::NodeRuntimeObservation,
+                Assurance::Attested,
+                instant(100),
+            ),
+            instant(100),
+        )
+        .expect("bind the discovered runtime");
+
+    let continued = store.resume_managed_session(
+        &continuation(),
+        session,
+        RunId::mint(),
+        OccurrenceTime::Authoritative(instant(200)),
+        instant(200),
+    );
+
+    assert!(
+        matches!(
+            continued,
+            Err(StateError::Refused(Refusal::NoManagedRuntimeBinding(named))) if named == session
+        ),
+        "a discovered runtime was offered as a continuation target: {continued:?}",
+    );
+}
+
+/// The other half of the same defect: admitting the managed runtime binding a
+/// continuation actually needs must not be refused because a discovered one is
+/// already there.
+#[test]
+fn a_discovered_runtime_does_not_block_the_managed_binding_that_belongs_there() {
+    let mut store = TestStore::new("discovered-does-not-block");
+    let node = store.node();
+    let discovered = store
+        .resolve_or_create_session(
+            key(node, BindingKind::ProviderSession, "provider-session-2"),
+            Provenance::Discovered,
+            Evidence::new(
+                EvidenceSource::ProviderHook,
+                Assurance::Attested,
+                instant(100),
+            ),
+            instant(100),
+        )
+        .expect("resolve");
+    let session = match discovered {
+        SessionResolution::Created { session, .. } => session.id(),
+        SessionResolution::Existing { session, .. } => session.id(),
+    };
+    store
+        .bind(
+            session,
+            key(node, BindingKind::Runtime, "pid-4321-500000000"),
+            Provenance::Discovered,
+            Evidence::new(
+                EvidenceSource::NodeRuntimeObservation,
+                Assurance::Attested,
+                instant(100),
+            ),
+            instant(100),
+        )
+        .expect("bind the discovered runtime");
+
+    let managed = store.bind(
+        session,
+        managed_key(node, "managed-runtime-1"),
+        Provenance::CorralCreated,
+        Evidence::new(
+            EvidenceSource::CorralConstructed,
+            Assurance::Deterministic,
+            instant(200),
+        ),
+        instant(200),
+    );
+
+    assert!(
+        managed.is_ok(),
+        "a discovered runtime blocked the managed one: {managed:?}",
+    );
+}
+
+/// The at-most-one rule counts control-capable runtime bindings. A discovered
+/// one is not one, so a Session may hold Corral's own runtime and a process
+/// discovery found for it at the same time — which is the ordinary outcome
+/// when the global integration entry fires for a managed session.
+#[test]
+fn a_discovered_runtime_is_admitted_beside_the_managed_one() {
+    let mut store = TestStore::new("discovered-beside-managed");
+    let node = store.node();
+    let (session, _) = managed_session(&mut store, "run-a");
+
+    let admitted = store.bind(
+        session,
+        key(node, BindingKind::Runtime, "pid-4321-500000000"),
+        Provenance::Discovered,
+        evidence(EvidenceSource::NodeRuntimeObservation, Assurance::Attested),
+        instant(12),
+    );
+
+    assert!(admitted.is_ok(), "{admitted:?}");
 }

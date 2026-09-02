@@ -1,0 +1,7 @@
+notify = ["/usr/local/bin/my-notifier", "--from", "codex"]
+
+# my codex setup
+model = "gpt-5.6"
+
+[projects."/Users/someone/work/a-project"]
+trust_level = "trusted"

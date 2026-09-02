@@ -27,6 +27,62 @@ pub const SESSION_RESUME: &str = "session.resume";
 /// Obtain a one-time token for a terminal data channel.
 pub const TERMINAL_ATTACH: &str = "terminal.attach";
 
+/// Report what Corral's integration with a provider looks like, without
+/// changing it.
+pub const INTEGRATION_STATUS: &str = "integration.status";
+
+/// Record that the user wants integration with a provider, and install it.
+///
+/// The daemon executes; a client never writes a provider's configuration
+/// itself (ADR 0013 D1). During PR7 dogfood this is the only thing that
+/// installs (grill Q2).
+pub const INTEGRATION_ENABLE: &str = "integration.enable";
+
+/// Record that the user does not want integration with a provider, and take
+/// Corral's entries out.
+pub const INTEGRATION_DISABLE: &str = "integration.disable";
+
+/// Which provider an integration request is about.
+///
+/// A required field with no default: absence would have to mean "all of them"
+/// or "the usual one", and both are answers the daemon would be inventing.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IntegrationParams {
+    pub provider: String,
+}
+
+/// What an integration request answers.
+///
+/// `standing` is an open string — `installed`, `not-installed`, `drifted`,
+/// `refused`, `repair-withheld` — read by a client the way `execution_state`
+/// is: a value this build does not recognize is rendered as unknown rather
+/// than refused, so a newer daemon may name a standing an older client has no
+/// word for (`AGENTS.md` §Protocol).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IntegrationResult {
+    pub provider: String,
+    pub standing: String,
+    /// Whether Corral can currently expect this provider's sessions to
+    /// report. False is what puts a provider into Limited awareness.
+    pub claims_delivery: bool,
+    /// What happened, in the user's language, when the standing needs one:
+    /// the cause of a refusal and what Corral did not do. Absent means there
+    /// is nothing to explain, never that an explanation was lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The file the answer is about, so a person can go and look at it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// The standings this build names. Open on the decode side; see
+/// `IntegrationResult::standing`.
+pub const STANDING_INSTALLED: &str = "installed";
+pub const STANDING_NOT_INSTALLED: &str = "not-installed";
+pub const STANDING_DRIFTED: &str = "drifted";
+pub const STANDING_REFUSED: &str = "refused";
+pub const STANDING_REPAIR_WITHHELD: &str = "repair-withheld";
+
 /// `ping`'s result.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct PingResult {}
@@ -293,7 +349,29 @@ pub struct SessionListItem {
         skip_serializing_if = "Option::is_none"
     )]
     pub agent_event: Option<AgentEvent>,
+    /// Where this session came from, when Corral reliably knows.
+    ///
+    /// An open string — `managed`, `discovered` — read the way
+    /// `execution_state` is: a value this build has no word for is rendered as
+    /// unknown rather than refused. Absent means Corral does not reliably know
+    /// the origin, never that there is no origin: a guessed one would be the
+    /// "never a guessed terminal host" rule broken by a different name
+    /// (`PRODUCT.md` §8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// The working directory the session reported, when it reported one.
+    ///
+    /// A display hint and nothing else. It is never an identity input and
+    /// never correlates two sessions: cwd and time correlation never bind
+    /// (`ARCHITECTURE.md` §1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location_hint: Option<String>,
 }
+
+/// The origins this build names. Open on the decode side; see
+/// `SessionListItem::origin`.
+pub const ORIGIN_MANAGED: &str = "managed";
+pub const ORIGIN_DISCOVERED: &str = "discovered";
 
 /// `session.list`'s result.
 ///

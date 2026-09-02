@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use corral_protocol::method::{
-    self, SessionListResult, SessionNewParams, SessionNewResult, SessionResumeParams,
-    SessionResumeResult, TerminalAttachParams, TerminalAttachResult,
+    self, IntegrationParams, IntegrationResult, SessionListResult, SessionNewParams,
+    SessionNewResult, SessionResumeParams, SessionResumeResult, TerminalAttachParams,
+    TerminalAttachResult,
 };
 use corral_protocol::{
     ClientHello, Compatibility, ConnectionRole, Frame, FrameError, FrameReader, FrameWriter,
@@ -64,6 +65,29 @@ impl Connection {
         let value = self.call(method::SESSION_LIST, None).await?;
         serde_json::from_value(value).map_err(|source| RequestError::Protocol {
             detail: format!("the session list did not decode: {source}"),
+        })
+    }
+
+    /// Ask what Corral's integration with one provider looks like, or change
+    /// it.
+    ///
+    /// One method for all three requests: they take the same parameters and
+    /// answer the same shape, and the daemon is what decides which of them
+    /// writes anything (ADR 0013 D1).
+    pub async fn integration(
+        &mut self,
+        method: &str,
+        provider: &str,
+    ) -> Result<IntegrationResult, RequestError> {
+        let params = serde_json::to_value(IntegrationParams {
+            provider: provider.to_owned(),
+        })
+        .map_err(|source| RequestError::Protocol {
+            detail: format!("the integration request did not encode: {source}"),
+        })?;
+        let value = self.call(method, Some(params)).await?;
+        serde_json::from_value(value).map_err(|source| RequestError::Protocol {
+            detail: format!("the integration answer did not decode: {source}"),
         })
     }
 

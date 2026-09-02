@@ -5,17 +5,22 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
 use corral_core::{
-    Binding, BindingKey, BindingKind, Command, CorralSessionId, Evidence, ExternalId, NodeId,
-    OccurrenceTime, Provenance, Run, RunId,
+    Binding, BindingKey, BindingKind, Command, CorralSessionId, Evidence, EvidenceSource,
+    ExternalId, IntegrationIntent, NodeId, OccurrenceTime, Provenance, ProviderId, RepairAuthority,
+    RepairFingerprint, Run, RunId,
 };
 use corral_state::{
-    BindingResolution, Contested, FatalState, Refusal, StartedManagedSession, StateError, Store,
+    BindingResolution, Contested, FatalState, RecordedIntent, RecordedRun, Refusal,
+    SessionResolution, StartedManagedSession, StateError, Store,
 };
 
 use crate::hook_evidence::{Deliveries, Ingest};
 use crate::in_flight::InFlightCommands;
+use crate::policy;
 use crate::provider::{ReportedSessions, SharedLaunchTokens};
-use crate::runtime::{AttachTokens, Integrity, ManagedSessions, RunObservations, observe_runs};
+use crate::runtime::{
+    AttachTokens, Integrity, ManagedSessions, OwnedChildren, RunObservations, observe_runs,
+};
 
 /// How long a departing daemon waits for its last observed facts to land.
 ///
@@ -89,6 +94,20 @@ pub struct DaemonState {
     /// Where per-launch provider configuration Corral owns is written.
     launch_dir: PathBuf,
 
+    /// Corral's own state directory. The integration engine puts a copy of a
+    /// user's configuration here before it changes it, which is Corral's
+    /// artifact to keep and never something written beside the user's file.
+    state_dir: PathBuf,
+
+    /// The provider runtimes the sweep believes are running. Live state: a
+    /// restart forgets them and the next pass rediscovers whatever is still
+    /// there (ADR 0014 D5).
+    seen_runtimes: crate::sweep::SharedSeenRuntimes,
+
+    /// The per-provider turn to mutate a user's configuration, taken by every
+    /// operation that records intent and writes the file after it.
+    integration_turns: crate::integration::WriteTurns,
+
     /// Where the hook endpoint puts what it received, and the receiver the
     /// server hands to the one task that interprets it.
     deliveries: Deliveries,
@@ -120,6 +139,10 @@ pub struct DaemonState {
 #[derive(Default)]
 pub struct Runtime {
     pub sessions: ManagedSessions,
+    /// Every child this daemon spawned and has not reaped, registered at the
+    /// spawn rather than with the session: a sweep can meet the process
+    /// before its Run is durable and its handle is here.
+    pub owned: OwnedChildren,
     pub attach_tokens: AttachTokens,
     /// What providers have reported about those sessions. Live evidence: a
     /// restart loses it and the rows return to bare runtime truth
@@ -133,7 +156,7 @@ impl DaemonState {
     /// Called before the daemon binds its endpoint, so a store that cannot be
     /// used is a startup failure rather than something discovered a
     /// millisecond after a client's hello succeeded (ADR 0002, Q14).
-    pub fn open(registry: &Path, launch_dir: &Path) -> Result<Self, StateError> {
+    pub fn open(registry: &Path, launch_dir: &Path, state_dir: &Path) -> Result<Self, StateError> {
         let store = Store::open(registry)?;
         let node = store.node();
         let store = Arc::new(Mutex::new(store));
@@ -158,6 +181,9 @@ impl DaemonState {
             launch_tokens,
             node,
             launch_dir: launch_dir.to_path_buf(),
+            state_dir: state_dir.to_path_buf(),
+            seen_runtimes: crate::sweep::SharedSeenRuntimes::new(),
+            integration_turns: crate::integration::WriteTurns::default(),
             deliveries,
             incoming: Mutex::new(Some(incoming)),
             resuming: Mutex::new(HashSet::new()),
@@ -205,6 +231,10 @@ impl DaemonState {
     /// Where per-launch provider configuration Corral owns is written.
     pub fn launch_dir(&self) -> &Path {
         &self.launch_dir
+    }
+
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
     }
 
     /// Where the hook endpoint puts what it received.
@@ -318,6 +348,35 @@ impl DaemonState {
     }
 
     /// A Session's Runs, oldest episode first.
+    /// Every Session the registry holds.
+    ///
+    /// A registry read rather than a runtime one: what is *live here* is the
+    /// session list's question, and this one asks what was recorded — which
+    /// is how a discovery test, and later a discovery reconciliation, checks
+    /// what a delivery actually wrote.
+    pub async fn sessions(self: &Arc<Self>) -> Result<Vec<corral_core::Session>, StateError> {
+        self.off_the_reactor(Store::sessions).await
+    }
+
+    /// The provider runtimes the sweep has found.
+    pub fn seen_runtimes(&self) -> &crate::sweep::SharedSeenRuntimes {
+        &self.seen_runtimes
+    }
+
+    /// The turn an integration operation takes before it writes.
+    pub fn integration_turns(&self) -> &crate::integration::WriteTurns {
+        &self.integration_turns
+    }
+
+    /// The bindings recorded against one Session.
+    pub async fn bindings_of(
+        self: &Arc<Self>,
+        session: CorralSessionId,
+    ) -> Result<Vec<Binding>, StateError> {
+        self.off_the_reactor(move |store| store.bindings_of(session))
+            .await
+    }
+
     pub async fn runs_of(
         self: &Arc<Self>,
         session: CorralSessionId,
@@ -350,6 +409,49 @@ impl DaemonState {
         Ok(first)
     }
 
+    /// Find the Session an external identity names, or mint one for it.
+    ///
+    /// Binding uniqueness on `(node, provider, external_id, kind)` is what
+    /// makes this safe to call from discovery: an identity already known
+    /// resolves to the Session that holds it, and nothing duplicates.
+    pub async fn resolve_or_create_session(
+        self: &Arc<Self>,
+        key: BindingKey,
+        provenance: Provenance,
+        evidence: Evidence,
+        at: SystemTime,
+    ) -> Result<SessionResolution, StateError> {
+        self.off_the_reactor(move |store| {
+            store.resolve_or_create_session(key, provenance, evidence, at)
+        })
+        .await
+    }
+
+    /// Record that a Run began against a runtime binding.
+    pub async fn record_run_started(
+        self: &Arc<Self>,
+        run: RunId,
+        runtime_binding: corral_core::BindingId,
+        occurrence: EvidenceSource,
+        started: OccurrenceTime,
+    ) -> Result<RecordedRun, StateError> {
+        self.off_the_reactor(move |store| {
+            store.record_run_started(run, runtime_binding, occurrence, started)
+        })
+        .await
+    }
+
+    /// Record that a Run ended.
+    pub async fn record_run_ended(
+        self: &Arc<Self>,
+        run: RunId,
+        end: corral_core::RunEnd,
+        at: OccurrenceTime,
+    ) -> Result<corral_state::Durability, StateError> {
+        self.off_the_reactor(move |store| store.record_run_ended(run, end, at))
+            .await
+    }
+
     /// Attach an external identity to a Session Corral already has.
     pub async fn bind(
         self: &Arc<Self>,
@@ -360,6 +462,61 @@ impl DaemonState {
         at: SystemTime,
     ) -> Result<BindingResolution, StateError> {
         self.off_the_reactor(move |store| store.bind(session, key, provenance, evidence, at))
+            .await
+    }
+
+    /// What the user chose about a provider's integration, if they chose.
+    ///
+    /// `None` is not `Disabled`: it says no decision is recorded, and the
+    /// caller resolves that against the installed default rather than reading
+    /// silence as a refusal (ADR 0013 D6).
+    pub async fn integration_intent(
+        self: &Arc<Self>,
+        provider: ProviderId,
+    ) -> Result<Option<RecordedIntent>, StateError> {
+        self.off_the_reactor(move |store| store.integration_intent(&provider))
+            .await
+    }
+
+    pub async fn set_integration_intent(
+        self: &Arc<Self>,
+        provider: ProviderId,
+        intent: IntegrationIntent,
+        at: SystemTime,
+    ) -> Result<(), StateError> {
+        self.off_the_reactor(move |store| store.set_integration_intent(&provider, intent, at))
+            .await
+    }
+
+    /// Whether an automatic repair may proceed, withdrawing the authority when
+    /// the budget is spent.
+    pub async fn authorize_repair(
+        self: &Arc<Self>,
+        fingerprint: RepairFingerprint,
+        now: SystemTime,
+    ) -> Result<RepairAuthority, StateError> {
+        self.off_the_reactor(move |store| {
+            store.authorize_repair(&fingerprint, now, policy::REPAIR_BUDGET)
+        })
+        .await
+    }
+
+    /// Record a repair that already succeeded.
+    pub async fn record_repair(
+        self: &Arc<Self>,
+        fingerprint: RepairFingerprint,
+        at: SystemTime,
+    ) -> Result<(), StateError> {
+        self.off_the_reactor(move |store| store.record_repair(&fingerprint, at))
+            .await
+    }
+
+    /// Re-arm automatic repair after an explicit user reconciliation.
+    pub async fn restore_repair_authority(
+        self: &Arc<Self>,
+        fingerprint: RepairFingerprint,
+    ) -> Result<(), StateError> {
+        self.off_the_reactor(move |store| store.restore_repair_authority(&fingerprint))
             .await
     }
 

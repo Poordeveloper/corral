@@ -22,5 +22,9 @@ tokio = { workspace = true }
 uuid = { workspace = true }
 
 
+[dev-dependencies]
+# Snapshot coverage for what a person actually sees (workflow §6).
+insta = { workspace = true }
+
 [lints]
 workspace = true

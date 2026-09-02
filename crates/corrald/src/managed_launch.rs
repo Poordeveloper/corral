@@ -77,6 +77,13 @@ where
             return Committed::NotSpawned(error);
         }
     };
+    // Known as Corral's from this moment, not from the serve below: the
+    // process is on the table now, and a sweep that reads it while the store
+    // is still committing must not list it as a runtime outside Corral. A
+    // runtime lock this cannot take is met again at the serve, which ends the
+    // child rather than keep one it cannot register.
+    let owned = pending.owned_child();
+    let _ = state.with_runtime(|runtime| runtime.owned.register(owned));
 
     // A concrete runtime occurrence now exists, so its start may be written —
     // and must be, before anything that could report its end exists. The

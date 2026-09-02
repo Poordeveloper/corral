@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use corral_core::RepairBudget;
+
 /// A daemon with no established client for this long may exit.
 ///
 /// Runtime tuning, not a wire contract and not a public configuration surface:
@@ -40,6 +42,28 @@ pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 /// path to `corral-core` — so raising this past the count that test opens
 /// leaves it asserting nothing. Move them together.
 pub const CONCURRENT_CONNECTIONS: usize = 128;
+
+/// How much automatic repair one integration drift fingerprint may spend
+/// before Corral stops rather than joining a configuration tug-of-war.
+///
+/// A dogfood-tunable policy default, never a wire constant (grill Q4′): the
+/// numbers may go stricter or looser on dogfood evidence, but no code path may
+/// silently exceed the authority accepted here. Sized against the measured
+/// benign case — a provider's own whole-file rewrite can drop Corral's entry
+/// in an ordinary race — so three in a day is already far past what that race
+/// produces, while an authority replaying its own configuration crosses it on
+/// the first day.
+pub const REPAIR_BUDGET: RepairBudget = RepairBudget::new(3, Duration::from_secs(24 * 60 * 60));
+
+/// How often the process table is swept for provider runtimes.
+///
+/// Chosen from how stale a row may be, not from what a sweep costs. The cost
+/// was measured and is about a millisecond for a whole desktop's process
+/// table (2026-09-02: p50 0.79 ms over 535 processes), so it buys nothing to
+/// economize on — what this number actually decides is how long a session
+/// that has been idle since before Corral started stays invisible, and how
+/// long one that exited keeps a row.
+pub const SWEEP_CADENCE: Duration = Duration::from_secs(30);
 
 /// Timing the daemon runs under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

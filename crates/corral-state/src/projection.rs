@@ -253,7 +253,7 @@ pub(crate) fn control_capable_runtime_binding(
     // other would be a fix applied to neither.
     let excluded = excluding.map_or_else(String::new, |binding| binding.to_string());
     let mut statement = connection.prepare_cached(
-        "SELECT id, assurance FROM bindings
+        "SELECT id, assurance, provenance FROM bindings
           WHERE session_id = ?1 AND kind = ?2 AND id != ?3",
     )?;
     let rows = statement.query_map(
@@ -262,13 +262,24 @@ pub(crate) fn control_capable_runtime_binding(
             binding_kind_token(BindingKind::Runtime),
             excluded,
         ],
-        |row| Ok((text(row, 0)?, text(row, 1)?)),
+        |row| Ok((text(row, 0)?, text(row, 1)?, text(row, 2)?)),
     )?;
     for row in rows {
-        let (id, assurance) = row?;
-        if assurance_from_token(&assurance)?.permits_control() {
-            return Ok(Some(id.parse().map_err(FatalState::from)?));
+        let (id, assurance, provenance) = row?;
+        // Provenance as well as assurance, and the two say different things.
+        // Assurance is how sure Corral is that the edge is real; provenance
+        // says whether the runtime is Corral's to drive. A discovered runtime
+        // is somebody else's process — Corral holds no handle on it — so a
+        // continuation must never hang a managed Run under it, and admitting
+        // one must never block the managed binding that belongs there
+        // (ADR 0014 D6).
+        if !assurance_from_token(&assurance)?.permits_control() {
+            continue;
         }
+        if provenance_from_token(&provenance)? == Provenance::Discovered {
+            continue;
+        }
+        return Ok(Some(id.parse().map_err(FatalState::from)?));
     }
     Ok(None)
 }

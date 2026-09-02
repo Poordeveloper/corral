@@ -27,5 +27,5 @@ mod test_scratch;
 
 pub use error::{FileKind, InvalidEndpointReason, RendezvousError};
 pub use lock::{OwnerProbe, SingletonClaim, probe_owner};
-pub use paths::{RendezvousPaths, validate_endpoint_path};
+pub use paths::{RendezvousPaths, provider_home, validate_endpoint_path};
 pub use socket::{SocketPathState, inspect_socket_path, remove_stale_socket};

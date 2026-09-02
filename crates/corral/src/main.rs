@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 
 mod relay;
 use corral_client::{ActivationError, ClientActivationPolicy, Connection, RequestError, activate};
-use corral_protocol::method::SessionListItem;
+use corral_protocol::method::{self, SessionListItem};
 use corral_tui::LocalKeys;
 
 #[derive(Debug, Parser)]
@@ -71,6 +71,33 @@ enum Command {
     },
     /// Open the session list.
     Tui,
+    /// See or change how Corral integrates with a provider.
+    ///
+    /// The daemon performs every operation: a client never writes a
+    /// provider's configuration itself (ADR 0013 D1).
+    Integration {
+        #[command(subcommand)]
+        action: IntegrationAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IntegrationAction {
+    /// Report what Corral's integration looks like, changing nothing.
+    Status {
+        /// The agent to ask about.
+        provider: String,
+    },
+    /// Let Corral discover this agent's sessions, and install what that needs.
+    Enable {
+        /// The agent to integrate with.
+        provider: String,
+    },
+    /// Stop Corral discovering this agent's sessions, and take its entries out.
+    Disable {
+        /// The agent to stop integrating with.
+        provider: String,
+    },
 }
 
 /// Synchronous, and that is for the relay's sake.
@@ -134,6 +161,60 @@ async fn serve(cli: Cli) -> ExitCode {
         Command::Continue { session } => continue_session(&mut connection, &session).await,
         Command::Attach { session } => attach(&mut connection, &session).await,
         Command::Tui => session_list(&policy, connection).await,
+        Command::Integration { action } => integration(&mut connection, action).await,
+    }
+}
+
+/// Ask the daemon about a provider's integration, or ask it to change one.
+///
+/// Every answer says the same three things: what the standing is, whether
+/// Corral can expect this agent's sessions to report, and — when there is
+/// something to explain — what Corral found and did not do.
+async fn integration(connection: &mut Connection, action: IntegrationAction) -> ExitCode {
+    let (method, provider) = match &action {
+        IntegrationAction::Status { provider } => (method::INTEGRATION_STATUS, provider),
+        IntegrationAction::Enable { provider } => (method::INTEGRATION_ENABLE, provider),
+        IntegrationAction::Disable { provider } => (method::INTEGRATION_DISABLE, provider),
+    };
+
+    let answer = match connection.integration(method, provider).await {
+        Ok(answer) => answer,
+        Err(error) => return report_request_failure(&error),
+    };
+
+    println!("{} · {}", answer.provider, describe(&answer.standing));
+    if let Some(path) = &answer.path {
+        println!("  configuration {path}");
+    }
+    if let Some(detail) = &answer.detail {
+        println!("  {detail}");
+    }
+    if !answer.claims_delivery {
+        // The one sentence a person acts on. Limited awareness is a product
+        // state, not an error, so this is printed and the command succeeds
+        // (`PRODUCT.md` §6).
+        println!("  Sessions from this agent show Limited awareness until this is resolved.");
+    }
+    ExitCode::SUCCESS
+}
+
+/// A standing in the words a person reads.
+///
+/// A value this build has no word for is rendered as it arrived rather than
+/// refused: a newer daemon may name a standing this client predates, and
+/// showing the raw word beats showing nothing (`AGENTS.md` §Protocol).
+fn describe(standing: &str) -> String {
+    match standing {
+        method::STANDING_INSTALLED => "integrated".to_owned(),
+        method::STANDING_NOT_INSTALLED => "not integrated".to_owned(),
+        method::STANDING_DRIFTED => "integrated, but not by this version of Corral".to_owned(),
+        method::STANDING_REFUSED => {
+            "not integrated · Corral did not change your configuration".to_owned()
+        }
+        method::STANDING_REPAIR_WITHHELD => {
+            "not integrated · Corral stopped repairing it".to_owned()
+        }
+        other => other.to_owned(),
     }
 }
 

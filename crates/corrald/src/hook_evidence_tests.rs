@@ -107,17 +107,158 @@ async fn a_run_ending_arrives_behind_the_events_that_run_delivered() {
 
 fn delivered() -> Delivered {
     Delivered {
-        token: crate::provider::LaunchTokens::new()
-            .mint(crate::provider::LaunchScope {
-                session: corral_core::CorralSessionId::mint(),
-                run: corral_core::RunId::mint(),
-                provider: crate::provider::KnownProvider::Claude,
-            })
-            .expect("a token"),
+        scope: crate::hook_endpoint::DeliveryScope::Managed(
+            crate::provider::LaunchTokens::new()
+                .mint(crate::provider::LaunchScope {
+                    session: corral_core::CorralSessionId::mint(),
+                    run: corral_core::RunId::mint(),
+                    provider: crate::provider::KnownProvider::Claude,
+                })
+                .expect("a token"),
+        ),
         provider: "claude".to_owned(),
         payload: Some("{}".to_owned()),
         payload_omitted: None,
         observed_at: SystemTime::UNIX_EPOCH,
         arrived: std::time::Instant::now(),
     }
+}
+
+/// A managed session's global entry fires alongside its injected one —
+/// measured 2026-09-02, milliseconds apart and in an unstable order. The
+/// runtime is the daemon's own, so it is the launch that attributes it and
+/// never discovery: whichever entry is taken in first, the identity belongs
+/// to the managed Session, there is one Session and one Run, and no row is
+/// shown for a runtime outside Corral.
+#[tokio::test]
+async fn a_managed_runtimes_global_entry_never_mints_a_session_whichever_arrives_first() {
+    for (name, global_first) in [("global-first", true), ("injected-first", false)] {
+        let registry = registry(name);
+        let child = crate::runtime::spawn(
+            &crate::runtime::LaunchRequest::new(
+                "/bin/sh",
+                ["-c", "sleep 30"].map(std::ffi::OsString::from),
+                std::env::temp_dir(),
+            )
+            .expect("a launch request"),
+            crate::runtime::PtyGeometry::expect_valid(24, 80),
+        )
+        .expect("a real child");
+        let pid = child.process_id().expect("the child's pid");
+        registry
+            .state
+            .with_runtime(|runtime| runtime.owned.register(child.owned()))
+            .expect("the runtime");
+        let scope = LaunchScope {
+            session: corral_core::CorralSessionId::mint(),
+            run: RunId::mint(),
+            provider: KnownProvider::Claude,
+        };
+        registry
+            .state
+            .start_managed_session(
+                command(name),
+                scope.session,
+                scope.run,
+                corral_core::OccurrenceTime::Authoritative(at(500)),
+                at(500),
+            )
+            .await
+            .expect("the managed session");
+        let identity = ExternalId::new("session-abc").expect("an identity");
+        let global = || {
+            crate::external_session::discovered(
+                &registry.state,
+                KnownProvider::Claude,
+                identity.clone(),
+                crate::ancestry::Corroboration::Reached {
+                    provider: KnownProvider::Claude,
+                    process: Box::new(crate::platform::process::ProcessIdentity {
+                        pid,
+                        parent: std::process::id(),
+                        group: pid,
+                        started: at(500),
+                        executable: std::path::PathBuf::from("/usr/local/bin/claude"),
+                    }),
+                },
+                at(900),
+            )
+        };
+        let injected = || establish(&registry.state, &scope, identity.clone(), at(900));
+        if global_first {
+            assert_eq!(global().await.expect("recorded"), None, "{name}");
+            injected().await.expect("recorded");
+        } else {
+            injected().await.expect("recorded");
+            assert_eq!(global().await.expect("recorded"), None, "{name}");
+        }
+
+        let sessions = registry.state.sessions().await.expect("sessions");
+        assert_eq!(sessions.len(), 1, "{name}: a second session was minted");
+        assert_eq!(sessions[0].id(), scope.session, "{name}");
+        let binding = registry
+            .state
+            .provider_session_binding(scope.session)
+            .await
+            .expect("bindings")
+            .unwrap_or_else(|| panic!("{name}: the managed session was refused its identity"));
+        assert_eq!(binding.key().external_id(), &identity, "{name}");
+        let runs = registry.state.runs_of(scope.session).await.expect("runs");
+        assert_eq!(runs.len(), 1, "{name}");
+        assert!(
+            registry.state.seen_runtimes().snapshot().is_empty(),
+            "{name}: the managed runtime was shown as one outside Corral",
+        );
+
+        if let Some(group) = child.child_group() {
+            group.hang_up();
+        }
+        let (_screen, mut reaper) = child.split();
+        let _ = reaper.wait();
+    }
+}
+
+struct Registry {
+    state: Arc<DaemonState>,
+    directory: std::path::PathBuf,
+}
+
+impl Drop for Registry {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn registry(name: &str) -> Registry {
+    let directory = std::env::temp_dir().join(format!(
+        "corrald-hook-evidence-{}-{name}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("create the scratch directory");
+    let state = DaemonState::open(
+        &directory.join("registry.sqlite3"),
+        &directory.join("launch"),
+        &directory,
+    )
+    .expect("open");
+    Registry {
+        state: Arc::new(state),
+        directory,
+    }
+}
+
+fn at(seconds: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+}
+
+fn command(id: &str) -> corral_core::Command {
+    corral_core::Command::new(
+        corral_core::CommandId::new(id).expect("usable"),
+        corral_core::CommandFingerprint::builder(
+            corral_core::CommandKind::new("session.new").expect("usable"),
+        )
+        .input("cwd", "/tmp")
+        .build(),
+    )
 }

@@ -28,6 +28,8 @@ qwertty-term-vt = { workspace = true }
 rustix = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+# Codex `config.toml` editing keeps the user's comments and layout (ADR 0013 D3).
+toml_edit = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 

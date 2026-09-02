@@ -18,13 +18,14 @@ use std::time::{Duration, Instant, SystemTime};
 
 use corral_core::{
     Assurance, Binding, BindingKey, BindingKind, Evidence, EvidenceSource, ExternalId,
-    IdentityStatus, Provenance, ProviderId, RunId,
+    IdentityStatus, IntegrationIntent, Provenance, ProviderId, RunId,
 };
 use corral_state::{BindingResolution, Contested, Refusal, StateError};
 use tracing::{debug, info, warn};
 
+use crate::hook_endpoint::DeliveryScope;
 use crate::provider::{
-    AgentFact, AgentFactKind, LaunchScope, LaunchToken, ProviderReport, Uninterpretable,
+    AgentFact, AgentFactKind, KnownProvider, LaunchScope, ProviderReport, Uninterpretable,
 };
 use crate::state::DaemonState;
 
@@ -63,7 +64,9 @@ const BETWEEN_ATTEMPTS: Duration = Duration::from_millis(20);
 
 /// One delivery that passed the endpoint's checks, waiting to be interpreted.
 pub struct Delivered {
-    pub token: LaunchToken,
+    /// Which integration this arrived through, and — for an external one —
+    /// where the relay stood.
+    pub scope: crate::hook_endpoint::DeliveryScope,
     pub provider: String,
     pub payload: Option<String>,
     pub payload_omitted: Option<String>,
@@ -229,14 +232,28 @@ pub(crate) async fn ingest(
 }
 
 async fn ingest_one(state: &Arc<DaemonState>, delivered: Delivered) -> Result<(), StateError> {
+    let token = match &delivered.scope {
+        DeliveryScope::Managed(token) => *token,
+        // A delivery from a globally installed entry belongs to no launch, so
+        // there is nothing to resolve and nothing this path can file it
+        // under. What it may claim is decided by corroboration, on its own
+        // path (ADR 0014 D1/D3).
+        DeliveryScope::External {
+            relay_pid,
+            relay_parent_pid,
+        } => {
+            let (relay_pid, relay_parent_pid) = (*relay_pid, *relay_parent_pid);
+            return ingest_external(state, delivered, relay_pid, relay_parent_pid).await;
+        }
+    };
     // Resolution first, and it is not authorization: it says which launch this
-    // event belongs to. An event with no token, an unknown token, or another
-    // launch's token is dropped with diagnostics and never correlated by cwd
-    // or time — heuristics never bind (ADR 0004 D5).
+    // event belongs to. An event with an unknown token or another launch's
+    // token is dropped with diagnostics and never correlated by cwd or time —
+    // heuristics never bind (ADR 0004 D5).
     // A token nobody minted and a token whose Run is over reach the same place
     // deliberately: neither is a launch this event may be filed under, and
     // inventing a difference would invite a caller to act on one.
-    let Some(scope) = state.resolve_launch_token(&delivered.token) else {
+    let Some(scope) = state.resolve_launch_token(&token) else {
         debug!("a hook event named a launch this daemon does not remember");
         return Ok(());
     };
@@ -287,6 +304,108 @@ async fn ingest_one(state: &Arc<DaemonState>, delivered: Delivered) -> Result<()
         delivered.arrived,
     )
     .await
+}
+
+/// Take in a delivery from a globally installed entry.
+///
+/// Two gates the user owns, then a diagnostic. Integration the user switched
+/// off drops the delivery: a stale copy of Corral's entry in a file Corral
+/// does not manage must not keep feeding evidence somebody turned off
+/// (ADR 0014 D3). A provider name this build does not know is dropped rather
+/// than guessed at.
+///
+/// What survives is recorded and claims nothing. A delivery proves a provider
+/// thread emitted an event; it does not prove a user-facing session exists,
+/// and the evidence that answers that — an observed runtime the ancestry walk
+/// or the sweep reaches — does not exist in this build yet. Until it does, an
+/// uncorroborated identity is entitled to no binding, no Run, and no row, so
+/// holding it would be indistinguishable from dropping it (grill Q5, Q6′).
+/// Where the relay stood is logged because that is what a person debugging
+/// their integration needs, and it is what the walk will start from.
+async fn ingest_external(
+    state: &Arc<DaemonState>,
+    delivered: Delivered,
+    relay_pid: Option<u32>,
+    relay_parent_pid: Option<u32>,
+) -> Result<(), StateError> {
+    let Some(provider) = KnownProvider::from_name(&delivered.provider) else {
+        debug!(
+            claimed = %delivered.provider,
+            "a token-less hook event named a provider this build does not know",
+        );
+        return Ok(());
+    };
+    let Ok(named) = ProviderId::new(provider.as_str()) else {
+        warn!("a provider name this build declares is not a usable provider id");
+        return Ok(());
+    };
+    let intent = state.integration_intent(named).await?;
+    if !matches!(
+        intent.map(|recorded| recorded.intent()),
+        Some(IntegrationIntent::Enabled)
+    ) {
+        debug!(
+            provider = provider.as_str(),
+            "a token-less hook event arrived for a provider whose integration is not enabled",
+        );
+        return Ok(());
+    }
+
+    let Some(payload) = delivered.payload.as_deref() else {
+        debug!(
+            provider = provider.as_str(),
+            "a token-less hook event arrived without its payload",
+        );
+        return Ok(());
+    };
+    let report = match crate::provider::interpret(provider, payload) {
+        Ok(report) => report,
+        Err(_) => {
+            debug!(
+                provider = provider.as_str(),
+                "a token-less hook payload was not a shape this build reads",
+            );
+            return Ok(());
+        }
+    };
+    let Some(identity) = report.identity else {
+        debug!(
+            provider = provider.as_str(),
+            "a token-less hook event carried no provider session identity",
+        );
+        return Ok(());
+    };
+
+    // The walk is the daemon's and it happens off the reactor: reading a
+    // process chain is a series of blocking system calls, and a contended one
+    // would stall every other connection this thread is serving.
+    let corroboration = match relay_parent_pid {
+        Some(parent) => {
+            tokio::task::spawn_blocking(move || crate::ancestry::corroborate(parent, provider))
+                .await
+                .unwrap_or(crate::ancestry::Corroboration::Unreadable)
+        }
+        // A relay too old to say where it stood leaves nothing to walk from.
+        // Unknown, never "no provider was there".
+        None => crate::ancestry::Corroboration::Unreadable,
+    };
+    debug!(
+        provider = provider.as_str(),
+        identity = identity.as_str(),
+        relay_pid,
+        relay_parent_pid,
+        ?corroboration,
+        "a session outside Corral reported",
+    );
+    crate::external_session::discovered(
+        state,
+        provider,
+        identity,
+        corroboration,
+        delivered.observed_at,
+    )
+    .await?;
+    Ok(())
 }
 
 async fn apply(
