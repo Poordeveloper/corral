@@ -147,10 +147,19 @@ async fn record_run(
             | corral_state::BindingResolution::Existing(binding),
         ) => binding.id(),
         Err(error) => {
-            // The Session exists and is visible; what is missing is the Run.
-            // Degrading here costs the episode's start time and never the
-            // discovery.
-            warn!(%error, %session, "an external runtime could not be bound");
+            // The common cause is succession: this runtime is already bound to
+            // another Session, because the provider changed which session it
+            // carries without the process ending. ADR 0014 D7 rules what that
+            // should do — the prior Run ends `SessionChanged`, the successor
+            // starts, in one transaction — and this build does not do it yet,
+            // so the honest outcome is a visible Session with no Run rather
+            // than a Run filed against a runtime that is carrying something
+            // else. Named here so it reads as the unimplemented case it is.
+            warn!(
+                %error,
+                %session,
+                "an external runtime is already bound to another session;                  succession is not implemented, so this session has no run",
+            );
             return Ok(());
         }
     };

@@ -103,19 +103,27 @@ per the D3 claim ladder: corroborated → Attested `ProviderSessionBinding`
 with OS start time; uncorroborated → Heuristic, live-only. A walk ending
 on a Corral-owned process confirms and mints nothing (D4 dedupe).
 
-**6. The sweep.** Daemon-start plus bounded periodic process enumeration
-recognizing provider executables; weak candidates stay internal evidence,
-and only the spike-sealed high-precision recognizer mints a user-visible
-provisional Session (grill Q5's display gate), under a Heuristic runtime
-binding, linked or superseded when identity arrives (provider-id-keyed
-record wins). Succession commits as one atomic transaction: prior Run
-ends `RunEnd::SessionChanged` (`"session-changed"`, no successor
-reference), successor Run starts, A-end seq < B-start seq (grill Q7/Q8). Loss of an observed `(pid, start_time)`
-ends the external Run `Exited(Unknown)`; reconciliation after daemon loss
-re-verifies every formerly live external Run and reports exited or
-`Unverifiable`. Enumeration goes through `platform.rs`; check existing
-deps/std before any new crate (a new dependency needs its one-line
-justification naming alternatives).
+**6. The sweep — done, except succession.** Daemon start plus a bounded
+cadence enumerates processes and recognizes provider executables; only the
+sealed recognizer produces a user-visible provisional row, carrying no
+identity and offering no terminal (grill Q5/Q6′). A pass that cannot read
+the table retires nothing. Loss of an observed `(pid, start_time)` ends the
+external Run `Exited(Unknown)`; reconciliation after daemon loss re-verifies
+every formerly live external Run and reports exited or `Unverifiable`.
+Enumeration goes through `platform::process`, which reads `/proc` on Linux
+with the standard library alone and observes nothing on macOS by ruling
+(grill Q8′).
+
+**Succession is deliberately not in this change.** ADR 0014 D7's shape is
+accepted and unchanged — prior Run ends `RunEnd::SessionChanged`
+(`"session-changed"`, no successor reference), successor Run starts, A-end
+seq < B-start seq, one atomic transaction (grill Q7/Q8) — and it is a second
+durable diff with its own human schema review and its own trigger to test.
+Landing it inside an already large change would put two durable reviews
+behind one approval. Today the case is reachable and degrades honestly: a
+runtime already bound to another Session leaves the new Session visible with
+no Run, and the daemon says that is what happened rather than logging a
+generic failure.
 
 **7. Surfacing.** Additive session facts on the client protocol: origin
 (managed / discovered) and a runtime-location/cwd hint, absent meaning
@@ -236,9 +244,12 @@ disruption is a stop on the default-install shape.
 
 ## Definition of done
 
-- Grill rounds 1–4 recorded and closed (done, 2026-09-02); spike
+- Grill rounds 1–5 recorded and closed (done, 2026-09-02); spike
   reference recorded (done); ADR 0013/0014 accepted (done); plan
   unblocked before any boundary was crossed.
+- Succession (ADR 0014 D7) is out of this change by explicit decision and
+  is the named follow-up: it is a second durable diff, and one approval
+  must not cover two.
 - Designs 2–10 implemented; `./scripts/verify` green on the final tree;
   matrix recorded with the design-9 fields; snapshot coverage present.
 - **Merge gate (grill Q7′): real-world configuration-shape fixtures.**
