@@ -39,6 +39,7 @@ pub mod claude_options;
 pub mod codex;
 pub mod codex_integration;
 pub mod launch;
+pub mod recognition;
 pub mod relay_grammar;
 pub mod reported;
 

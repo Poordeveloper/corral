@@ -321,6 +321,11 @@ fn a_session_holds_at_most_one_provider_session_binding() {
 
 /// Confirming a second runtime binding acquires control just as adding one
 /// does, so it meets the same rule.
+///
+/// The candidate is one the user linked: provenance is what says whether
+/// Corral may drive a runtime at all, so a *discovered* one could never
+/// acquire control however strong its evidence became, and confirming it
+/// would prove nothing about this rule (ADR 0014 D6).
 #[test]
 fn confirming_a_second_runtime_binding_is_refused() {
     let mut store = TestStore::new("confirm-second");
@@ -330,7 +335,7 @@ fn confirming_a_second_runtime_binding_is_refused() {
         .bind(
             session,
             key(node, BindingKind::Runtime, "run-b"),
-            Provenance::Discovered,
+            Provenance::UserLinked,
             suspected_runtime(),
             instant(12),
         )
@@ -3030,4 +3035,144 @@ fn one_drift_class_cannot_exhaust_anothers_budget() {
         .expect("authorize");
 
     assert_eq!(authority, RepairAuthority::Available { remaining: 3 });
+}
+
+fn continuation() -> Command {
+    Command::new(
+        CommandId::new(CorralSessionId::mint().to_string()).expect("usable"),
+        CommandFingerprint::builder(CommandKind::new("session.resume").expect("usable"))
+            .input("session", "discovered")
+            .build(),
+    )
+}
+
+/// A discovered runtime is somebody else's process. Corral holds no handle on
+/// it, so a continuation must never hang a managed Run under it — and, once
+/// the external Run has ended, that is exactly what picking it by assurance
+/// alone would do (ADR 0014 D6).
+#[test]
+fn a_continuation_never_lands_on_a_runtime_corral_only_discovered() {
+    let mut store = TestStore::new("discovered-runtime");
+    let node = store.node();
+    let discovered = store
+        .resolve_or_create_session(
+            key(node, BindingKind::ProviderSession, "provider-session-1"),
+            Provenance::Discovered,
+            Evidence::new(
+                EvidenceSource::ProviderHook,
+                Assurance::Attested,
+                instant(100),
+            ),
+            instant(100),
+        )
+        .expect("resolve");
+    let session = match discovered {
+        SessionResolution::Created { session, .. } => session.id(),
+        SessionResolution::Existing { session, .. } => session.id(),
+    };
+    store
+        .bind(
+            session,
+            key(node, BindingKind::Runtime, "pid-4321-500000000"),
+            Provenance::Discovered,
+            Evidence::new(
+                EvidenceSource::NodeRuntimeObservation,
+                Assurance::Attested,
+                instant(100),
+            ),
+            instant(100),
+        )
+        .expect("bind the discovered runtime");
+
+    let continued = store.resume_managed_session(
+        &continuation(),
+        session,
+        RunId::mint(),
+        OccurrenceTime::Authoritative(instant(200)),
+        instant(200),
+    );
+
+    assert!(
+        matches!(
+            continued,
+            Err(StateError::Refused(Refusal::NoManagedRuntimeBinding(named))) if named == session
+        ),
+        "a discovered runtime was offered as a continuation target: {continued:?}",
+    );
+}
+
+/// The other half of the same defect: admitting the managed runtime binding a
+/// continuation actually needs must not be refused because a discovered one is
+/// already there.
+#[test]
+fn a_discovered_runtime_does_not_block_the_managed_binding_that_belongs_there() {
+    let mut store = TestStore::new("discovered-does-not-block");
+    let node = store.node();
+    let discovered = store
+        .resolve_or_create_session(
+            key(node, BindingKind::ProviderSession, "provider-session-2"),
+            Provenance::Discovered,
+            Evidence::new(
+                EvidenceSource::ProviderHook,
+                Assurance::Attested,
+                instant(100),
+            ),
+            instant(100),
+        )
+        .expect("resolve");
+    let session = match discovered {
+        SessionResolution::Created { session, .. } => session.id(),
+        SessionResolution::Existing { session, .. } => session.id(),
+    };
+    store
+        .bind(
+            session,
+            key(node, BindingKind::Runtime, "pid-4321-500000000"),
+            Provenance::Discovered,
+            Evidence::new(
+                EvidenceSource::NodeRuntimeObservation,
+                Assurance::Attested,
+                instant(100),
+            ),
+            instant(100),
+        )
+        .expect("bind the discovered runtime");
+
+    let managed = store.bind(
+        session,
+        managed_key(node, "managed-runtime-1"),
+        Provenance::CorralCreated,
+        Evidence::new(
+            EvidenceSource::CorralConstructed,
+            Assurance::Deterministic,
+            instant(200),
+        ),
+        instant(200),
+    );
+
+    assert!(
+        managed.is_ok(),
+        "a discovered runtime blocked the managed one: {managed:?}",
+    );
+}
+
+/// The at-most-one rule counts control-capable runtime bindings. A discovered
+/// one is not one, so a Session may hold Corral's own runtime and a process
+/// discovery found for it at the same time — which is the ordinary outcome
+/// when the global integration entry fires for a managed session.
+#[test]
+fn a_discovered_runtime_is_admitted_beside_the_managed_one() {
+    let mut store = TestStore::new("discovered-beside-managed");
+    let node = store.node();
+    let (session, _) = managed_session(&mut store, "run-a");
+
+    let admitted = store.bind(
+        session,
+        key(node, BindingKind::Runtime, "pid-4321-500000000"),
+        Provenance::Discovered,
+        evidence(EvidenceSource::NodeRuntimeObservation, Assurance::Attested),
+        instant(12),
+    );
+
+    assert!(admitted.is_ok(), "{admitted:?}");
 }

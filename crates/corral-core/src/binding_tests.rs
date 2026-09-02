@@ -4,6 +4,10 @@ use super::*;
 use crate::evidence::EvidenceSource;
 
 fn binding(kind: BindingKind, assurance: Assurance) -> Binding {
+    owned_binding(kind, assurance, Provenance::CorralCreated)
+}
+
+fn owned_binding(kind: BindingKind, assurance: Assurance, provenance: Provenance) -> Binding {
     Binding::new(
         BindingId::mint(),
         CorralSessionId::mint(),
@@ -13,7 +17,7 @@ fn binding(kind: BindingKind, assurance: Assurance) -> Binding {
             ProviderId::new("claude-code").expect("usable"),
             ExternalId::new("abc-123").expect("usable"),
         ),
-        Provenance::Discovered,
+        provenance,
         Evidence::new(
             EvidenceSource::NodeRuntimeObservation,
             assurance,
@@ -200,4 +204,39 @@ fn contesting_a_contested_binding_changes_nothing() {
     let twice = once.clone().contested();
 
     assert_eq!(once, twice);
+}
+
+/// A runtime binding Corral did not create names a process Corral holds no
+/// handle on. It is read-only by structure, not by weak evidence: corroborating
+/// it harder does not make it Corral's to drive (ADR 0014 D6).
+#[test]
+fn a_discovered_runtime_is_never_control_capable_however_strong() {
+    for assurance in [
+        Assurance::Deterministic,
+        Assurance::Attested,
+        Assurance::Manual,
+    ] {
+        let discovered = owned_binding(BindingKind::Runtime, assurance, Provenance::Discovered);
+
+        // The evidence is strong enough; the ownership is what is missing, and
+        // the two answers stay separate.
+        assert_eq!(
+            discovered.control_eligibility(),
+            ControlEligibility::Eligible
+        );
+        assert!(!discovered.is_control_capable_runtime_binding());
+    }
+}
+
+/// A user's explicit link is the case that does grant it, which is why the
+/// rule names provenance rather than "Corral created it" (`PRODUCT.md` §6).
+#[test]
+fn a_runtime_the_user_linked_is_control_capable() {
+    let linked = owned_binding(
+        BindingKind::Runtime,
+        Assurance::Manual,
+        Provenance::UserLinked,
+    );
+
+    assert!(linked.is_control_capable_runtime_binding());
 }

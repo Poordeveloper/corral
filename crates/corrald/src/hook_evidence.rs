@@ -351,21 +351,60 @@ async fn ingest_external(
         return Ok(());
     }
 
-    let identity = delivered
-        .payload
-        .as_deref()
-        .and_then(|payload| crate::provider::interpret(provider, payload).ok())
-        .and_then(|report| report.identity);
+    let Some(payload) = delivered.payload.as_deref() else {
+        debug!(
+            provider = provider.as_str(),
+            "a token-less hook event arrived without its payload",
+        );
+        return Ok(());
+    };
+    let report = match crate::provider::interpret(provider, payload) {
+        Ok(report) => report,
+        Err(_) => {
+            debug!(
+                provider = provider.as_str(),
+                "a token-less hook payload was not a shape this build reads",
+            );
+            return Ok(());
+        }
+    };
+    let Some(identity) = report.identity else {
+        debug!(
+            provider = provider.as_str(),
+            "a token-less hook event carried no provider session identity",
+        );
+        return Ok(());
+    };
+
+    // The walk is the daemon's and it happens off the reactor: reading a
+    // process chain is a series of blocking system calls, and a contended one
+    // would stall every other connection this thread is serving.
+    let corroboration = match relay_parent_pid {
+        Some(parent) => {
+            tokio::task::spawn_blocking(move || crate::ancestry::corroborate(parent, provider))
+                .await
+                .unwrap_or(crate::ancestry::Corroboration::Unreadable)
+        }
+        // A relay too old to say where it stood leaves nothing to walk from.
+        // Unknown, never "no provider was there".
+        None => crate::ancestry::Corroboration::Unreadable,
+    };
     debug!(
         provider = provider.as_str(),
-        identity = identity
-            .as_ref()
-            .map(ExternalId::as_str)
-            .unwrap_or("unstated"),
+        identity = identity.as_str(),
         relay_pid,
         relay_parent_pid,
-        "a session outside Corral reported, and nothing yet corroborates it",
+        ?corroboration,
+        "a session outside Corral reported",
     );
+    crate::external_session::discovered(
+        state,
+        provider,
+        identity,
+        corroboration,
+        delivered.observed_at,
+    )
+    .await?;
     Ok(())
 }
 

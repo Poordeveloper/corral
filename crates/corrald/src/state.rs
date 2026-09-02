@@ -5,13 +5,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
 use corral_core::{
-    Binding, BindingKey, BindingKind, Command, CorralSessionId, Evidence, ExternalId,
-    IntegrationIntent, NodeId, OccurrenceTime, Provenance, ProviderId, RepairAuthority,
+    Binding, BindingKey, BindingKind, Command, CorralSessionId, Evidence, EvidenceSource,
+    ExternalId, IntegrationIntent, NodeId, OccurrenceTime, Provenance, ProviderId, RepairAuthority,
     RepairFingerprint, Run, RunId,
 };
 use corral_state::{
-    BindingResolution, Contested, FatalState, RecordedIntent, Refusal, StartedManagedSession,
-    StateError, Store,
+    BindingResolution, Contested, FatalState, RecordedIntent, RecordedRun, Refusal,
+    SessionResolution, StartedManagedSession, StateError, Store,
 };
 
 use crate::hook_evidence::{Deliveries, Ingest};
@@ -331,6 +331,25 @@ impl DaemonState {
     }
 
     /// A Session's Runs, oldest episode first.
+    /// Every Session the registry holds.
+    ///
+    /// A registry read rather than a runtime one: what is *live here* is the
+    /// session list's question, and this one asks what was recorded — which
+    /// is how a discovery test, and later a discovery reconciliation, checks
+    /// what a delivery actually wrote.
+    pub async fn sessions(self: &Arc<Self>) -> Result<Vec<corral_core::Session>, StateError> {
+        self.off_the_reactor(Store::sessions).await
+    }
+
+    /// The bindings recorded against one Session.
+    pub async fn bindings_of(
+        self: &Arc<Self>,
+        session: CorralSessionId,
+    ) -> Result<Vec<Binding>, StateError> {
+        self.off_the_reactor(move |store| store.bindings_of(session))
+            .await
+    }
+
     pub async fn runs_of(
         self: &Arc<Self>,
         session: CorralSessionId,
@@ -361,6 +380,49 @@ impl DaemonState {
             tracing::warn!(%session, "a session holds more than one provider-session binding");
         }
         Ok(first)
+    }
+
+    /// Find the Session an external identity names, or mint one for it.
+    ///
+    /// Binding uniqueness on `(node, provider, external_id, kind)` is what
+    /// makes this safe to call from discovery: an identity already known
+    /// resolves to the Session that holds it, and nothing duplicates.
+    pub async fn resolve_or_create_session(
+        self: &Arc<Self>,
+        key: BindingKey,
+        provenance: Provenance,
+        evidence: Evidence,
+        at: SystemTime,
+    ) -> Result<SessionResolution, StateError> {
+        self.off_the_reactor(move |store| {
+            store.resolve_or_create_session(key, provenance, evidence, at)
+        })
+        .await
+    }
+
+    /// Record that a Run began against a runtime binding.
+    pub async fn record_run_started(
+        self: &Arc<Self>,
+        run: RunId,
+        runtime_binding: corral_core::BindingId,
+        occurrence: EvidenceSource,
+        started: OccurrenceTime,
+    ) -> Result<RecordedRun, StateError> {
+        self.off_the_reactor(move |store| {
+            store.record_run_started(run, runtime_binding, occurrence, started)
+        })
+        .await
+    }
+
+    /// Record that a Run ended.
+    pub async fn record_run_ended(
+        self: &Arc<Self>,
+        run: RunId,
+        end: corral_core::RunEnd,
+        at: OccurrenceTime,
+    ) -> Result<corral_state::Durability, StateError> {
+        self.off_the_reactor(move |store| store.record_run_ended(run, end, at))
+            .await
     }
 
     /// Attach an external identity to a Session Corral already has.

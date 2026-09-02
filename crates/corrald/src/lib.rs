@@ -13,7 +13,11 @@
 //! lock and socket pathnames are rendezvous artifacts, not semantic state: a
 //! new `corrald` reconstructs nothing from its predecessor's runtime.
 
+/// Walking from a relay to the provider process that ran it (ADR 0014 D2).
+mod ancestry;
 mod connection;
+/// Sessions Corral found rather than started (ADR 0014).
+mod external_session;
 mod hook_endpoint;
 mod hook_evidence;
 mod in_flight;

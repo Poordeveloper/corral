@@ -136,6 +136,15 @@ pub async fn serve(
     // integration the user actually chose.
     tokio::spawn(crate::integration::repair_at_startup(Arc::clone(&state)));
 
+    // The no-lying reconciliation law, with external sessions in its scope
+    // (ADR 0014 D5): a Run this node recorded before must not still be shown
+    // as running because the daemon restarted. Every one is re-verified, and
+    // a process this account cannot inspect ends `Unverifiable` rather than
+    // exited — unreachable is never stopped.
+    tokio::spawn(crate::external_session::reverify_external_runs(Arc::clone(
+        &state,
+    )));
+
     info!(endpoint = %socket.display(), "corrald is serving");
 
     let accepting = Arc::clone(&lifecycle);

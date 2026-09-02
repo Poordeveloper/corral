@@ -91,6 +91,7 @@ tokio = { version = "1.48", default-features = false, features = [
     "sync",
     "time",
 ] }
+
 # Format-preserving TOML, for the one file Corral edits that legally carries
 # the user's own comments and layout: Codex's `config.toml` (ADR 0013 D3, and
 # the 2026-09-02 spike that measured Codex preserving what it did not write).
