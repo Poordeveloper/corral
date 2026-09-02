@@ -247,11 +247,21 @@ Measured 2026-09-02 (`docs/references/2026-09-02-pr8-attention-matrix.md`,
   calls the rollout files legacy; whether the index is ever read is the
   separate ruling grill Q9/Q25 reserved.
 
+Resume from a directory other than the session's, measured 2026-09-02 on
+the same versions (matrix record, "Resume from a directory other than the
+session's"): both providers resolve the id without its directory, append
+the new turn to the original file, keep the id, and carry on with the new
+directory as the working directory — Codex records it in the rollout,
+Claude files a `memory/` under the new directory's project name. So D4's
+fourth rung is mechanically possible from anywhere, and the directory a
+history row is continued in is Corral's choice, not the store's; D5's
+disclosure has to name it. Which directory, and who supplies it, is
+grill Q35 and is not decided here.
+
 Still open, and none of it load-bearing for the decisions above: whether
 resuming touches Claude's file time; how a headless Codex rollout is told
-from an interactive one by name alone (`codex exec` was not run); `--resume`
-from a directory other than the store's; enumeration cost on a large
-store.
+from an interactive one by name alone (`codex exec` was not run);
+enumeration cost on a large store.
 
 ## What this does not decide
 

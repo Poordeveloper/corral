@@ -2774,3 +2774,35 @@ flipping ADR 0015/0016 `proposed → accepted` or recording which
 load-bearing fact failed and reopening exactly that ruling. Concrete
 sealed rules, sealed version rows, and noise-catalog entries are matrix
 evidence, not grill questions.
+
+## Q35 — the directory a history row continues in (opened by the matrix, 2026-09-02)
+
+Opened after the structural grill closed, because a measurement made it
+askable: both providers resume a session id from any directory and carry
+on *in the new one* (matrix record, "Resume from a directory other than
+the session's"). A history row carries no location (Q25), so the
+directory is Corral's choice, and D5's disclosure has to name it.
+`history::resume_location_sealed` stays false for both providers until
+this is ruled; a history row's continuation is refused until then.
+
+❓ **Q35** - **Which directory does Corral continue a history row in, and who says?**
+
+(a) The client's own working directory: `corral continue` uses the shell's
+cwd, the TUI its process cwd, and `session.resume` gains an optional
+`working_directory` that only a history-row continuation may carry
+(refused with `invalid_params` for a Session Corral already knows). The
+disclosure names it: "…Continuing here starts another Claude Code process
+for this session in `/Users/me/proj`."
+
+(b) The person names it every time: `corral continue --in <dir>` is
+required for a history row, and the TUI prompts for a path.
+
+(c) The daemon's account home, or the provider's default, silently.
+
+➡️ **(a)**, with the directory always in the disclosure and never
+defaulted when the client sends none (refused, not guessed). It is what
+the provider itself does — resume runs wherever you run it — so it never
+surprises a person who knows the tool; the cwd is the one fact the
+launching client holds authoritatively; and (b) is available on top of it
+as `--in <dir>` later if the default proves wrong. (c) decides for the
+person and hides it.

@@ -493,9 +493,11 @@ is told.
 - Continuation under test: the historical disclosure, external-live
   refusal, managed-live Open, Unverifiable refusal, stale
   `disclosure_revision` rejection, and `--yes` still preflighting.
-- The provider's `--resume` from a directory other than the session's
-  measured on the sealed versions and recorded in the matrix, before
-  `history::resume_location_sealed` answers true for that provider.
+- `history::resume_location_sealed` answers true for a provider only
+  after the matrix has measured its `--resume` from a directory other
+  than the session's (done 2026-09-02: both providers resume from
+  anywhere and carry on there) *and* grill Q35 has ruled which directory
+  Corral continues a history row in and how the disclosure names it.
 - Human-merged (Class C). Glossary entry landed; drift notes placed.
 
 ## Review checklist (PR8b)
@@ -705,11 +707,12 @@ carrying it back and refusing a missing or stale one with
 `stale_disclosure`; `corral continue --yes` still preflights, renders
 the disclosure it answered, and carries the revision. The fourth rung
 answers *eligible with disclosure* only once
-`history::resume_location_sealed` holds for the provider — the matrix
-has not measured `--resume` from a directory other than the one the
-session was started in (ADR 0016, unmeasured), a history row carries no
-location, and Corral does not guess one — so today a history row's
-continuation is refused with that said. Waiting on that measurement and
+`history::resume_location_sealed` holds for the provider. The matrix has
+since measured that both providers resume an id from any directory and
+carry on there (ADR 0016, measured facts); a history row carries no
+location and Corral does not guess one, so which directory a continuation
+runs in — and how the disclosure names it — is grill Q35, open. Until it
+is ruled, a history row's continuation is refused with that said. Waiting on that measurement and
 on acceptance: the sealed layout rows, the composing store operation
 (Session + `HistoryBinding` at Attested + Run, one transaction) and the
 launch it precedes, the TUI's own disclosure prompt (the list currently
