@@ -1,5 +1,5 @@
 ---
-status: active   # ADR 0013 / ADR 0014 accepted 2026-09-02 (grill rounds 1–4); merge owes the real-world fixture corpus (grill Q7′)
+status: active   # implemented and pushed on task/pr7-external-sessions; merge owes the maintainer's DURABLE-APPROVED-BY for schema 4. Succession (ADR 0014 D7) is the named follow-up
 class: C
 writes: [corrald, corral, corral-protocol, corral-state, corral-tui]
 reads: [docs/adr/0004-hook-delivery.md, docs/adr/0006-provider-hook-integration-policy.md, docs/adr/0009-codex-notify-delivery.md, docs/adr/0011-conversation-attachment-is-corrals-to-authorize.md, docs/adr/0012-managed-launch-argument-grammar.md, docs/adr/0013-global-hook-integration.md, docs/adr/0014-external-session-evidence.md, docs/references/2026-08-22-s2-session-identity-verification.md, docs/references/2026-08-27-pr5-claude-code-hook-matrix.md, docs/references/2026-08-31-pr6-codex-notify-matrix.md, docs/references/architecture-benchmarks.md, ARCHITECTURE.md, PRODUCT.md, ROADMAP.md]
