@@ -11,6 +11,9 @@ const CORRAL_DIR: &str = ".corral";
 const RUN_DIR: &str = "run";
 const LOG_DIR: &str = "log";
 const STATE_DIR: &str = "state";
+/// Diagnostic evidence beside — never inside — durable state: deletable,
+/// unrebuildable, and never read back into product truth (ADR 0015 D8).
+const DIAGNOSTICS_DIR: &str = "diagnostics";
 const SOCKET_FILE: &str = "corrald.sock";
 /// The hook endpoint's pathname.
 ///
@@ -49,6 +52,7 @@ pub struct RendezvousPaths {
     log_dir: PathBuf,
     log_file: PathBuf,
     state_dir: PathBuf,
+    diagnostics_dir: PathBuf,
     registry: PathBuf,
     launch_dir: PathBuf,
 }
@@ -68,6 +72,7 @@ impl RendezvousPaths {
         let run_dir = root.join(RUN_DIR);
         let log_dir = root.join(LOG_DIR);
         let state_dir = root.join(STATE_DIR);
+        let diagnostics_dir = root.join(DIAGNOSTICS_DIR);
         let socket = run_dir.join(SOCKET_FILE);
 
         if socket_address_length_exceeded(&socket) {
@@ -85,6 +90,7 @@ impl RendezvousPaths {
             run_dir,
             log_dir,
             state_dir,
+            diagnostics_dir,
         })
     }
 
@@ -136,6 +142,12 @@ impl RendezvousPaths {
 
     pub fn state_dir(&self) -> &Path {
         &self.state_dir
+    }
+
+    /// Where diagnostic journals live: the attention journal and whatever
+    /// later diagnostics need a home that is plainly not product truth.
+    pub fn diagnostics_dir(&self) -> &Path {
+        &self.diagnostics_dir
     }
 
     /// The directory holding the per-launch provider configuration Corral

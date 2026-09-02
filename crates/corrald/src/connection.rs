@@ -528,6 +528,7 @@ fn encode_session(
         // Known by construction: this daemon started it.
         origin: Some(method::ORIGIN_MANAGED.to_owned()),
         location_hint: None,
+        attention: None,
     })
     .unwrap_or_else(|_| serde_json::json!({}))
 }
@@ -566,6 +567,7 @@ fn encode_external(candidate: &crate::sweep::RuntimeCandidate) -> serde_json::Va
         agent_event: None,
         origin: Some(method::ORIGIN_DISCOVERED.to_owned()),
         location_hint: None,
+        attention: None,
     })
     .unwrap_or_else(|_| serde_json::json!({}))
 }

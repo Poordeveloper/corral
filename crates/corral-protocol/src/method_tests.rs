@@ -155,6 +155,7 @@ fn an_unknown_terminal_access_is_left_off_the_wire() {
         agent_event: None,
         origin: None,
         location_hint: None,
+        attention: None,
     };
 
     let encoded = serde_json::to_value(&item).expect("encode");
@@ -175,6 +176,7 @@ fn absent_provider_facts_are_left_off_the_wire() {
         agent_event: None,
         origin: None,
         location_hint: None,
+        attention: None,
     };
 
     let encoded = serde_json::to_value(&item).expect("encode");
@@ -423,4 +425,139 @@ fn an_unrepresentable_instant_produces_no_event() {
     let far = SystemTime::UNIX_EPOCH + Duration::from_secs(u64::MAX / 1_000);
 
     assert!(AgentEvent::at(AgentEventKind::TurnEnded, far).is_none());
+}
+
+// ---------------------------------------------------------------- attention
+
+/// The daemon's claim, when it makes one, rides the row it is about.
+#[test]
+fn a_list_item_carries_the_daemons_attention_claim() {
+    let item = SessionListItem {
+        session_id: "s".into(),
+        title: "t".into(),
+        execution_state: "running".into(),
+        terminal_access: None,
+        provider: None,
+        agent_event: None,
+        origin: None,
+        location_hint: None,
+        attention: Some(AttentionFacts {
+            state: AttentionWireState::NeedsYou,
+            since_unix_ms: 1_000,
+            last_known: None,
+            items: vec![AttentionItemFacts {
+                attention_item_id: "item-1".into(),
+                reason: AttentionReasonWire::NeedsInput,
+                since_unix_ms: 1_000,
+                acknowledged: false,
+            }],
+        }),
+    };
+    let encoded = serde_json::to_value(&item).expect("encode");
+    assert_eq!(encoded["attention"]["state"], json!("needs_you"));
+    assert_eq!(encoded["attention"]["since_unix_ms"], json!(1_000));
+    assert_eq!(encoded["attention"]["items"][0]["reason"], json!("needs_input"));
+    let decoded: SessionListItem = serde_json::from_value(encoded).expect("decode");
+    assert_eq!(decoded.attention.expect("attention").state, AttentionWireState::NeedsYou);
+}
+
+/// A state a newer daemon named decodes as no claim: the client renders
+/// nothing it cannot name, and keeps the row (`AGENTS.md` §Protocol).
+#[test]
+fn an_attention_state_this_build_does_not_know_decodes_as_no_claim() {
+    let decoded: SessionListItem = serde_json::from_value(json!({
+        "session_id": "s", "title": "t", "execution_state": "running",
+        "attention": {"state": "meditating", "since_unix_ms": 5, "items": []}
+    }))
+    .expect("decode");
+    let attention = decoded.attention.expect("attention");
+    assert_eq!(attention.state, AttentionWireState::Unrecognized("meditating".into()));
+    assert_eq!(attention.state.as_claim(), None);
+}
+
+/// An older daemon sends no attention object; that is unknown, and the row
+/// renders from execution state exactly as before.
+#[test]
+fn a_list_item_without_attention_still_decodes() {
+    let decoded: SessionListItem = serde_json::from_value(json!({
+        "session_id": "s", "title": "t", "execution_state": "exited"
+    }))
+    .expect("decode");
+    assert_eq!(decoded.attention, None);
+}
+
+/// Unknown carries what was last reliably known, at an instant.
+#[test]
+fn last_known_rides_beneath_unknown() {
+    let facts = AttentionFacts {
+        state: AttentionWireState::Unknown,
+        since_unix_ms: 9_000,
+        last_known: Some(LastKnownFacts { state: AttentionWireState::NeedsYou, at_unix_ms: 3_000 }),
+        items: Vec::new(),
+    };
+    let encoded = serde_json::to_value(&facts).expect("encode");
+    assert_eq!(encoded["last_known"]["state"], json!("needs_you"));
+    assert_eq!(encoded["last_known"]["at_unix_ms"], json!(3_000));
+}
+
+/// The summary is per class, totals and unacknowledged both, so a header
+/// and a badge read different numbers from one daemon-owned projection.
+#[test]
+fn the_summary_carries_totals_and_unacknowledged_per_class() {
+    let summary = AttentionSummaryResult {
+        needs_you: AttentionCount { total: 3, unacknowledged: 2 },
+        ready: AttentionCount { total: 1, unacknowledged: 0 },
+    };
+    let encoded = serde_json::to_value(&summary).expect("encode");
+    assert_eq!(encoded, json!({"needs_you": {"total": 3, "unacknowledged": 2}, "ready": {"total": 1, "unacknowledged": 0}}));
+    let decoded: AttentionSummaryResult = serde_json::from_value(json!({
+        "needs_you": {"total": 3, "unacknowledged": 2}, "ready": {"total": 1, "unacknowledged": 0}, "later": {}
+    }))
+    .expect("decode past unknown fields");
+    assert_eq!(decoded.needs_you.unacknowledged, 2);
+}
+
+/// An acknowledgement names the item it saw, never just the session
+/// (grill Q18).
+#[test]
+fn attention_acknowledge_names_a_session_and_an_item() {
+    let decoded: AttentionAcknowledgeParams =
+        serde_json::from_value(json!({"session_id": "s", "attention_item_id": "i"})).expect("decode");
+    assert_eq!(decoded.attention_item_id, "i");
+    assert!(serde_json::from_value::<AttentionAcknowledgeParams>(json!({"session_id": "s"})).is_err());
+}
+
+#[test]
+fn the_stale_attention_item_code_survives_the_wire() {
+    let encoded = serde_json::to_value(ErrorCode::StaleAttentionItem).expect("encode");
+    assert_eq!(encoded, json!("stale_attention_item"));
+    let decoded: ErrorCode = serde_json::from_value(encoded).expect("decode");
+    assert_eq!(decoded, ErrorCode::StaleAttentionItem);
+}
+
+#[test]
+fn every_attention_state_and_reason_survives_the_wire() {
+    for state in [
+        AttentionWireState::Working,
+        AttentionWireState::NeedsYou,
+        AttentionWireState::Ready,
+        AttentionWireState::Unknown,
+        AttentionWireState::Exited,
+    ] {
+        let encoded = serde_json::to_value(&state).expect("encode");
+        let decoded: AttentionWireState = serde_json::from_value(encoded).expect("decode");
+        assert_eq!(decoded, state);
+    }
+    for reason in [AttentionReasonWire::NeedsInput, AttentionReasonWire::TurnComplete] {
+        let encoded = serde_json::to_value(&reason).expect("encode");
+        let decoded: AttentionReasonWire = serde_json::from_value(encoded).expect("decode");
+        assert_eq!(decoded, reason);
+    }
+}
+
+#[test]
+fn the_attention_methods_and_capability_are_named() {
+    assert_eq!(ATTENTION_SUMMARY, "attention.summary");
+    assert_eq!(ATTENTION_ACKNOWLEDGE, "attention.acknowledge");
+    assert_eq!(crate::hello::capability::ATTENTION, "attention.v1");
 }

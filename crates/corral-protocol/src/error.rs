@@ -57,6 +57,12 @@ pub enum ErrorCode {
     /// phase. Which state it is stays in the message; a client that must tell
     /// them apart is what would earn the next code, and nothing does yet.
     SessionNotContinuable,
+    /// The attention item named is no longer the session's current one.
+    ///
+    /// Nothing happened: the item that replaced it stays unacknowledged, which
+    /// is the whole point of naming an item (grill Q18). Its own code because
+    /// a client's next move is to reload the row, not to fix its request.
+    StaleAttentionItem,
     Unknown(String),
 }
 
@@ -80,6 +86,7 @@ impl ErrorCode {
             Self::CommandIdConflict => "command_id_conflict",
             Self::UnknownProvider => "unknown_provider",
             Self::SessionNotContinuable => "session_not_continuable",
+            Self::StaleAttentionItem => "stale_attention_item",
             Self::Unknown(raw) => raw,
         }
     }
@@ -96,6 +103,7 @@ impl From<String> for ErrorCode {
             "command_id_conflict" => Self::CommandIdConflict,
             "unknown_provider" => Self::UnknownProvider,
             "session_not_continuable" => Self::SessionNotContinuable,
+            "stale_attention_item" => Self::StaleAttentionItem,
             _ => Self::Unknown(raw),
         }
     }
