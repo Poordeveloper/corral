@@ -326,6 +326,7 @@ fn session_resume_names_only_a_command_and_a_session() {
     let params = SessionResumeParams {
         command_id: "c1".to_owned(),
         session_id: "s1".to_owned(),
+        disclosure_revision: None,
     };
 
     let encoded = serde_json::to_value(&params).expect("encode");
@@ -654,4 +655,64 @@ fn a_history_row_carries_its_origin_and_recency() {
     }))
     .expect("decode");
     assert_eq!(older.last_active_unix_ms, None);
+}
+
+// ------------------------------------------------------------ continuation
+
+/// The preflight answers with the daemon's decision, the disclosure it
+/// wants shown, and a revision bound to that exact decision (ADR 0016 D5).
+#[test]
+fn a_continuation_preflight_carries_its_decision_and_revision() {
+    assert_eq!(SESSION_CONTINUATION, "session.continuation");
+    let params: SessionContinuationParams =
+        serde_json::from_value(json!({"session_id": "s"})).expect("decode");
+    assert_eq!(params.session_id, "s");
+    let result = SessionContinuationResult {
+        decision: CONTINUATION_ELIGIBLE_WITH_DISCLOSURE.to_owned(),
+        reason: None,
+        disclosure: Some(ContinuationDisclosure {
+            code: "history-unknown-live-state".to_owned(),
+            text: "Corral can't tell whether this session is still running somewhere else."
+                .to_owned(),
+        }),
+        disclosure_revision: Some("r1".to_owned()),
+    };
+    let encoded = serde_json::to_value(&result).expect("encode");
+    assert_eq!(encoded["decision"], json!("eligible_with_disclosure"));
+    assert_eq!(
+        encoded["disclosure"]["code"],
+        json!("history-unknown-live-state")
+    );
+    let decoded: SessionContinuationResult = serde_json::from_value(encoded).expect("decode");
+    assert_eq!(decoded.disclosure_revision.as_deref(), Some("r1"));
+    let refused: SessionContinuationResult = serde_json::from_value(json!({
+        "decision": "refused", "reason": "Still running outside Corral."
+    }))
+    .expect("decode");
+    assert_eq!(refused.decision, CONTINUATION_REFUSED);
+    assert_eq!(refused.disclosure, None);
+}
+
+/// A resume may carry the revision of the disclosure the client showed; an
+/// older client sends none, which is how the daemon knows it showed none.
+#[test]
+fn session_resume_carries_the_disclosure_revision_it_showed() {
+    let with: SessionResumeParams = serde_json::from_value(json!({
+        "command_id": "c", "session_id": "s", "disclosure_revision": "r1"
+    }))
+    .expect("decode");
+    assert_eq!(with.disclosure_revision.as_deref(), Some("r1"));
+    let without: SessionResumeParams =
+        serde_json::from_value(json!({"command_id": "c", "session_id": "s"})).expect("decode");
+    assert_eq!(without.disclosure_revision, None);
+    let encoded = serde_json::to_value(&without).expect("encode");
+    assert!(encoded.get("disclosure_revision").is_none());
+}
+
+#[test]
+fn the_stale_disclosure_code_survives_the_wire() {
+    let encoded = serde_json::to_value(ErrorCode::StaleDisclosure).expect("encode");
+    assert_eq!(encoded, json!("stale_disclosure"));
+    let decoded: ErrorCode = serde_json::from_value(encoded).expect("decode");
+    assert_eq!(decoded, ErrorCode::StaleDisclosure);
 }

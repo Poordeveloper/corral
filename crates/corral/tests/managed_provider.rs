@@ -858,7 +858,7 @@ fn continuing_after_an_unverifiable_end_is_refused_with_the_fact_stated() {
     );
     let message = refused_with(&refusal);
     assert!(
-        message.contains("cannot verify that the previous run has exited"),
+        message.contains("couldn't verify that the previous process ended"),
         "{message}",
     );
     assert_eq!(script.launches().len(), 1, "nothing was spawned");
@@ -1364,4 +1364,143 @@ fn deliver_by_hand(account: &TestAccount, delivery: &Value) {
     line.push(b'\n');
     stream.write_all(&line).expect("write a delivery");
     stream.flush().expect("flush a delivery");
+}
+
+/// The preflight answers the ladder's first rung in the words a person reads:
+/// a managed session that is still running is not continued, it is opened.
+/// Nothing is spawned by asking.
+#[test]
+fn a_continuation_preflight_refuses_a_still_running_session_in_the_persons_words() {
+    let account = account("preflight-live");
+    let script = Script::new(&account, "preflight-live")
+        .holding()
+        .fires(&session_start(FIRST, "startup"));
+    let daemon = daemon_running(&account, &script);
+    let session = new_claude(&account);
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    wait_until(provider::DELIVERED, || {
+        listed(&sessions(&mut client, 1), &session).and_then(external_id) == Some(FIRST)
+    });
+
+    let answer = client
+        .request(
+            2,
+            "session.continuation",
+            Some(json!({"session_id": session})),
+        )
+        .expect("session.continuation answered");
+    let result = &answer["outcome"]["result"];
+    assert_eq!(result["decision"], "refused", "{answer}");
+    let reason = result["reason"].as_str().expect("a reason");
+    assert!(
+        reason.contains("still running") && reason.contains("Open"),
+        "{reason}"
+    );
+    assert!(result.get("disclosure").is_none(), "{answer}");
+    assert_eq!(script.launches().len(), 1, "nothing was spawned");
+
+    drop(daemon);
+}
+
+/// An exited managed session with its identity learned is eligible outright,
+/// with nothing to disclose and no revision to carry.
+#[test]
+fn a_continuation_preflight_says_yes_to_an_exited_session() {
+    let account = account("preflight-exited");
+    let script = Script::new(&account, "preflight-exited").fires(&session_start(FIRST, "startup"));
+    let daemon = daemon_running(&account, &script);
+    let session = new_claude(&account);
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    wait_until(provider::DELIVERED, || {
+        listed(&sessions(&mut client, 1), &session).is_some_and(|listed| {
+            external_id(listed) == Some(FIRST) && listed["execution_state"] == "exited"
+        })
+    });
+
+    let answer = client
+        .request(
+            2,
+            "session.continuation",
+            Some(json!({"session_id": session})),
+        )
+        .expect("session.continuation answered");
+    let result = &answer["outcome"]["result"];
+    assert_eq!(result["decision"], "eligible", "{answer}");
+    assert!(result.get("disclosure").is_none(), "{answer}");
+    assert!(result.get("disclosure_revision").is_none(), "{answer}");
+    assert_eq!(script.launches().len(), 1, "asking spawns nothing");
+
+    drop(daemon);
+}
+
+/// `--yes` answers a disclosure in advance. Where there is none to answer it
+/// changes nothing: the continuation is preflighted, found eligible, and made.
+#[test]
+fn the_command_line_continues_with_yes_when_nothing_needs_disclosing() {
+    let account = account("cli-continue-yes");
+    let script = Script::new(&account, "cli-continue-yes").fires(&session_start(FIRST, "startup"));
+    let daemon = daemon_running(&account, &script);
+    let session = new_claude(&account);
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    wait_until(provider::DELIVERED, || {
+        listed(&sessions(&mut client, 1), &session).is_some_and(|listed| {
+            external_id(listed) == Some(FIRST) && listed["execution_state"] == "exited"
+        })
+    });
+
+    let continued = support::run(
+        account
+            .corral()
+            .arg("continue")
+            .arg("--yes")
+            .arg(&session)
+            .stdin(std::process::Stdio::null()),
+    );
+    let stderr = support::stderr(&continued);
+    assert!(continued.status.success(), "{stderr}");
+    assert!(stderr.contains(&format!("session {session}")), "{stderr}");
+    wait_until(SETTLE, || script.launches().len() == 2);
+
+    drop(daemon);
+}
+
+/// The command line refuses in the daemon's words, before anything is
+/// spawned, when the preflight says no.
+#[test]
+fn the_command_line_reports_a_refused_continuation_in_the_daemons_words() {
+    let account = account("cli-continue-refused");
+    let script = Script::new(&account, "cli-continue-refused")
+        .holding()
+        .fires(&session_start(FIRST, "startup"));
+    let daemon = daemon_running(&account, &script);
+    let session = new_claude(&account);
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    wait_until(provider::DELIVERED, || {
+        listed(&sessions(&mut client, 1), &session).and_then(external_id) == Some(FIRST)
+    });
+
+    let continued = support::run(
+        account
+            .corral()
+            .arg("continue")
+            .arg(&session)
+            .stdin(std::process::Stdio::null()),
+    );
+    let stderr = support::stderr(&continued);
+    assert!(!continued.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("still running") && stderr.contains("Open"),
+        "{stderr}"
+    );
+    assert_eq!(script.launches().len(), 1, "nothing was spawned");
+
+    drop(daemon);
 }

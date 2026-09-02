@@ -9,7 +9,8 @@
 
 use corral_client::{Connection, RequestError};
 use corral_protocol::method::{
-    SessionNewParams, SessionNewResult, SessionResumeParams, SessionResumeResult,
+    self, SessionContinuationParams, SessionNewParams, SessionNewResult, SessionResumeParams,
+    SessionResumeResult,
 };
 use corral_protocol::{ErrorCode, ProtocolError};
 
@@ -114,15 +115,81 @@ pub async fn start_session(
 pub async fn continue_session(
     connection: &mut Connection,
     session_id: &str,
-) -> Result<SessionResumeResult, RequestError> {
+    shown: Shown,
+) -> Result<Continued, RequestError> {
     serves_managed_sessions(connection)?;
+    let decision = connection
+        .session_continuation(SessionContinuationParams {
+            session_id: session_id.to_owned(),
+        })
+        .await?;
+    let (disclosure_revision, disclosed) = match decision.decision.as_str() {
+        method::CONTINUATION_ELIGIBLE => (None, None),
+        method::CONTINUATION_ELIGIBLE_WITH_DISCLOSURE => {
+            let (Some(disclosure), Some(revision)) =
+                (decision.disclosure, decision.disclosure_revision)
+            else {
+                return Err(RequestError::Protocol {
+                    detail: "the daemon required a disclosure and sent none".to_owned(),
+                });
+            };
+            match shown {
+                Shown::Accepted => (Some(revision), Some(disclosure.text)),
+                Shown::NotYet => {
+                    return Ok(Continued::NeedsDisclosure {
+                        text: disclosure.text,
+                        revision,
+                    });
+                }
+            }
+        }
+        // `refused`, and any decision this build has no word for: acting on
+        // an unknown decision would be acting on a guess.
+        _ => {
+            return Err(RequestError::Refused(ProtocolError::new(
+                ErrorCode::SessionNotContinuable,
+                decision
+                    .reason
+                    .unwrap_or_else(|| "Corral will not continue this session".to_owned()),
+            )));
+        }
+    };
     let command_id = uuid::Uuid::new_v4().as_hyphenated().to_string();
     connection
         .session_resume(SessionResumeParams {
             command_id,
             session_id: session_id.to_owned(),
+            disclosure_revision,
         })
         .await
+        .map(|started| Continued::Started { started, disclosed })
+}
+
+/// Whether the person has already been shown, and answered, whatever the
+/// daemon requires disclosing before this continuation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shown {
+    /// Ask first: a required disclosure comes back as
+    /// [`Continued::NeedsDisclosure`] for the surface to show.
+    NotYet,
+    /// The person answered yes in advance (`corral continue --yes`), or was
+    /// shown this exact disclosure and said so.
+    Accepted,
+}
+
+/// What continuing produced.
+#[derive(Clone, Debug)]
+pub enum Continued {
+    Started {
+        started: SessionResumeResult,
+        /// The disclosure the daemon required, when the person answered it
+        /// in advance: a `--yes` still renders what it said yes to (ADR
+        /// 0016 D5).
+        disclosed: Option<String>,
+    },
+    /// The daemon requires this be shown first. Carry `revision` back with
+    /// [`Shown::Accepted`] once it has been.
+    NeedsDisclosure { text: String, revision: String },
 }
 
 /// Refuse before asking when the daemon does not serve managed agents.

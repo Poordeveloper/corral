@@ -6,6 +6,8 @@ mod enumerate;
 mod rows;
 mod task;
 
-pub use enumerate::{HistoryEntry, Recent, enumerate, layout_sealed, store_root};
+pub use enumerate::{
+    HistoryEntry, Recent, enumerate, layout_sealed, resume_location_sealed, store_root,
+};
 pub use rows::{HistoryRow, HistoryRows};
-pub use task::{enumerate_once, enumerate_until_shutdown};
+pub use task::enumerate_until_shutdown;

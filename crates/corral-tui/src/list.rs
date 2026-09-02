@@ -424,8 +424,11 @@ async fn continue_into(
             Ok(connection) => connection,
             Err(reason) => return Some(reason),
         };
-        match tokio::time::timeout(ANSWER, crate::launch::continue_session(connection, session))
-            .await
+        match tokio::time::timeout(
+            ANSWER,
+            crate::launch::continue_session(connection, session, crate::launch::Shown::NotYet),
+        )
+        .await
         {
             Ok(continued) => continued,
             Err(_) => {
@@ -439,7 +442,14 @@ async fn continue_into(
     };
 
     match continued {
-        Ok(continued) => open(daemon, &continued.session_id, keys).await,
+        Ok(crate::launch::Continued::Started { started, .. }) => {
+            open(daemon, &started.session_id, keys).await
+        }
+        // The list has no prompt of its own yet; the words are the daemon's,
+        // and the answer is given where one can be typed.
+        Ok(crate::launch::Continued::NeedsDisclosure { text, .. }) => Some(format!(
+            "{text} To continue anyway: corral continue --yes {session}"
+        )),
         Err(error) => {
             daemon.forget_if_unusable(&error);
             Some(error.to_string())

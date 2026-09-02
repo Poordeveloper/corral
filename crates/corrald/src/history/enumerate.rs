@@ -61,6 +61,19 @@ pub fn layout_sealed(provider: KnownProvider) -> bool {
     }
 }
 
+/// Whether the matrix sealed that this provider continues a session id from
+/// a directory other than the one it was started in, for the versions in
+/// use. A history row carries no location — Claude's encoding is not
+/// reversible and Corral does not guess — so continuing one is possible only
+/// where the provider does not need it. Unmeasured for both, so sealed for
+/// neither.
+#[must_use]
+pub fn resume_location_sealed(provider: KnownProvider) -> bool {
+    match provider {
+        KnownProvider::Claude | KnownProvider::Codex => false,
+    }
+}
+
 /// The store's recent sessions, newest first, one per identity.
 #[must_use]
 pub fn enumerate(

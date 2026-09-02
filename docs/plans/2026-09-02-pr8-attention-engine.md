@@ -493,6 +493,9 @@ is told.
 - Continuation under test: the historical disclosure, external-live
   refusal, managed-live Open, Unverifiable refusal, stale
   `disclosure_revision` rejection, and `--yes` still preflighting.
+- The provider's `--resume` from a directory other than the session's
+  measured on the sealed versions and recorded in the matrix, before
+  `history::resume_location_sealed` answers true for that provider.
 - Human-merged (Class C). Glossary entry landed; drift notes placed.
 
 ## Review checklist (PR8b)
@@ -595,6 +598,13 @@ semantic-capable rule exists merely because code preceded evidence.
 
 ## Follow-ups
 
+- Test-support guard for the `corral` binary: `support::corrald_binary`
+  refuses a daemon built without the `CORRAL_TEST_ROOT` seam, but
+  `TestAccount::corral()` runs whatever `target/debug/corral` is, and a
+  concurrent plain `cargo build -p corral` during `./scripts/verify`
+  handed the attention e2e a binary that resolved the real account's
+  paths and tried to auto-start a daemon there (observed 2026-09-02;
+  nothing was written). The same image check belongs on both binaries.
 - S3 live-join census, then rungs 1–2: hook protocol decision-hold under
   the first-response lease (ADR 0004 D4's admission conditions), Claude
   IDE/MCP and Codex app-server channels.
@@ -679,6 +689,32 @@ the sealed version rows (`attention::sealing` is an empty table), the
 `sealed_by` lines in the manifests, the Claude adapter's `Notification`
 split, the glossary and canonical prose changes A7 names. Until then every
 session reads Unknown from the daemon — visible, diagnostic, and honest.
+
+**Built ahead of acceptance, on `task/pr8b-history` (grill Q32(b)).**
+B1 enumeration over the two store layouts (window, cap, dedupe by id,
+no content read), gated per provider by `history::layout_sealed` —
+false for both, so nothing is enumerated yet; the history tier of live
+rows, resolved against the registry under any binding kind, known
+Sessions decorated with the store's recency, the rest listed after the
+external rows with `origin: "history"`, execution `unknown`, and
+`last_active_unix_ms`; the five-state presentation says "Found in Claude
+history" and the age, and nothing about a runtime or a location;
+`session.continuation` with the four D4 answers in the daemon's words,
+`disclosure_revision` bound to the decision's facts, `session.resume`
+carrying it back and refusing a missing or stale one with
+`stale_disclosure`; `corral continue --yes` still preflights, renders
+the disclosure it answered, and carries the revision. The fourth rung
+answers *eligible with disclosure* only once
+`history::resume_location_sealed` holds for the provider — the matrix
+has not measured `--resume` from a directory other than the one the
+session was started in (ADR 0016, unmeasured), a history row carries no
+location, and Corral does not guess one — so today a history row's
+continuation is refused with that said. Waiting on that measurement and
+on acceptance: the sealed layout rows, the composing store operation
+(Session + `HistoryBinding` at Attested + Run, one transaction) and the
+launch it precedes, the TUI's own disclosure prompt (the list currently
+hands the daemon's words and the `--yes` command line to the person),
+and the glossary and PRODUCT §8 prose.
 
 ## Plan size justification
 

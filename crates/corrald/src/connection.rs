@@ -8,8 +8,9 @@ use corral_core::{
 };
 
 use corral_protocol::method::{
-    self, AgentEvent, IntegrationParams, IntegrationResult, PingResult, ProviderFacts,
-    SessionListItem, SessionListResult, SessionNewParams, SessionNewResult, SessionResumeParams,
+    self, AgentEvent, ContinuationDisclosure, IntegrationParams, IntegrationResult, PingResult,
+    ProviderFacts, SessionContinuationParams, SessionContinuationResult, SessionListItem,
+    SessionListResult, SessionNewParams, SessionNewResult, SessionResumeParams,
     SessionResumeResult, TerminalAttachParams, TerminalAttachResult,
 };
 use corral_protocol::{
@@ -22,12 +23,11 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
 use tracing::{debug, error, warn};
 
+use crate::continuation;
 use crate::in_flight::{self, Claim, Concluded};
 use crate::integration;
 use crate::lifecycle::{EstablishedGuard, Lifecycle, ShutdownReason};
-use crate::managed_launch::{
-    self, Committed, ResumeRefused, SessionOwnership, compose_provider_launch, resume_plan,
-};
+use crate::managed_launch::{self, Committed, SessionOwnership, compose_provider_launch};
 use crate::policy::DaemonPolicy;
 use crate::provider::launch::RelayInvocation;
 use crate::provider::{self, KnownProvider, ReportedSession};
@@ -445,6 +445,7 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
         method::ATTENTION_ACKNOWLEDGE => Dispatch::Reply(attention_acknowledge(request, state)),
         method::ATTENTION_REPORT => Dispatch::Reply(attention_report(request, state).await),
         method::ATTENTION_DISPUTE => Dispatch::Reply(attention_dispute(request, state).await),
+        method::SESSION_CONTINUATION => session_continuation(request, state).await,
         // Status reads a file rather than the registry, but it is still a
         // claim made in the daemon's name and the two mutations write durable
         // intent, so all three take the same gate as any other request.
@@ -1502,6 +1503,8 @@ fn concluded(
 struct ResumeSession {
     command: Command,
     session: CorralSessionId,
+    /// The disclosure revision the client says it showed, if any.
+    disclosure_revision: Option<String>,
 }
 
 /// Continue an existing Session's provider session as a new Run, exactly once
@@ -1569,6 +1572,70 @@ fn read_session_resume(request: &Request) -> Result<ResumeSession, ProtocolError
     Ok(ResumeSession {
         command: Command::new(command_id, fingerprint),
         session,
+        disclosure_revision: params.disclosure_revision,
+    })
+}
+
+/// Answer `session.continuation`: the ladder's decision in the person's words,
+/// and nothing spawned by asking.
+async fn session_continuation(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
+    let id = request.id;
+    let invalid = |detail: String| ProtocolError::new(ErrorCode::InvalidParams, detail);
+    let params: SessionContinuationParams = match request.params.clone() {
+        Some(params) => match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(source) => return Dispatch::Reply(Frame::error(id, invalid(source.to_string()))),
+        },
+        None => {
+            return Dispatch::Reply(Frame::error(
+                id,
+                invalid("session.continuation needs a session".to_owned()),
+            ));
+        }
+    };
+    let session: CorralSessionId = match params.session_id.parse() {
+        Ok(session) => session,
+        Err(error) => {
+            let error: corral_core::MalformedId = error;
+            return Dispatch::Reply(Frame::error(id, invalid(error.to_string())));
+        }
+    };
+    let decision = match continuation::decide(state, session).await {
+        Ok(decision) => decision,
+        Err(error) => return Dispatch::FailClosed(error),
+    };
+    let result = match decision {
+        continuation::Decision::Eligible(_) => SessionContinuationResult {
+            decision: method::CONTINUATION_ELIGIBLE.to_owned(),
+            reason: None,
+            disclosure: None,
+            disclosure_revision: None,
+        },
+        continuation::Decision::EligibleWithDisclosure {
+            disclosure,
+            revision,
+        } => SessionContinuationResult {
+            decision: method::CONTINUATION_ELIGIBLE_WITH_DISCLOSURE.to_owned(),
+            reason: None,
+            disclosure: Some(ContinuationDisclosure {
+                code: disclosure.code.to_owned(),
+                text: disclosure.text,
+            }),
+            disclosure_revision: Some(revision),
+        },
+        continuation::Decision::Refused { reason, .. } => SessionContinuationResult {
+            decision: method::CONTINUATION_REFUSED.to_owned(),
+            reason: Some(reason),
+            disclosure: None,
+            disclosure_revision: None,
+        },
+    };
+    Dispatch::Reply(match serde_json::to_value(result) {
+        Ok(value) => Frame::result(id, value),
+        Err(source) => Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+        ),
     })
 }
 
@@ -1577,7 +1644,11 @@ async fn execute_session_resume(
     resume: ResumeSession,
     state: &Arc<DaemonState>,
 ) -> Result<Concluded, corral_state::StateError> {
-    let ResumeSession { command, session } = resume;
+    let ResumeSession {
+        command,
+        session,
+        disclosure_revision,
+    } = resume;
 
     // The receipt first, and before the per-Session claim, because this answer
     // does not depend on the claim: a command that already executed is replayed
@@ -1609,29 +1680,35 @@ async fn execute_session_resume(
         });
     };
 
-    let plan = match resume_plan(state, session).await {
-        Ok(Ok(plan)) => plan,
-        Ok(Err(refused)) => {
+    let plan = match continuation::decide(state, session).await {
+        Ok(continuation::Decision::Eligible(plan)) => plan,
+        Ok(continuation::Decision::Refused { code, reason }) => {
             return Ok(Concluded::Refused {
-                // Three answers, because a client does three different things
-                // with them: send it again, ask a different daemon about the
-                // agent, or read what the Session's own state says. None of
-                // them is `invalid_params` — the parameters were fine, and a
-                // client sent looking for a mistake in its request would not
-                // find one.
-                code: match refused {
-                    ResumeRefused::RuntimeUnavailable => ErrorCode::Busy,
-                    ResumeRefused::UnknownProvider(_) => ErrorCode::UnknownProvider,
-                    ResumeRefused::NotThisDaemon
-                    | ResumeRefused::IdentityUnknown
-                    | ResumeRefused::Eligibility(_)
-                    | ResumeRefused::RunStillLive
-                    | ResumeRefused::EndUnverifiable
-                    | ResumeRefused::NoPreviousRun
-                    | ResumeRefused::EpisodeOrderUnknown => ErrorCode::SessionNotContinuable,
-                },
-                message: refused.to_string(),
+                code,
+                message: reason,
             });
+        }
+        Ok(continuation::Decision::EligibleWithDisclosure { revision, .. }) => {
+            return Ok(
+                match continuation::shown(Some(&revision), disclosure_revision.as_deref()) {
+                    continuation::Shown::Stale => Concluded::Refused {
+                        code: ErrorCode::StaleDisclosure,
+                        message: "this continuation needs a disclosure shown first, and the one \
+                              shown is not the current one; ask session.continuation again"
+                            .to_owned(),
+                    },
+                    // Reachable once a resume location is sealed; nothing in this
+                    // build creates the Session and Run a history row continues as.
+                    continuation::Shown::Matching | continuation::Shown::NotNeeded => {
+                        Concluded::Refused {
+                            code: ErrorCode::SessionNotContinuable,
+                            message: "continuing a session from a provider's history is not \
+                                  available in this build"
+                                .to_owned(),
+                        }
+                    }
+                },
+            );
         }
         Err(error) => return refused_by_store(&command, error),
     };

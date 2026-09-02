@@ -63,6 +63,10 @@ pub enum ErrorCode {
     /// is the whole point of naming an item (grill Q18). Its own code because
     /// a client's next move is to reload the row, not to fix its request.
     StaleAttentionItem,
+    /// The disclosure revision the client carried no longer matches the
+    /// daemon's current continuation decision. Nothing happened; the client
+    /// preflights again and shows what it is told now (ADR 0016 D5).
+    StaleDisclosure,
     Unknown(String),
 }
 
@@ -87,6 +91,7 @@ impl ErrorCode {
             Self::UnknownProvider => "unknown_provider",
             Self::SessionNotContinuable => "session_not_continuable",
             Self::StaleAttentionItem => "stale_attention_item",
+            Self::StaleDisclosure => "stale_disclosure",
             Self::Unknown(raw) => raw,
         }
     }
@@ -104,6 +109,7 @@ impl From<String> for ErrorCode {
             "unknown_provider" => Self::UnknownProvider,
             "session_not_continuable" => Self::SessionNotContinuable,
             "stale_attention_item" => Self::StaleAttentionItem,
+            "stale_disclosure" => Self::StaleDisclosure,
             _ => Self::Unknown(raw),
         }
     }

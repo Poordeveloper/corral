@@ -27,6 +27,10 @@ pub const SESSION_RESUME: &str = "session.resume";
 /// Obtain a one-time token for a terminal data channel.
 pub const TERMINAL_ATTACH: &str = "terminal.attach";
 
+/// Ask whether a Session may be continued, and what a person must be told
+/// first (ADR 0016 D4/D5). The daemon decides; the client shows its words.
+pub const SESSION_CONTINUATION: &str = "session.continuation";
+
 /// How many sessions need the user, per class, as the daemon counts them.
 pub const ATTENTION_SUMMARY: &str = "attention.summary";
 
@@ -709,6 +713,47 @@ pub struct SessionNewResult {
     pub run_id: String,
 }
 
+/// `session.continuation`'s parameters.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionContinuationParams {
+    pub session_id: String,
+}
+
+/// The decisions this build names. Open on the decode side, read the way
+/// `execution_state` is: a decision this build has no word for is treated
+/// as a refusal, because acting on an unknown decision would be acting on a
+/// guess.
+pub const CONTINUATION_ELIGIBLE: &str = "eligible";
+pub const CONTINUATION_ELIGIBLE_WITH_DISCLOSURE: &str = "eligible_with_disclosure";
+pub const CONTINUATION_REFUSED: &str = "refused";
+
+/// What the client must show before continuing, in the daemon's words.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuationDisclosure {
+    /// A stable code for the client that wants to recognize it.
+    pub code: String,
+    /// The sentence a person reads, exactly.
+    pub text: String,
+}
+
+/// `session.continuation`'s result.
+///
+/// `disclosure_revision` correlates the disclosure the client obtained with
+/// this exact decision; carrying it back on `session.resume` says "I showed
+/// this one", never "the person consented" (ADR 0016 D5).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionContinuationResult {
+    pub decision: String,
+    /// Why a refusal, in the person's words. Absent when there is nothing
+    /// to explain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disclosure: Option<ContinuationDisclosure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disclosure_revision: Option<String>,
+}
+
 /// `session.resume`'s parameters.
 ///
 /// The Session, not the provider session: what a caller asks for is that this
@@ -722,6 +767,12 @@ pub struct SessionResumeParams {
     /// a second Run.
     pub command_id: String,
     pub session_id: String,
+    /// The revision of the disclosure this client obtained from
+    /// `session.continuation` and showed, when one was required. Absent means
+    /// none was shown — which refuses a continuation that needed one, rather
+    /// than assuming a person was told (ADR 0016 D5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disclosure_revision: Option<String>,
 }
 
 /// `session.resume`'s result.

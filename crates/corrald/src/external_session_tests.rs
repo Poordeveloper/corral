@@ -521,3 +521,38 @@ async fn a_corroborated_fact_is_claimed_for_the_discovered_session() {
     // so the claim is unsealed and asserts nothing.
     assert_eq!(claims[0].sealing, corral_core::Sealing::Unsealed);
 }
+
+/// A discovered session whose Run is open is running outside Corral for as
+/// long as the sweep keeps seeing it, and the continuation ladder says so in
+/// ADR 0016 D4's words — and makes nothing of it.
+#[tokio::test]
+async fn continuing_a_live_external_session_is_refused_without_asserting_it_runs() {
+    let registry = registry("continuation-external");
+    discovered(
+        &registry.state,
+        KnownProvider::Claude,
+        identity("session-outside"),
+        reached(4321, at(500)),
+        at(900),
+        None,
+    )
+    .await
+    .expect("recorded");
+    let session = registry
+        .state
+        .session_by_external_id(
+            ProviderId::new("claude").expect("a provider"),
+            identity("session-outside"),
+        )
+        .await
+        .expect("looked up")
+        .expect("a session");
+
+    let decision = crate::continuation::decide(&registry.state, session)
+        .await
+        .expect("decided");
+    let crate::continuation::Decision::Refused { reason, .. } = decision else {
+        panic!("a live external session is not continuable");
+    };
+    assert!(reason.contains("Still running outside Corral"), "{reason}");
+}

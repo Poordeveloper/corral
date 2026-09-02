@@ -63,6 +63,11 @@ enum Command {
     Continue {
         /// The session's id, or enough of its start to be unambiguous.
         session: String,
+        /// Answer yes in advance to anything corrald must disclose before
+        /// continuing, such as that it cannot tell whether a session found
+        /// in an agent's history is still in use elsewhere.
+        #[arg(long)]
+        yes: bool,
     },
     /// Attach to a session corrald is already running.
     Attach {
@@ -190,7 +195,9 @@ async fn serve(cli: Cli) -> ExitCode {
         Command::Ping => ping(&mut connection).await,
         Command::List => list(&mut connection).await,
         Command::New { provider, rest } => new_session(&mut connection, provider, rest).await,
-        Command::Continue { session } => continue_session(&mut connection, &session).await,
+        Command::Continue { session, yes } => {
+            continue_session(&mut connection, &session, yes).await
+        }
         Command::Attach { session } => attach(&mut connection, &session).await,
         Command::Needs => needs(&mut connection).await,
         Command::Ack { session } => acknowledge(&mut connection, &session).await,
@@ -461,13 +468,28 @@ fn unknown_agent(error: &RequestError) -> bool {
 }
 
 /// Continue a session as a new run, and attach to it.
-async fn continue_session(connection: &mut Connection, session: &str) -> ExitCode {
+async fn continue_session(connection: &mut Connection, session: &str, yes: bool) -> ExitCode {
     let resolved = match resolve_session(connection, session).await {
         Ok(resolved) => resolved,
         Err(code) => return code,
     };
-    let continued = match corral_tui::continue_session(connection, &resolved).await {
-        Ok(continued) => continued,
+    let shown = if yes {
+        corral_tui::Shown::Accepted
+    } else {
+        corral_tui::Shown::NotYet
+    };
+    let continued = match corral_tui::continue_session(connection, &resolved, shown).await {
+        Ok(corral_tui::Continued::Started { started, disclosed }) => {
+            if let Some(disclosed) = disclosed {
+                eprintln!("{disclosed}");
+            }
+            started
+        }
+        Ok(corral_tui::Continued::NeedsDisclosure { text, .. }) => {
+            eprintln!("{text}");
+            eprintln!("To continue anyway: corral continue --yes {resolved}");
+            return ExitCode::FAILURE;
+        }
         Err(error) => return report_request_failure(&error),
     };
     eprintln!("session {}", continued.session_id);
