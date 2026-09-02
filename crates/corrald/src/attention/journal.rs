@@ -115,6 +115,12 @@ impl Journal {
         Ok(journal)
     }
 
+    /// Where the journal lives, for the report reader.
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Append one record to the day's file.
     pub fn append(&mut self, now: SystemTime, record: Record) -> std::io::Result<Appended> {
         let date = CivilDate::of(now);

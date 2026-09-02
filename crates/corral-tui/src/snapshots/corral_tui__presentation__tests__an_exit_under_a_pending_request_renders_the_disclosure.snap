@@ -1,0 +1,6 @@
+---
+source: crates/corral-tui/src/presentation_tests.rs
+expression: rendered(&item)
+---
+Exited
+  Exited before you responded

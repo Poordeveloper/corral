@@ -456,3 +456,70 @@ async fn acknowledging_the_current_item_clears_it_from_the_badge() {
     assert_eq!(summary["ready"]["total"], 1);
     assert_eq!(summary["ready"]["unacknowledged"], 0);
 }
+
+/// A dispute appends to the journal and says whether the item it named was
+/// already stale; the report reads the day back.
+#[tokio::test]
+async fn a_dispute_is_journaled_and_reported() {
+    let registry = Registry::new("attention-dispute");
+    let diagnostics = registry.directory.join("diagnostics");
+    let now = std::time::SystemTime::now();
+    registry.state.attach_journal(
+        crate::attention::Journal::open(&diagnostics, crate::attention::Budget::default(), now)
+            .expect("journal"),
+    );
+    let session = corral_core::CorralSessionId::mint();
+    let item = registry
+        .state
+        .with_runtime(|runtime| {
+            runtime.attention.observe(
+                session,
+                sealed_hook(corral_core::SemanticState::NeedsYou),
+                now,
+            );
+            runtime
+                .attention
+                .tick(now, |_| crate::runtime::ExecutionState::Running);
+            runtime
+                .attention
+                .state(session)
+                .and_then(|(_, item)| item)
+                .map(|item| item.id())
+        })
+        .flatten()
+        .expect("an item");
+
+    let current = result_value(
+        dispatch(
+            &request(
+                method::ATTENTION_DISPUTE,
+                Some(json!({"session_id": session.to_string(), "attention_item_id": item.to_string()})),
+            ),
+            &registry.state,
+        )
+        .await,
+    );
+    assert_eq!(current["stale"], false);
+    let stale = result_value(
+        dispatch(
+            &request(
+                method::ATTENTION_DISPUTE,
+                Some(json!({"session_id": session.to_string(), "attention_item_id": corral_core::AttentionItemId::mint().to_string()})),
+            ),
+            &registry.state,
+        )
+        .await,
+    );
+    assert_eq!(stale["stale"], true);
+
+    let report = result_value(
+        dispatch(
+            &request(method::ATTENTION_REPORT, Some(json!({}))),
+            &registry.state,
+        )
+        .await,
+    );
+    let today = &report["days"][0];
+    assert_eq!(today["disputes"], 2);
+    assert_eq!(today["incomplete"], false);
+}

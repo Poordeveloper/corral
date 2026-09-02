@@ -437,6 +437,8 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             Err(error) => Dispatch::Reply(Frame::error(id, error)),
         },
         method::ATTENTION_ACKNOWLEDGE => Dispatch::Reply(attention_acknowledge(request, state)),
+        method::ATTENTION_REPORT => Dispatch::Reply(attention_report(request, state).await),
+        method::ATTENTION_DISPUTE => Dispatch::Reply(attention_dispute(request, state).await),
         // Status reads a file rather than the registry, but it is still a
         // claim made in the daemon's name and the two mutations write durable
         // intent, so all three take the same gate as any other request.
@@ -594,6 +596,148 @@ fn attention_acknowledge(request: &Request, state: &Arc<DaemonState>) -> Frame {
         None => Frame::error(
             id,
             ProtocolError::new(ErrorCode::Busy, "the runtime could not be consulted"),
+        ),
+    }
+}
+
+/// The journal read back per day. Diagnostics: a daemon without a journal
+/// answers an empty report, which is the truth about what it can report.
+async fn attention_report(request: &Request, state: &Arc<DaemonState>) -> Frame {
+    let id = request.id;
+    let params: method::AttentionReportParams = match request
+        .params
+        .clone()
+        .map(serde_json::from_value)
+        .transpose()
+    {
+        Ok(params) => params.unwrap_or_default(),
+        Err(source) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+            );
+        }
+    };
+    let Some(dir) = state.journal_dir() else {
+        return Frame::result(
+            id,
+            serde_json::to_value(method::AttentionReportResult::default()).unwrap_or_default(),
+        );
+    };
+    let report = tokio::task::spawn_blocking(move || crate::attention::report(&dir))
+        .await
+        .unwrap_or_else(|_| Ok(crate::attention::Report::default()));
+    let report = match report {
+        Ok(report) => report,
+        Err(source) => {
+            return Frame::error(id, ProtocolError::new(ErrorCode::Busy, source.to_string()));
+        }
+    };
+    let days = report
+        .days
+        .into_iter()
+        .filter(|day| {
+            params
+                .since
+                .as_ref()
+                .is_none_or(|since| day.date.as_str() >= since.as_str())
+        })
+        .map(|day| method::AttentionDayFacts {
+            date: day.date,
+            transitions: day.transitions,
+            into_needs_you: day.into_needs_you,
+            into_ready: day.into_ready,
+            disputes: day.disputes,
+            incomplete: day.incomplete,
+        })
+        .collect();
+    match serde_json::to_value(method::AttentionReportResult { days }) {
+        Ok(value) => Frame::result(id, value),
+        Err(source) => Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+        ),
+    }
+}
+
+/// A person says the current item was wrong. Recorded against the item they
+/// named, and stale when that item is no longer current — a dispute of the
+/// one that just resolved is never attributed to its replacement
+/// (grill Q34).
+async fn attention_dispute(request: &Request, state: &Arc<DaemonState>) -> Frame {
+    let id = request.id;
+    let params: method::AttentionDisputeParams = match request
+        .params
+        .clone()
+        .map(serde_json::from_value)
+        .transpose()
+    {
+        Ok(Some(params)) => params,
+        Ok(None) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, "attention.dispute needs params"),
+            );
+        }
+        Err(source) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+            );
+        }
+    };
+    let session = match params.session_id.parse::<CorralSessionId>() {
+        Ok(session) => session,
+        Err(source) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+            );
+        }
+    };
+    let named = match params
+        .attention_item_id
+        .as_deref()
+        .map(str::parse::<corral_core::AttentionItemId>)
+        .transpose()
+    {
+        Ok(named) => named,
+        Err(source) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+            );
+        }
+    };
+    let current = state
+        .with_runtime(|runtime| runtime.attention.state(session).and_then(|(_, item)| item))
+        .flatten()
+        .map(|item| item.id());
+    let (item, stale) = match (named, current) {
+        (Some(named), Some(current)) => (Some(named), named != current),
+        (Some(named), None) => (Some(named), true),
+        (None, current) => (current, false),
+    };
+    let recording = Arc::clone(state);
+    let now = std::time::SystemTime::now();
+    let _ = tokio::task::spawn_blocking(move || {
+        recording.journal_append(
+            now,
+            vec![crate::attention::Record::Dispute(
+                crate::attention::DisputeRecord {
+                    session,
+                    item,
+                    stale,
+                },
+            )],
+        );
+    })
+    .await;
+    match serde_json::to_value(method::AttentionDisputeResult { stale }) {
+        Ok(value) => Frame::result(id, value),
+        Err(source) => Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
         ),
     }
 }

@@ -13,10 +13,8 @@ mod session;
 mod tick;
 
 pub use engine::{Derived, Horizons, Observed, derive};
-pub use journal::{
-    Appended, Budget, DayReport, DisputeRecord, Journal, Record, Report, TransitionRecord, report,
-};
+pub use journal::{Budget, DisputeRecord, Journal, Record, Report, TransitionRecord, report};
 pub use ledger::{Change, Ledger};
 pub use sealing::hook_fact_claim;
 pub use session::{Acknowledgement, Item, ItemEnd, SessionAttention, Transition};
-pub use tick::{tick_once, tick_until_shutdown};
+pub use tick::tick_until_shutdown;

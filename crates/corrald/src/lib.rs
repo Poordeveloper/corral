@@ -17,6 +17,7 @@
 mod ancestry;
 mod attention;
 mod connection;
+mod detection;
 /// Sessions Corral found rather than started (ADR 0014).
 mod external_session;
 mod hook_endpoint;

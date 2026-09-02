@@ -33,6 +33,12 @@ pub const ATTENTION_SUMMARY: &str = "attention.summary";
 /// Acknowledge one attention item — the one the client saw, by id.
 pub const ATTENTION_ACKNOWLEDGE: &str = "attention.acknowledge";
 
+/// The attention journal read back per day, for the dogfood evidence.
+pub const ATTENTION_REPORT: &str = "attention.report";
+
+/// Record that a person disputes the current item — it was wrong.
+pub const ATTENTION_DISPUTE: &str = "attention.dispute";
+
 /// Report what Corral's integration with a provider looks like, without
 /// changing it.
 pub const INTEGRATION_STATUS: &str = "integration.status";
@@ -461,6 +467,52 @@ pub struct AttentionSummaryResult {
 pub struct AttentionAcknowledgeParams {
     pub session_id: String,
     pub attention_item_id: String,
+}
+
+/// `attention.report`'s parameters: from which day, inclusive, as
+/// `YYYY-MM-DD`; absent means every day the journal still holds.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AttentionReportParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
+/// One day of the attention journal, counted.
+///
+/// `incomplete` means the day's budget ran out: its counts are a floor and
+/// the day cannot stand as a complete evidence day (grill Q26).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionDayFacts {
+    pub date: String,
+    pub transitions: u64,
+    pub into_needs_you: u64,
+    pub into_ready: u64,
+    pub disputes: u64,
+    pub incomplete: bool,
+}
+
+/// `attention.report`'s result. Diagnostics read back, never product state.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionReportResult {
+    #[serde(default)]
+    pub days: Vec<AttentionDayFacts>,
+}
+
+/// `attention.dispute`'s parameters. The item is named when the client has
+/// one, so a dispute of the item that just resolved is not attributed to the
+/// one that replaced it (grill Q34).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AttentionDisputeParams {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_item_id: Option<String>,
+}
+
+/// `attention.dispute`'s result: whether the item named was already stale
+/// when the dispute arrived. Recorded either way; the journal is diagnostic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionDisputeResult {
+    pub stale: bool,
 }
 
 /// One session in a listing.

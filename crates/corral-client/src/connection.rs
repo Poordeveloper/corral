@@ -78,6 +78,42 @@ impl Connection {
         })
     }
 
+    /// The attention journal, read back per day from `since` (`YYYY-MM-DD`).
+    pub async fn attention_report(
+        &mut self,
+        since: Option<&str>,
+    ) -> Result<method::AttentionReportResult, RequestError> {
+        let params = serde_json::to_value(method::AttentionReportParams {
+            since: since.map(str::to_owned),
+        })
+        .map_err(|source| RequestError::Protocol {
+            detail: format!("the report request did not encode: {source}"),
+        })?;
+        let value = self.call(method::ATTENTION_REPORT, Some(params)).await?;
+        serde_json::from_value(value).map_err(|source| RequestError::Protocol {
+            detail: format!("the attention report did not decode: {source}"),
+        })
+    }
+
+    /// Dispute the session's current item, naming it when this client has it.
+    pub async fn attention_dispute(
+        &mut self,
+        session_id: &str,
+        attention_item_id: Option<&str>,
+    ) -> Result<method::AttentionDisputeResult, RequestError> {
+        let params = serde_json::to_value(method::AttentionDisputeParams {
+            session_id: session_id.to_owned(),
+            attention_item_id: attention_item_id.map(str::to_owned),
+        })
+        .map_err(|source| RequestError::Protocol {
+            detail: format!("the dispute did not encode: {source}"),
+        })?;
+        let value = self.call(method::ATTENTION_DISPUTE, Some(params)).await?;
+        serde_json::from_value(value).map_err(|source| RequestError::Protocol {
+            detail: format!("the dispute answer did not decode: {source}"),
+        })
+    }
+
     /// Acknowledge one attention item, by the id this client saw.
     pub async fn attention_acknowledge(
         &mut self,

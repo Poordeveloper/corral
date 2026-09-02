@@ -209,6 +209,14 @@ impl DaemonState {
         }
     }
 
+    /// Where the journal lives, when this daemon has one.
+    pub fn journal_dir(&self) -> Option<std::path::PathBuf> {
+        self.journal
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|journal| journal.dir().to_path_buf()))
+    }
+
     /// Append records to the journal, if there is one. Blocking: the one
     /// caller runs off the reactor.
     pub fn journal_append(

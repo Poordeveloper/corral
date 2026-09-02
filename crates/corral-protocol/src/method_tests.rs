@@ -588,3 +588,48 @@ fn the_attention_methods_and_capability_are_named() {
     assert_eq!(ATTENTION_ACKNOWLEDGE, "attention.acknowledge");
     assert_eq!(crate::hello::capability::ATTENTION, "attention.v1");
 }
+
+/// The report is the journal read back per day, with the days whose budget
+/// ran out named as such rather than counted as quiet (grill Q26).
+#[test]
+fn the_attention_report_names_incomplete_days() {
+    let report = AttentionReportResult {
+        days: vec![AttentionDayFacts {
+            date: "2026-09-02".into(),
+            transitions: 12,
+            into_needs_you: 3,
+            into_ready: 5,
+            disputes: 1,
+            incomplete: true,
+        }],
+    };
+    let encoded = serde_json::to_value(&report).expect("encode");
+    assert_eq!(encoded["days"][0]["incomplete"], json!(true));
+    let decoded: AttentionReportResult = serde_json::from_value(encoded).expect("decode");
+    assert_eq!(decoded.days[0].into_needs_you, 3);
+    let since: AttentionReportParams =
+        serde_json::from_value(json!({"since": "2026-09-01"})).expect("decode");
+    assert_eq!(since.since.as_deref(), Some("2026-09-01"));
+    let none: AttentionReportParams = serde_json::from_value(json!({})).expect("decode");
+    assert_eq!(none.since, None);
+}
+
+/// A dispute names the item it is about when the client has one, and the
+/// daemon says whether that item was already stale on arrival.
+#[test]
+fn a_dispute_names_an_item_when_it_can_and_learns_whether_it_was_stale() {
+    let params: AttentionDisputeParams =
+        serde_json::from_value(json!({"session_id": "s", "attention_item_id": "i"}))
+            .expect("decode");
+    assert_eq!(params.attention_item_id.as_deref(), Some("i"));
+    let bare: AttentionDisputeParams =
+        serde_json::from_value(json!({"session_id": "s"})).expect("decode");
+    assert_eq!(bare.attention_item_id, None);
+    let result = AttentionDisputeResult { stale: true };
+    assert_eq!(
+        serde_json::to_value(result).expect("encode"),
+        json!({"stale": true})
+    );
+    assert_eq!(ATTENTION_REPORT, "attention.report");
+    assert_eq!(ATTENTION_DISPUTE, "attention.dispute");
+}

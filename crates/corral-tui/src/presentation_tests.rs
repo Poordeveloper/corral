@@ -543,3 +543,45 @@ fn the_current_item_is_carried_for_acknowledgement() {
         None
     );
 }
+
+/// The five states as a person sees them, with the lines beneath. Rendered
+/// rows are a contract with the reader, so every state is held to a
+/// snapshot (workflow §6).
+#[test]
+fn a_working_session_renders_the_state_alone() {
+    insta::assert_snapshot!(rendered(&attended(AttentionWireState::Working, Vec::new())));
+}
+
+#[test]
+fn a_session_that_needs_you_renders_the_state_alone() {
+    insta::assert_snapshot!(rendered(&attended(
+        AttentionWireState::NeedsYou,
+        Vec::new()
+    )));
+}
+
+#[test]
+fn a_ready_session_renders_the_state_alone() {
+    insta::assert_snapshot!(rendered(&attended(AttentionWireState::Ready, Vec::new())));
+}
+
+#[test]
+fn a_rotted_claim_renders_unknown_with_the_last_known_fact() {
+    let mut item = attended(AttentionWireState::Unknown, Vec::new());
+    item.attention.as_mut().expect("attention").last_known = Some(LastKnownFacts {
+        state: AttentionWireState::NeedsYou,
+        at_unix_ms: 0,
+    });
+    insta::assert_snapshot!(rendered(&item));
+}
+
+#[test]
+fn an_exit_under_a_pending_request_renders_the_disclosure() {
+    let mut item = attended(AttentionWireState::Exited, Vec::new());
+    item.execution_state = "exited".into();
+    item.attention.as_mut().expect("attention").last_known = Some(LastKnownFacts {
+        state: AttentionWireState::NeedsYou,
+        at_unix_ms: 0,
+    });
+    insta::assert_snapshot!(rendered(&item));
+}
