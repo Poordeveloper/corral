@@ -20,6 +20,7 @@ fn every_evidence_source_round_trips_through_its_durable_token() {
         EvidenceSource::NodeRuntimeObservation,
         EvidenceSource::ProviderHook,
         EvidenceSource::InBandSignal,
+        EvidenceSource::PtyActivity,
         EvidenceSource::ScreenDetection,
         EvidenceSource::HistoryRecord,
         EvidenceSource::Correlation,

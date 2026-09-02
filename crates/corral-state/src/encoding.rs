@@ -39,6 +39,10 @@ pub(crate) fn evidence_source_token(source: EvidenceSource) -> &'static str {
         EvidenceSource::NodeRuntimeObservation => "node-runtime-observation",
         EvidenceSource::ProviderHook => "provider-hook",
         EvidenceSource::InBandSignal => "in-band-signal",
+        // Never written by any accepted event — derived status is not durable
+        // (ADR 0015 D8) — but the encoding is total, so a source that reaches
+        // it by mistake is a readable token rather than a panic.
+        EvidenceSource::PtyActivity => "pty-activity",
         EvidenceSource::ScreenDetection => "screen-detection",
         EvidenceSource::HistoryRecord => "history-record",
         EvidenceSource::Correlation => "correlation",
@@ -52,6 +56,7 @@ pub(crate) fn evidence_source_from_token(token: &str) -> Result<EvidenceSource, 
         "node-runtime-observation" => Ok(EvidenceSource::NodeRuntimeObservation),
         "provider-hook" => Ok(EvidenceSource::ProviderHook),
         "in-band-signal" => Ok(EvidenceSource::InBandSignal),
+        "pty-activity" => Ok(EvidenceSource::PtyActivity),
         "screen-detection" => Ok(EvidenceSource::ScreenDetection),
         "history-record" => Ok(EvidenceSource::HistoryRecord),
         "correlation" => Ok(EvidenceSource::Correlation),

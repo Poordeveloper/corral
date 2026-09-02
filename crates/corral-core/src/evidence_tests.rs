@@ -10,6 +10,7 @@ fn semantic_evidence_never_establishes_a_runtime_occurrence() {
     for source in [
         EvidenceSource::ProviderHook,
         EvidenceSource::InBandSignal,
+        EvidenceSource::PtyActivity,
         EvidenceSource::ScreenDetection,
         EvidenceSource::HistoryRecord,
         EvidenceSource::Correlation,

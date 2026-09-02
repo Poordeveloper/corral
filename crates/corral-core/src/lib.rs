@@ -15,8 +15,10 @@
 
 mod assurance;
 mod attention;
+mod attention_state;
 mod binding;
 mod command;
+mod entitlement;
 mod evidence;
 mod external_name;
 mod id;
@@ -29,6 +31,7 @@ pub use attention::{
     AllowedActions, AttentionAction, AttentionItem, AttentionReason, NeedsInputAction,
     NeedsInputContext, NeedsInputRequest,
 };
+pub use attention_state::{AttentionState, LastKnown, MainState, NotSemantic, SemanticState};
 pub use binding::{
     Binding, BindingKey, BindingKind, ControlEligibility, IdentityStatus, NativeResumeEligibility,
     Provenance, ReservedNamespaceMisuse,
@@ -37,9 +40,12 @@ pub use command::{
     Command, CommandFingerprint, CommandFingerprintBuilder, CommandId, CommandKind, CommandOutcome,
     CommandReceipt, MalformedCommandId,
 };
+pub use entitlement::{Channel, Claim, Entitlement, Sealing};
 pub use evidence::{Evidence, EvidenceSource};
 pub use external_name::{ExternalId, MalformedExternalName, NameRefusal, ProviderId, ToolName};
-pub use id::{BindingId, CorralSessionId, MalformedId, NeedsInputRequestId, NodeId, RunId};
+pub use id::{
+    AttentionItemId, BindingId, CorralSessionId, MalformedId, NeedsInputRequestId, NodeId, RunId,
+};
 pub use integration::{
     ConfigTarget, IntegrationIntent, RepairAuthority, RepairBudget, RepairFingerprint,
     RepairableDrift,
