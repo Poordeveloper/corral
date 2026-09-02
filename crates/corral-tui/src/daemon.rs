@@ -191,6 +191,59 @@ impl Daemon<'_> {
         }
     }
 
+    /// How many sessions need the user, as the daemon counts them, or why it
+    /// did not say. The same connection rules as `sessions`.
+    pub async fn summary(
+        &mut self,
+    ) -> Result<corral_protocol::method::AttentionSummaryResult, Unanswered> {
+        let mut connection = self.borrow_for_one_question().await?;
+        let Ok(answered) = tokio::time::timeout(ANSWER, connection.attention_summary()).await
+        else {
+            return Err(Unanswered::Silent(format!(
+                "nothing within {} seconds",
+                ANSWER.as_secs()
+            )));
+        };
+        match answered {
+            Ok(summary) => {
+                self.connection = Some(connection);
+                Ok(summary)
+            }
+            Err(error) => {
+                if matches!(error, RequestError::Refused(_)) {
+                    self.connection = Some(connection);
+                }
+                Err(about(&error))
+            }
+        }
+    }
+
+    /// Acknowledge one item by the id this surface saw. What the daemon said
+    /// back, in words a person reads.
+    pub async fn acknowledge(&mut self, session: &str, item: &str) -> Result<(), Unanswered> {
+        let mut connection = self.borrow_for_one_question().await?;
+        let Ok(answered) =
+            tokio::time::timeout(ANSWER, connection.attention_acknowledge(session, item)).await
+        else {
+            return Err(Unanswered::Silent(format!(
+                "nothing within {} seconds",
+                ANSWER.as_secs()
+            )));
+        };
+        match answered {
+            Ok(()) => {
+                self.connection = Some(connection);
+                Ok(())
+            }
+            Err(error) => {
+                if matches!(error, RequestError::Refused(_)) {
+                    self.connection = Some(connection);
+                }
+                Err(about(&error))
+            }
+        }
+    }
+
     /// Drop a connection that cannot be asked another question.
     ///
     /// A daemon that went away has nobody on the other end, and one that broke
