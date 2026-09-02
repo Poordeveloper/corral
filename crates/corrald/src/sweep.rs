@@ -13,16 +13,18 @@
 //! is not promoted by being seen again. Identity arrives on the delivery path
 //! or not at all.
 //!
-//! So the sweep records a **runtime candidate** and nothing durable. It is
-//! live state: a restart forgets it and rediscovers whatever is still there,
-//! which is the honest answer for evidence that never earned durability
-//! (ADR 0014 D5).
+//! So the sweep records a **runtime candidate** and writes nothing durable
+//! about what it found. It is live state: a restart forgets it and
+//! rediscovers whatever is still there, which is the honest answer for
+//! evidence that never earned durability (ADR 0014 D5). The one durable
+//! consequence of a pass is the opposite direction: an incarnation that
+//! discovery had identified and a pass sees gone has its Run ended.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
-use corral_core::CorralSessionId;
+use corral_core::{CorralSessionId, ExternalId, RunId};
 
 use crate::platform::process::{self, Observation, ProcessIdentity};
 use crate::provider::{KnownProvider, recognition};
@@ -32,18 +34,45 @@ use crate::provider::{KnownProvider, recognition};
 pub struct RuntimeCandidate {
     provider: KnownProvider,
     process: ProcessIdentity,
-    /// The Corral identity this provisional row is shown under.
+    /// The Corral identity this row is shown under until discovery names
+    /// the Session it belongs to.
     ///
     /// Minted once per incarnation and kept for as long as the runtime is
-    /// seen, so a row does not change identity under the user between passes.
-    /// It is not a Session: nothing durable is written under it, and the
-    /// provider-id-keyed record a delivery mints is the one that wins
-    /// (`ARCHITECTURE.md` §1) — listing that record in this row's place is
-    /// the surfacing follow-up the plan names.
+    /// seen, so a row does not change identity under the user between
+    /// passes. It is not a Session: nothing durable is written under it, and
+    /// the provider-id-keyed record a delivery mints is the one that wins
+    /// (`ARCHITECTURE.md` §1) — once discovery has it, the row is shown under
+    /// that record instead.
     provisional_id: CorralSessionId,
+    /// What discovery established about this incarnation, once it did. A
+    /// cache of durable facts, never their source: a restart forgets it
+    /// along with the runtime, and the restart resolves the Run it names.
+    identified: Option<Identified>,
+}
+
+/// The Session a runtime incarnation was found to be carrying.
+///
+/// Recorded by discovery after the Run is durable, so a row shown under
+/// this Session always has the Run the runtime is in behind it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identified {
+    pub session: CorralSessionId,
+    pub external_id: ExternalId,
+    pub run: RunId,
 }
 
 impl RuntimeCandidate {
+    /// A runtime recognition just produced: seen, and nothing more known.
+    #[must_use]
+    pub fn recognized(provider: KnownProvider, process: ProcessIdentity) -> Self {
+        Self {
+            provider,
+            process,
+            provisional_id: CorralSessionId::mint(),
+            identified: None,
+        }
+    }
+
     #[must_use]
     pub fn provider(&self) -> KnownProvider {
         self.provider
@@ -57,6 +86,11 @@ impl RuntimeCandidate {
     #[must_use]
     pub fn provisional_id(&self) -> CorralSessionId {
         self.provisional_id
+    }
+
+    #[must_use]
+    pub fn identified(&self) -> Option<&Identified> {
+        self.identified.as_ref()
     }
 }
 
@@ -101,11 +135,7 @@ pub fn once() -> Pass {
                 let Some(provider) = recognition::provider_of(&process.executable) else {
                     continue;
                 };
-                found.push(RuntimeCandidate {
-                    provider,
-                    process: *process,
-                    provisional_id: CorralSessionId::mint(),
-                });
+                found.push(RuntimeCandidate::recognized(provider, *process));
             }
             // Gone between the listing and the look. Ordinary on a live
             // machine, and the one answer that positively says so.
@@ -205,6 +235,25 @@ impl SeenRuntimes {
         Changes { appeared, gone }
     }
 
+    /// Record what discovery established about one incarnation.
+    ///
+    /// A delivery can arrive before any pass has seen the process — the
+    /// session acted the moment the daemon came up — and the row must not
+    /// wait a cadence for identity the daemon already holds, so an unseen
+    /// incarnation is put on the table here. A seen one keeps its row and
+    /// gains the identity; the next pass finds it and keeps it as before.
+    pub fn identify(
+        &mut self,
+        provider: KnownProvider,
+        process: &ProcessIdentity,
+        identified: Identified,
+    ) {
+        self.held
+            .entry(Incarnation::of(process))
+            .or_insert_with(|| RuntimeCandidate::recognized(provider, process.clone()))
+            .identified = Some(identified);
+    }
+
     pub fn all(&self) -> impl Iterator<Item = &RuntimeCandidate> {
         self.held.values()
     }
@@ -222,6 +271,15 @@ impl SharedSeenRuntimes {
 
     pub fn absorb(&self, pass: Pass) -> Changes {
         self.held().absorb(pass)
+    }
+
+    pub fn identify(
+        &self,
+        provider: KnownProvider,
+        process: &ProcessIdentity,
+        identified: Identified,
+    ) {
+        self.held().identify(provider, process, identified);
     }
 
     #[must_use]
@@ -246,8 +304,13 @@ mod tests;
 /// Every pass is blocking work moved off the reactor. A pass that cannot read
 /// the table changes nothing, so a machine that briefly refuses the listing
 /// costs one quiet cycle rather than every runtime Corral had found.
+///
+/// A runtime seen gone that discovery had identified has its Run ended: the
+/// loss of an observed incarnation is the runtime's positive answer, and a
+/// Run left open past it would be shown as running for a process that is
+/// not there.
 pub async fn sweep_until_shutdown(
-    seen: SharedSeenRuntimes,
+    state: Arc<crate::state::DaemonState>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     loop {
@@ -257,7 +320,7 @@ pub async fn sweep_until_shutdown(
             // anything about what is running, so neither retires a runtime.
             Err(_) => Pass::Unavailable,
         };
-        let changes = seen.absorb(pass);
+        let changes = state.seen_runtimes().absorb(pass);
         for candidate in &changes.appeared {
             tracing::info!(
                 provider = candidate.provider().as_str(),
@@ -271,6 +334,9 @@ pub async fn sweep_until_shutdown(
                 pid = candidate.process().pid,
                 "a provider runtime outside Corral is no longer running",
             );
+            if let Some(identified) = candidate.identified() {
+                crate::external_session::runtime_gone(&state, identified).await;
+            }
         }
         tokio::select! {
             _ = shutdown.changed() => return,

@@ -17,6 +17,15 @@ fn candidate(pid: u32, started: u64, provider: KnownProvider) -> RuntimeCandidat
             executable: PathBuf::from("/usr/local/bin/claude"),
         },
         provisional_id: corral_core::CorralSessionId::mint(),
+        identified: None,
+    }
+}
+
+fn identified(session: CorralSessionId) -> Identified {
+    Identified {
+        session,
+        external_id: ExternalId::new("session-abc").expect("an identity"),
+        run: RunId::mint(),
     }
 }
 
@@ -167,6 +176,75 @@ fn the_shared_table_survives_a_poisoned_holder() {
     ]));
 
     assert_eq!(shared.snapshot().len(), 2);
+}
+
+/// Discovery names the Session a seen runtime is carrying, and the next pass
+/// — which mints a fresh, unidentified candidate for the same process, as a
+/// real pass does — keeps what discovery said rather than forgetting it.
+#[test]
+fn an_identified_runtime_keeps_its_identity_across_passes() {
+    let mut seen = SeenRuntimes::new();
+    let process = candidate(10, 100, KnownProvider::Claude);
+    let session = CorralSessionId::mint();
+    seen.absorb(read(vec![process.clone()]));
+
+    seen.identify(
+        KnownProvider::Claude,
+        process.process(),
+        identified(session),
+    );
+    let changes = seen.absorb(read(vec![candidate(10, 100, KnownProvider::Claude)]));
+
+    assert_eq!(changes, Changes::default());
+    let held = seen.all().next().expect("the runtime");
+    assert_eq!(held.identified().map(|it| it.session), Some(session));
+}
+
+/// A delivery can arrive before any pass has seen the process. The row must
+/// not wait a cadence for identity the daemon already holds, so discovery
+/// puts the runtime on the table itself — and the pass that then finds it
+/// reports nothing new.
+#[test]
+fn a_delivery_before_any_pass_puts_the_runtime_on_the_table_identified() {
+    let mut seen = SeenRuntimes::new();
+    let process = candidate(10, 100, KnownProvider::Claude);
+    let session = CorralSessionId::mint();
+
+    seen.identify(
+        KnownProvider::Claude,
+        process.process(),
+        identified(session),
+    );
+
+    let held = seen.all().next().expect("the runtime");
+    assert_eq!(held.identified().map(|it| it.session), Some(session));
+    assert_eq!(held.provider(), KnownProvider::Claude);
+    let changes = seen.absorb(read(vec![candidate(10, 100, KnownProvider::Claude)]));
+    assert_eq!(changes, Changes::default());
+}
+
+/// What went is reported with what was known about it, so the Run an
+/// identified runtime was in can be ended by whoever reads the change.
+#[test]
+fn an_identified_runtime_seen_gone_is_reported_gone_with_its_identity() {
+    let mut seen = SeenRuntimes::new();
+    let process = candidate(10, 100, KnownProvider::Claude);
+    let session = CorralSessionId::mint();
+    seen.absorb(read(vec![process.clone()]));
+    seen.identify(
+        KnownProvider::Claude,
+        process.process(),
+        identified(session),
+    );
+
+    let changes = seen.absorb(read(Vec::new()));
+
+    assert_eq!(changes.gone.len(), 1);
+    assert_eq!(
+        changes.gone[0].identified().map(|it| it.session),
+        Some(session)
+    );
+    assert_eq!(seen.all().count(), 0);
 }
 
 /// A row must not change identity under the user between passes: the same

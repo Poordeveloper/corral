@@ -75,7 +75,7 @@ pub async fn discovered(
         state.node(),
         BindingKind::ProviderSession,
         named.clone(),
-        identity,
+        identity.clone(),
     );
     // Attested: live provider-native evidence — the payload — corroborated by
     // an observed process. Provenance is `Discovered` because the runtime is
@@ -97,7 +97,11 @@ pub async fn discovered(
                 provider = provider.as_str(),
                 "a session running outside Corral is now visible",
             );
-            record_run(state, session.id(), named, &process, observed_at).await?;
+            if let RuntimeRecord::Run(run) =
+                record_run(state, session.id(), named, &process, observed_at).await?
+            {
+                shown_under(state, provider, &process, session.id(), identity, run);
+            }
             Ok(Some(Discovered::Session))
         }
         // The identity is already bound. That is the ordinary outcome for a
@@ -122,10 +126,70 @@ pub async fn discovered(
                 return Ok(Some(Discovered::AlreadyKnown));
             }
             match record_run(state, session.id(), named, &process, observed_at).await? {
-                RuntimeRecord::Run => Ok(Some(Discovered::Run)),
+                RuntimeRecord::Run(run) => {
+                    shown_under(state, provider, &process, session.id(), identity, run);
+                    Ok(Some(Discovered::Run))
+                }
                 RuntimeRecord::Withheld => Ok(Some(Discovered::AlreadyKnown)),
             }
         }
+    }
+}
+
+/// Put the Session on the live table, in the row its runtime is shown as.
+///
+/// After the Run is durable and not before: the row a person sees under
+/// this Session must have the Run behind it, and a table entry recorded
+/// first would name a Session that has nothing in progress if the store
+/// refused the second half.
+fn shown_under(
+    state: &Arc<DaemonState>,
+    provider: KnownProvider,
+    process: &ProcessIdentity,
+    session: corral_core::CorralSessionId,
+    external_id: ExternalId,
+    run: RunId,
+) {
+    state.seen_runtimes().identify(
+        provider,
+        process,
+        crate::sweep::Identified {
+            session,
+            external_id,
+            run,
+        },
+    );
+}
+
+/// The runtime an identified Session was in has been seen gone.
+///
+/// The loss of an observed incarnation is the process table's positive
+/// answer, and the Run ends `Exited` with cause `Unknown` — the OS says gone,
+/// not why. A store that cannot take the write leaves the Run open and says
+/// so; the row is already off the table, and the next restart's
+/// re-verification resolves what this pass could not record.
+pub async fn runtime_gone(state: &Arc<DaemonState>, identified: &crate::sweep::Identified) {
+    let end = RunEnd::Exited(ExitCause::Unknown);
+    match state
+        .record_run_ended(
+            identified.run,
+            end,
+            OccurrenceTime::FirstObserved(SystemTime::now()),
+        )
+        .await
+    {
+        Ok(_) => info!(
+            session = %identified.session,
+            run = %identified.run,
+            ?end,
+            "an external run ended with its runtime",
+        ),
+        Err(error) => warn!(
+            %error,
+            session = %identified.session,
+            run = %identified.run,
+            "an external run could not be ended after its runtime went",
+        ),
     }
 }
 
@@ -149,8 +213,8 @@ async fn has_live_run(
 
 /// What binding the observed runtime came to.
 enum RuntimeRecord {
-    /// The runtime is bound to this Session and its Run is recorded.
-    Run,
+    /// The runtime is bound to this Session and this Run is recorded on it.
+    Run(RunId),
     /// No Run was filed under this Session, and the cause was logged where
     /// it was found.
     Withheld,
@@ -209,15 +273,16 @@ async fn record_run(
         }
         Err(error) => return Err(error),
     };
+    let run = RunId::mint();
     state
         .record_run_started(
-            RunId::mint(),
+            run,
             binding,
             EvidenceSource::NodeRuntimeObservation,
             OccurrenceTime::Authoritative(process.started),
         )
         .await?;
-    Ok(RuntimeRecord::Run)
+    Ok(RuntimeRecord::Run(run))
 }
 
 /// A name for one process incarnation.

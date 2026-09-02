@@ -117,6 +117,80 @@ async fn the_session_list_is_empty_and_says_so() {
     }
 }
 
+/// A runtime outside Corral is one row, whatever is known about it. Seen by
+/// the sweep alone it is listed under a minted identity with no provider
+/// identity — absent is unknown. Once discovery names the Session it is
+/// carrying, the same row is listed under that Session with its identity,
+/// and nothing is listed under the minted one any more.
+#[tokio::test]
+async fn an_external_runtime_is_listed_under_the_session_discovery_names() {
+    let registry = Registry::new("external-row");
+    let process = crate::platform::process::ProcessIdentity {
+        pid: 4321,
+        parent: 1,
+        started: std::time::UNIX_EPOCH + std::time::Duration::from_secs(500),
+        executable: PathBuf::from("/usr/local/bin/claude"),
+    };
+    let provisional = crate::sweep::RuntimeCandidate::recognized(
+        crate::provider::KnownProvider::Claude,
+        process.clone(),
+    );
+    let minted = provisional.provisional_id().to_string();
+    registry
+        .state
+        .seen_runtimes()
+        .absorb(crate::sweep::Pass::Read {
+            found: vec![provisional],
+            uninspected: Default::default(),
+        });
+
+    let rows = session_rows(&registry.state).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["session_id"], minted);
+    assert_eq!(rows[0]["origin"], method::ORIGIN_DISCOVERED);
+    assert_eq!(rows[0]["provider"], json!({"name": "claude"}));
+
+    let session = corral_core::CorralSessionId::mint();
+    registry.state.seen_runtimes().identify(
+        crate::provider::KnownProvider::Claude,
+        &process,
+        crate::sweep::Identified {
+            session,
+            external_id: corral_core::ExternalId::new("session-abc").expect("an identity"),
+            run: corral_core::RunId::mint(),
+        },
+    );
+
+    let rows = session_rows(&registry.state).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "the provisional row was joined, not replaced"
+    );
+    assert_eq!(rows[0]["session_id"], session.to_string());
+    assert_eq!(rows[0]["origin"], method::ORIGIN_DISCOVERED);
+    assert_eq!(
+        rows[0]["provider"],
+        json!({"name": "claude", "external_id": "session-abc"})
+    );
+    assert_eq!(rows[0]["terminal_access"], "unavailable");
+}
+
+async fn session_rows(state: &Arc<DaemonState>) -> Vec<serde_json::Value> {
+    let Dispatch::Reply(Frame::Response(response)) =
+        dispatch(&request(method::SESSION_LIST, None), state).await
+    else {
+        panic!("expected a plain reply");
+    };
+    match response.outcome {
+        Outcome::Result(mut value) => match value["sessions"].take() {
+            serde_json::Value::Array(rows) => rows,
+            other => panic!("expected rows, got {other}"),
+        },
+        Outcome::Error(error) => panic!("expected a result, got {error}"),
+    }
+}
+
 /// The same law, applied to the refusal a person meets first.
 ///
 /// Every client renders this string as it stands — including the session list,

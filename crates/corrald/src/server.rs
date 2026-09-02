@@ -150,7 +150,7 @@ pub async fn serve(
     // otherwise stay invisible for exactly as long as the user leaves it
     // alone (ADR 0014 D2).
     tokio::spawn(crate::sweep::sweep_until_shutdown(
-        state.seen_runtimes().clone(),
+        Arc::clone(&state),
         lifecycle.subscribe(),
     ));
 

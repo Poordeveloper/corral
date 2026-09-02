@@ -259,6 +259,82 @@ async fn a_store_refusal_that_is_not_succession_reaches_the_caller() {
     );
 }
 
+/// The row a person sees must carry the identity Corral holds. A discovery
+/// names the runtime on the live table under its Session, with the provider
+/// identity and the Run it recorded — replacing the provisional row in
+/// place, not adding a second one beside it.
+#[tokio::test]
+async fn a_discovery_shows_the_runtime_under_its_session() {
+    let registry = registry("shown-under");
+    let process = ProcessIdentity {
+        pid: 4321,
+        parent: 1,
+        started: at(500),
+        executable: PathBuf::from("/usr/local/bin/claude"),
+    };
+    // The sweep saw the process first, as an identity-less row.
+    registry
+        .state
+        .seen_runtimes()
+        .absorb(crate::sweep::Pass::Read {
+            found: vec![crate::sweep::RuntimeCandidate::recognized(
+                KnownProvider::Claude,
+                process.clone(),
+            )],
+            uninspected: Default::default(),
+        });
+
+    discovered(
+        &registry.state,
+        KnownProvider::Claude,
+        identity("session-abc"),
+        reached(4321, at(500)),
+        at(900),
+    )
+    .await
+    .expect("recorded");
+
+    let session = registry.state.sessions().await.expect("sessions")[0].id();
+    let run = registry.state.runs_of(session).await.expect("runs")[0].id();
+    let rows = registry.state.seen_runtimes().snapshot();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the provisional row was joined, not replaced"
+    );
+    let shown = rows[0].identified().expect("the row carries its identity");
+    assert_eq!(shown.session, session);
+    assert_eq!(shown.external_id.as_str(), "session-abc");
+    assert_eq!(shown.run, run);
+}
+
+/// A Run is not shown as running for a process that is not there. The
+/// sweep's loss of an identified incarnation ends the Run it named, and the
+/// end is `Exited` with cause `Unknown` — the OS says gone, not why.
+#[tokio::test]
+async fn a_runtime_seen_gone_ends_the_run_it_was_in() {
+    let registry = registry("runtime-gone");
+    discovered(
+        &registry.state,
+        KnownProvider::Claude,
+        identity("session-abc"),
+        reached(4321, at(500)),
+        at(900),
+    )
+    .await
+    .expect("recorded");
+    let shown = registry.state.seen_runtimes().snapshot()[0]
+        .identified()
+        .expect("identified")
+        .clone();
+
+    runtime_gone(&registry.state, &shown).await;
+
+    let runs = registry.state.runs_of(shown.session).await.expect("runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].end(), Some(RunEnd::Exited(ExitCause::Unknown)));
+}
+
 /// Two provider identities are two Sessions. Nothing correlates them by time
 /// or by the process they share — heuristics never bind.
 #[tokio::test]

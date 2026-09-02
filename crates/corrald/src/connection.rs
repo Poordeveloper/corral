@@ -485,17 +485,11 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
         .iter()
         .map(|(session, reported)| encode_session(session, reported.as_ref()))
         .collect();
-    // After the managed rows, and only what runtime recognition supports.
-    // A session Corral started reports through its own channel; these are the
-    // ones that have never reported anything, which is exactly the session a
-    // person most needs reminding of (ADR 0014 D2).
-    sessions.extend(
-        state
-            .seen_runtimes()
-            .snapshot()
-            .iter()
-            .map(encode_provisional),
-    );
+    // After the managed rows: the runtimes outside Corral. A session Corral
+    // started reports through its own channel; these are the ones the
+    // process table showed or a token-less delivery corroborated, which is
+    // exactly the session a person most needs reminding of (ADR 0014 D2).
+    sessions.extend(state.seen_runtimes().snapshot().iter().map(encode_external));
     match serde_json::to_value(SessionListResult { sessions }) {
         Ok(value) => Frame::result(id, value),
         Err(source) => Frame::error(
@@ -539,20 +533,25 @@ fn encode_session(
     .unwrap_or_else(|_| serde_json::json!({}))
 }
 
-/// One provider runtime the sweep found, as a row.
+/// One provider runtime outside Corral, as a row.
 ///
-/// The row claims exactly what runtime recognition supports and no more: a
-/// supported provider runtime appears to be running here, and its execution
-/// state is the only thing the process table can speak to. It carries no
-/// provider identity, because the process table holds none — that arrives on
-/// the delivery path or not at all (grill Q5, Q6′).
+/// The row claims exactly what its evidence supports and no more. Runtime
+/// recognition alone says a supported provider runtime appears to be running
+/// here, and its execution state is the only thing the process table can
+/// speak to; such a row carries no provider identity, because the table
+/// holds none (grill Q5, Q6′). Identity arrives on the delivery path, and a
+/// runtime discovery has identified is shown under the Session it was found
+/// to be carrying, with that identity — the same row, no longer provisional.
 ///
-/// Its `session_id` is the Corral identity minted for this runtime's
-/// incarnation, so the row is stable across passes without the pid ever
-/// becoming an identity.
-fn encode_provisional(candidate: &crate::sweep::RuntimeCandidate) -> serde_json::Value {
+/// Until then its `session_id` is the Corral identity minted for this
+/// runtime's incarnation, so the row is stable across passes without the pid
+/// ever becoming an identity.
+fn encode_external(candidate: &crate::sweep::RuntimeCandidate) -> serde_json::Value {
+    let identified = candidate.identified();
     serde_json::to_value(SessionListItem {
-        session_id: candidate.provisional_id().to_string(),
+        session_id: identified
+            .map_or(candidate.provisional_id(), |identified| identified.session)
+            .to_string(),
         title: candidate.provider().as_str().to_owned(),
         // The process is there; nothing else about it is known.
         execution_state: "running".to_owned(),
@@ -561,8 +560,9 @@ fn encode_provisional(candidate: &crate::sweep::RuntimeCandidate) -> serde_json:
         terminal_access: Some(corral_protocol::method::TerminalAccess::Unavailable),
         provider: Some(ProviderFacts {
             name: candidate.provider().as_str().to_owned(),
-            // No identity. Absent is unknown, which is exactly right here.
-            external_id: None,
+            // Absent is unknown, which is exactly right for a runtime no
+            // delivery has named yet.
+            external_id: identified.map(|identified| identified.external_id.as_str().to_owned()),
         }),
         agent_event: None,
         origin: Some(method::ORIGIN_DISCOVERED.to_owned()),

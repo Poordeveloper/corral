@@ -145,6 +145,22 @@ honest terminal-access refusal. The TUI insta snapshot mandate activates
 this PR (workflow §6): external rows, degraded rows, and the integration
 status view land with snapshot coverage.
 
+Daemon side, the list has one live source for what runs outside Corral:
+the sweep's table of runtime incarnations. Discovery, having recorded a
+Run, names the incarnation on that table — Session, provider identity,
+Run — and a delivery that arrives before a pass has seen the process puts
+it there itself. `session.list` renders an identified incarnation under
+its Session id with its provider identity, so the provisional row is
+superseded in place rather than joined by a second one; an unidentified
+incarnation stays the identity-less row it was. The table is the only
+thing the list reads: no store scan per request, and a restart forgets
+identities exactly as it forgets runtimes, which is right because the
+restart also resolves every open external Run. When a pass sees an
+identified incarnation gone, the sweep ends the Run it names
+`Exited(Unknown)` — the design-6 loss rule, implemented here and not
+before, because a row that says running from an open Run nothing closes
+would be the stale-running claim the runtime-truth law forbids.
+
 **8. CLI.** `corral integration status|enable|disable --provider
 claude|codex` over new RPC methods (daemon executes; ADR 0013 D1). Enable
 runs install and reports triggers honestly; disable runs uninstall and
@@ -279,14 +295,13 @@ disruption is a stop on the default-install shape.
 
 ## Follow-ups
 
-- `session.list` emits managed sessions and the sweep's provisional rows,
-  but not the durable Sessions discovery mints: a delivery that promotes a
-  runtime to an identified Session leaves the identity-less sweep row in
-  place and lists nothing under the real identity. The client side already
-  renders a discovered row with identity (snapshot
-  `a_discovered_session_with_identity_drops_the_warming_up_line`); the
-  daemon side is the gap. Own task, before the dogfood A-window: the row a
-  person sees must carry the identity Corral holds.
+- The sweep recognizes every provider process on the table, including
+  the ones Corral itself launched, so on Linux a managed session's own
+  runtime also appears as an identity-less provisional row. Excluding
+  owned processes needs the sweep to know descent from this daemon (the
+  managed child is its own process group, and `ProcessIdentity` carries a
+  parent), which is a recognizer question the matrix has not measured.
+  Own task, before the dogfood A-window.
 - The full discovery coverage-audit harness (ROADMAP §9.2) beyond the
   matrix's host scenarios — release-gate machinery, own task.
 - Launch-time handshake ("not managed until a hook arrived") from the PR5
