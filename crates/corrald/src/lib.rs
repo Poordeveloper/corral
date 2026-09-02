@@ -21,6 +21,7 @@ mod connection;
 mod detection;
 /// Sessions Corral found rather than started (ADR 0014).
 mod external_session;
+mod history;
 mod hook_endpoint;
 mod hook_evidence;
 mod in_flight;

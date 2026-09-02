@@ -283,6 +283,18 @@ impl Store {
         self.read(|connection| projection::session(connection, id))
     }
 
+    /// The Session an external identity resolves to under any binding kind.
+    pub fn session_by_external_id(
+        &mut self,
+        provider: &ProviderId,
+        external_id: &ExternalId,
+    ) -> Result<Option<CorralSessionId>, StateError> {
+        let node = self.node();
+        self.read(|connection| {
+            projection::session_by_external_id(connection, node, provider, external_id)
+        })
+    }
+
     pub fn binding(&mut self, id: BindingId) -> Result<Option<Binding>, StateError> {
         self.read(|connection| projection::binding(connection, id))
     }

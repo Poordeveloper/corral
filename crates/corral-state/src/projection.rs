@@ -236,6 +236,27 @@ pub(crate) fn binding_by_key(
     )
 }
 
+/// The Session bound to an external identity under any binding kind, the
+/// provider-session binding preferred when several kinds name the same id.
+///
+/// What history enumeration resolves against before it makes a row: a
+/// discovered session and its history file are one Session, and the
+/// provider-id-keyed record wins (ADR 0016 D2).
+pub(crate) fn session_by_external_id(
+    connection: &Connection,
+    node: NodeId,
+    provider: &ProviderId,
+    external_id: &ExternalId,
+) -> Result<Option<CorralSessionId>, StateError> {
+    query_binding(
+        connection,
+        "WHERE node_id = ?1 AND provider = ?2 AND external_id = ?3 \
+         ORDER BY (kind = 'provider-session') DESC, created_at_ms, id",
+        params![node.to_string(), provider.as_str(), external_id.as_str(),],
+    )
+    .map(|binding| binding.map(|binding| binding.session()))
+}
+
 /// The binding this Session may currently drive control through, if any.
 ///
 /// Answers the at-most-one rule without materializing every binding the

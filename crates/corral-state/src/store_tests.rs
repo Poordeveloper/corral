@@ -3176,3 +3176,35 @@ fn a_discovered_runtime_is_admitted_beside_the_managed_one() {
 
     assert!(admitted.is_ok(), "{admitted:?}");
 }
+
+/// A history enumeration resolves an identity against every binding kind
+/// before it makes a row (ADR 0016 D2): a Session bound to a provider
+/// session id is found by that id whether the lookup names history or not,
+/// and an unknown id is nobody's.
+#[test]
+fn a_session_is_found_by_its_external_id_whatever_the_binding_kind() {
+    let mut store = TestStore::new("by-external-id");
+    let node = store.node();
+    let SessionResolution::Created { session, .. } = store
+        .resolve_or_create_session(
+            key(node, BindingKind::ProviderSession, "session-abc"),
+            Provenance::Discovered,
+            owned_runtime(),
+            instant(10),
+        )
+        .expect("resolved")
+    else {
+        panic!("a new external identity is a new Session");
+    };
+
+    let provider = ProviderId::new("claude-code").expect("usable");
+    let found = store
+        .session_by_external_id(&provider, &ExternalId::new("session-abc").expect("usable"))
+        .expect("readable");
+    assert_eq!(found, Some(session.id()));
+
+    let unknown = store
+        .session_by_external_id(&provider, &ExternalId::new("session-xyz").expect("usable"))
+        .expect("readable");
+    assert_eq!(unknown, None);
+}
