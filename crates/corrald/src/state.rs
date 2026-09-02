@@ -126,6 +126,11 @@ pub struct DaemonState {
 
     /// The mutating commands this daemon is executing right now.
     commands: InFlightCommands,
+    /// The screen-detection manifests this daemon runs with: the built-ins,
+    /// and whatever the state directory's `manifests/` overrode at startup
+    /// (ADR 0015 D6). Read once; a changed manifest means a restart.
+    detection: crate::detection::Loadout,
+
     /// The attention journal, once the daemon has a diagnostics directory to
     /// put it in. Absent means nothing is journaled — a test daemon, or a
     /// directory that could not be made — and derivation carries on either
@@ -197,9 +202,20 @@ impl DaemonState {
             incoming: Mutex::new(Some(incoming)),
             resuming: Mutex::new(HashSet::new()),
             commands: InFlightCommands::new(),
+            detection: crate::detection::load_built_in(Some(&state_dir.join("manifests"))),
             journal: Mutex::new(None),
             runtime: Mutex::new(Runtime::default()),
         })
+    }
+
+    /// The manifest the screen thread evaluates for this provider, if any.
+    pub fn manifest_for(
+        &self,
+        provider: crate::provider::KnownProvider,
+    ) -> Option<Arc<crate::detection::Manifest>> {
+        self.detection
+            .manifest(provider.as_str())
+            .map(|manifest| Arc::new(manifest.clone()))
     }
 
     /// Give this daemon its attention journal.

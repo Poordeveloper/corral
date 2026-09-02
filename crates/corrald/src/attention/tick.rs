@@ -35,6 +35,33 @@ pub fn tick_once(state: &Arc<DaemonState>, now: SystemTime) -> Vec<Change> {
                     activity.push((session.session, drawn));
                 }
             }
+            // Screen readings are re-observed every tick for as long as the
+            // screen thread still publishes them: a blocker that stays visible
+            // is always the newest claim (ADR 0015 D4). An unsealed reading is
+            // observed too and refused by entitlement, which is what makes it
+            // countable without making it a claim.
+            let mut readings = Vec::new();
+            for session in runtime.sessions.describe() {
+                let Some(handle) = runtime.sessions.get(session.session) else {
+                    continue;
+                };
+                if let Some(reading) = handle.reading() {
+                    readings.push((session.session, reading));
+                }
+            }
+            for (session, reading) in readings {
+                runtime.attention.observe(
+                    session,
+                    Claim {
+                        source: EvidenceSource::ScreenDetection,
+                        association: Assurance::Deterministic,
+                        channel: Channel::CorralOwnedPty,
+                        sealing: reading.sealing,
+                        asserts: reading.asserts,
+                    },
+                    now,
+                );
+            }
             for (session, drawn) in activity {
                 runtime.attention.observe(
                     session,
@@ -134,3 +161,7 @@ pub async fn tick_until_shutdown(state: Arc<DaemonState>, mut shutdown: watch::R
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tick_tests.rs"]
+mod tests;

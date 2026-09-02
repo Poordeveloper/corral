@@ -427,10 +427,14 @@ async fn apply(
         // The same fact as a claim: this launch's token puts the event on a
         // runtime Corral constructed, and whether the event is version-sealed
         // is the sealing table's answer, not this path's (ADR 0015 D3).
+        let version = runtime
+            .reported
+            .get(session)
+            .and_then(|reported| reported.provider_version.clone());
         if let Some(claim) = crate::attention::hook_fact_claim(
             provider,
             fact.kind,
-            None,
+            version.as_deref(),
             corral_core::Assurance::Deterministic,
             corral_core::Channel::CorralOwnedPty,
         ) {

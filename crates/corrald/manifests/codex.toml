@@ -1,0 +1,43 @@
+# Codex screen rules, measured 2026-09-02 on 0.152.0
+# (docs/references/2026-09-02-pr8-attention-matrix.md). UNSEALED until the
+# acceptance reconciliation adds `sealed_by`; asserts nothing until then.
+schema = 1
+min_engine_version = 1
+version = "2026.09.02.1"
+provider = "codex"
+
+# The title announces the block, focused or not, and blinks between two
+# glyphs; the rule matches the words, not the glyph (noise catalog
+# codex.title.blink).
+[[rule]]
+id = "action-required-title"
+asserts = "needs_input"
+region = "osc_title"
+all = ["Action Required"]
+priority = 20
+
+[[rule]]
+id = "approval-dialog"
+asserts = "needs_input"
+region = "bottom_non_empty_lines"
+lines = 12
+all = ["Would you like to run the following command?", "Press enter to confirm or esc to cancel"]
+priority = 19
+
+[[rule]]
+id = "composer-idle"
+asserts = "turn_complete"
+region = "bottom_non_empty_lines"
+lines = 3
+all = ["Ask Codex to do anything"]
+none = ["esc to interrupt"]
+priority = 5
+
+# Diagnostic only (grill Q14).
+[[rule]]
+id = "working-line"
+asserts = "working"
+region = "bottom_non_empty_lines"
+lines = 6
+all = ["esc to interrupt"]
+priority = 1

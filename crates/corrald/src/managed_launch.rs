@@ -68,6 +68,7 @@ where
     Commit: FnOnce(OccurrenceTime, SystemTime) -> Committing,
     Committing: Future<Output = Result<StartedManagedSession, StateError>>,
 {
+    let program = std::path::PathBuf::from(launch.program());
     let pending = match spawn_off_the_reactor(launch, geometry).await {
         Ok(pending) => pending,
         // The command never ran, so no Run exists to report. Saying otherwise
@@ -77,6 +78,25 @@ where
             return Committed::NotSpawned(error);
         }
     };
+    // A provider launch gets its screen read against the provider's manifest,
+    // and its version bound at the launch boundary — from the installation the
+    // program resolved to, only if that metadata predates the process
+    // (grill Q12). A raw command has neither.
+    let provider = injected
+        .as_ref()
+        .and_then(|injected| state.resolve_launch_token(&injected.token))
+        .map(|scope| scope.provider);
+    let pending = match provider.and_then(|provider| state.manifest_for(provider)) {
+        Some(manifest) => pending.detect_with(manifest),
+        None => pending,
+    };
+    if let Some(provider) = provider {
+        let began = pending.began();
+        let version = crate::provider::version::resolve_program(&program)
+            .and_then(|resolved| crate::provider::version::installed_version(provider, &resolved))
+            .and_then(|installed| installed.bound_to(began));
+        state.with_runtime(|runtime| runtime.reported.versioned(session, version));
+    }
     // Known as Corral's from this moment, not from the serve below: the
     // process is on the table now, and a sweep that reads it while the store
     // is still committing must not list it as a runtime outside Corral. A

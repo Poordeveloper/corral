@@ -144,7 +144,24 @@ struct Published {
     /// wrote is not the child drawing; it is the person typing.
     last_output_ms: Arc<AtomicU64>,
     last_input_ms: Arc<AtomicU64>,
+    /// What the screen matched once its output settled, dated by the
+    /// evaluation. `None` when nothing matched or nothing was asked to look.
+    reading: Arc<std::sync::Mutex<Option<PublishedReading>>>,
 }
+
+/// One screen reading, as the tick will turn it into a claim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishedReading {
+    pub rule: String,
+    pub asserts: corral_core::SemanticState,
+    pub sealing: corral_core::Sealing,
+    pub manifest_version: String,
+    pub at: std::time::SystemTime,
+}
+
+/// How long output must have been quiet before the screen is read. Rules
+/// evaluated mid-redraw would see half a dialog (ADR 0015 D6).
+const SCREEN_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// How long after a keystroke Corral wrote its echo may arrive without being
 /// read as the agent drawing. A false Working, never a false Needs You, and
@@ -343,6 +360,15 @@ impl SessionHandle {
             Err(SessionGone) if self.recorded().is_ok() => Err(InputRefused::RunEnded),
             Err(SessionGone) => Err(InputRefused::RuntimeGone),
         }
+    }
+
+    /// What the screen last matched, without asking it.
+    pub fn reading(&self) -> Option<PublishedReading> {
+        self.published
+            .reading
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 
     /// When the child last drew, without asking the screen — `None` before it
@@ -549,6 +575,8 @@ impl SessionHandle {
 /// exists. What is left is starting threads, which cannot fail, so a Run whose
 /// start committed is always served.
 pub struct PendingSession {
+    /// The manifest the screen thread evaluates, when this provider has one.
+    detect: Option<Arc<crate::detection::Manifest>>,
     /// Taken by whichever of `serve` and the destructor gets there first.
     ///
     /// The obligation lives in the type rather than in every caller: this owns
@@ -606,6 +634,7 @@ pub fn spawn_session(
     };
 
     Ok(PendingSession {
+        detect: None,
         runtime: Some(PendingRuntime {
             screen,
             reaper,
@@ -621,6 +650,13 @@ pub fn spawn_session(
 }
 
 impl PendingSession {
+    /// Evaluate this manifest against the screen once output settles.
+    #[must_use]
+    pub fn detect_with(mut self, manifest: Arc<crate::detection::Manifest>) -> Self {
+        self.detect = Some(manifest);
+        self
+    }
+
     pub fn title(&self) -> &str {
         &self.title
     }
@@ -691,7 +727,9 @@ impl PendingSession {
             screen: Arc::new(OnceLock::new()),
             last_output_ms: Arc::new(AtomicU64::new(0)),
             last_input_ms: Arc::new(AtomicU64::new(0)),
+            reading: Arc::new(std::sync::Mutex::new(None)),
         };
+        let detect = self.detect.take();
 
         // Writing to a PTY blocks when the child stops reading, and the child
         // stops reading when its output is not drained — so a write on the
@@ -730,7 +768,15 @@ impl PendingSession {
         let serving = published.clone();
         std::thread::spawn(move || {
             let _alive = held;
-            serve_screen(screen, &teardown, to_child, geometry, questions, &serving)
+            serve_screen(
+                screen,
+                &teardown,
+                to_child,
+                geometry,
+                questions,
+                &serving,
+                detect.as_deref(),
+            )
         });
 
         SessionHandle {
@@ -861,6 +907,34 @@ fn read_pty(
     }
 }
 
+/// Evaluate the manifest against the screen as it stands and publish the
+/// result, or its absence.
+fn read_screen(
+    terminal: &super::terminal::AuthoritativeTerminal,
+    detect: Option<&crate::detection::Manifest>,
+    published: &Published,
+) {
+    let Some(manifest) = detect else {
+        return;
+    };
+    let reading = terminal.terminal().and_then(|emulator| {
+        let screen = crate::detection::Screen {
+            rows: emulator.plain_string().lines().map(str::to_owned).collect(),
+            title: String::from_utf8_lossy(&emulator.title).into_owned(),
+        };
+        crate::detection::evaluate(manifest, &screen).map(|reading| PublishedReading {
+            rule: reading.rule,
+            asserts: reading.asserts,
+            sealing: reading.sealing,
+            manifest_version: reading.manifest_version,
+            at: std::time::SystemTime::now(),
+        })
+    });
+    if let Ok(mut slot) = published.reading.lock() {
+        *slot = reading;
+    }
+}
+
 /// The thread that owns one session's screen for the life of its runtime.
 ///
 /// Everything reaches it as an `Ask` on one channel, so it blocks until there
@@ -875,9 +949,13 @@ fn serve_screen(
     geometry: PtyGeometry,
     questions: Receiver<Ask>,
     published: &Published,
+    detect: Option<&crate::detection::Manifest>,
 ) {
     let mut terminal = super::terminal::AuthoritativeTerminal::new(geometry);
     let mut stream = super::stream::TerminalStream::new();
+    // Output since the screen was last read. Read when it has been quiet for
+    // the settle interval, so a rule never sees half a redraw.
+    let mut unread = false;
 
     // Runs until the runtime ends, and no longer. Everything this thread
     // exists for — consuming output, answering device queries with nobody
@@ -885,9 +963,21 @@ fn serve_screen(
     // arrive. When they cannot, the screen it holds is published as a value
     // and this returns, releasing the emulator, the stream, and the pty
     // (ADR 0007 L2). The registry keeps the record; nothing keeps the thread.
-    while let Ok(ask) = questions.recv() {
+    loop {
+        let ask = match questions.recv_timeout(SCREEN_SETTLE) {
+            Ok(ask) => ask,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if unread {
+                    unread = false;
+                    read_screen(&terminal, detect, published);
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         match ask {
             Ask::Output(chunk) => {
+                unread = detect.is_some();
                 let now_ms = unix_ms(std::time::SystemTime::now());
                 if now_ms.saturating_sub(published.last_input_ms.load(Ordering::Acquire))
                     > ECHO_WINDOW_MS

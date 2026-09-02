@@ -1,5 +1,5 @@
 ---
-status: blocked   # ADR 0015 / ADR 0016 proposed; structural grill closed (rounds 1–4); ruled mechanics may start on a branch (grill Q32), nothing merges before acceptance
+status: blocked   # ADR 0015 / ADR 0016 proposed; structural grill closed (rounds 1–4); PR8a's ruled mechanics are built on task/pr8-attention (grill Q32), nothing merges before acceptance
 class: C
 writes:           # one plan, two independently correct PRs (grill Q1); overlapping owners serialize
   pr8a: [corrald, corral-core, corral-protocol, corral-tui, corral]
@@ -608,9 +608,25 @@ continuation copy; CLI bound to item identity and disclosure revision;
 DoD additions. **The structural grill is closed.** The Q21 matrix ran 2026-09-02
 (`docs/references/2026-09-02-pr8-attention-matrix.md`) with the initial
 noise catalog beside it; its evidence map is written against Q32's
-closing conditions. Next: the founder's acceptance reconciliation —
+closing conditions, and the reconciliation check is proposed as round 5 of
+the decision record. Next: the founder's acceptance reconciliation —
 `proposed → accepted` on both ADRs, or the named fact that fails and the
 ruling it reopens.
+
+**Built ahead of acceptance, on `task/pr8-attention` (grill Q32(b)).**
+A1 vocabulary and the entitlement table; A3 engine, tracker, ledger, and
+the one-second tick; A4 journal with disputes and the report; A5 protocol
+(attention on `session.list`, summary, acknowledge, report, dispute,
+`attention.v1`); A6 five-state presentation with snapshots, heading counts,
+`a` to acknowledge, `corral needs|ack|attention report|dispute`; A2 PTY
+activity publication with the echo window, the manifest loader with its
+per-level refusals, screen readings on the settled screen, provider version
+bound at launch and from the observed process; the built-in manifests
+carry the matrix's rules **unsealed**. Waiting for acceptance, by ruling:
+the sealed version rows (`attention::sealing` is an empty table), the
+`sealed_by` lines in the manifests, the Claude adapter's `Notification`
+split, the glossary and canonical prose changes A7 names. Until then every
+session reads Unknown from the daemon — visible, diagnostic, and honest.
 
 ## Plan size justification
 

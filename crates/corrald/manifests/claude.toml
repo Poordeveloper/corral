@@ -1,0 +1,55 @@
+# Claude Code screen rules, measured 2026-09-02 on 2.1.258
+# (docs/references/2026-09-02-pr8-attention-matrix.md). Every rule here is
+# UNSEALED until the acceptance reconciliation adds its `sealed_by`: it is
+# evaluated, counted, and asserts nothing (ADR 0015 D6, grill Q14).
+schema = 1
+min_engine_version = 1
+version = "2026.09.02.1"
+provider = "claude"
+
+# The three dialogs share one structure: the `❯ 1.` option list under a rule,
+# the mode bar gone, the dialog's own last row. The permission words alone
+# appear in ordinary output (matrix C9), so the mode bar's absence is the gate.
+[[rule]]
+id = "permission-dialog"
+asserts = "needs_input"
+region = "bottom_non_empty_lines"
+lines = 12
+all = ["❯ 1.", "Esc to cancel"]
+none = ["manual mode on", "auto mode on", "? for shortcuts", "esc to interrupt"]
+priority = 20
+
+[[rule]]
+id = "plan-approval"
+asserts = "needs_input"
+region = "bottom_non_empty_lines"
+lines = 12
+all = ["Would you like to proceed?", "❯ 1."]
+none = ["manual mode on", "auto mode on", "? for shortcuts"]
+priority = 21
+
+[[rule]]
+id = "trust-dialog"
+asserts = "needs_input"
+region = "bottom_non_empty_lines"
+lines = 12
+all = ["Accessing workspace:", "Enter to confirm"]
+priority = 22
+
+[[rule]]
+id = "idle-prompt"
+asserts = "turn_complete"
+region = "bottom_non_empty_lines"
+lines = 4
+all = ["? for shortcuts"]
+none = ["esc to interrupt"]
+priority = 5
+
+# Diagnostic only, by decision: activity and hooks carry Working (grill Q14).
+[[rule]]
+id = "running-bar"
+asserts = "working"
+region = "bottom_non_empty_lines"
+lines = 4
+all = ["esc to interrupt"]
+priority = 1

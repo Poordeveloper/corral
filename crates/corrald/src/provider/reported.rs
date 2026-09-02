@@ -34,6 +34,10 @@ pub struct ReportedSession {
     /// evidence as provenance; this field is a current claim, and one field
     /// never means both.
     pub external_id: Option<ExternalId>,
+    /// The provider version bound to this runtime, when installation
+    /// metadata could be bound to the process that produced the facts
+    /// (grill Q12). `None` seals nothing.
+    pub provider_version: Option<String>,
     /// The latest still-relevant fact the agent reported, or `None` when it
     /// has reported nothing.
     ///
@@ -86,6 +90,7 @@ impl ReportedSession {
     fn new(provider: KnownProvider) -> Self {
         Self {
             provider,
+            provider_version: None,
             external_id: None,
             observed_in: None,
             closure: IdentityClosure::Open,
@@ -237,6 +242,14 @@ impl ReportedSessions {
         if supersedes {
             held.latest = Some(fact);
             held.arrived = Some(arrived);
+        }
+    }
+
+    /// Bind the provider version established at launch to this session's
+    /// facts (grill Q12).
+    pub fn versioned(&mut self, session: CorralSessionId, version: Option<String>) {
+        if let Some(reported) = self.sessions.get_mut(&session) {
+            reported.provider_version = version;
         }
     }
 

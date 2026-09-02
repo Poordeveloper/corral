@@ -642,3 +642,31 @@ fn the_last_output_instant_is_published_once_the_child_draws() {
     let drawn = handle.last_output_at().expect("the child drew");
     assert!(drawn <= std::time::SystemTime::now());
 }
+
+/// With a manifest, the screen thread publishes what the screen matches once
+/// output settles, dated by the evaluation, so the tick can turn it into a
+/// claim without asking the screen.
+#[test]
+fn a_settled_screen_publishes_its_reading() {
+    let (manifest, _) = crate::detection::parse(
+        "schema = 1\nmin_engine_version = 1\nversion = \"t\"\nprovider = \"test\"\n[[rule]]\nid = \"hello\"\nasserts = \"turn_complete\"\nregion = \"whole_screen\"\nall = [\"hello\"]\n",
+    )
+    .expect("manifest");
+    let pending = spawn_session(
+        &request("/bin/sh", &["-c", "printf hello; sleep 30"]),
+        GEOMETRY,
+    )
+    .expect("spawn")
+    .detect_with(std::sync::Arc::new(manifest));
+    let (observations, observed) = observe_runs();
+    let handle = pending.serve(CorralSessionId::mint(), RunId::mint(), observations);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while handle.reading().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let reading = handle.reading().expect("a reading");
+    assert_eq!(reading.rule, "hello");
+    assert_eq!(reading.asserts, corral_core::SemanticState::Ready);
+    handle.shut_down();
+    drop(observed);
+}

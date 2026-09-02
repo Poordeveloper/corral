@@ -120,7 +120,7 @@ pub async fn discovered(
 
     match resolution {
         SessionResolution::Created { session, binding } => {
-            observe_fact(state, provider, session.id(), fact, observed_at);
+            observe_fact(state, provider, session.id(), fact, observed_at, &process);
             info!(
                 session = %session.id(),
                 binding = %binding.id(),
@@ -145,7 +145,7 @@ pub async fn discovered(
         // no Run — which every later delivery would otherwise confirm and
         // never repair. So the Run is ensured rather than assumed.
         SessionResolution::Existing { session, .. } => {
-            observe_fact(state, provider, session.id(), fact, observed_at);
+            observe_fact(state, provider, session.id(), fact, observed_at, &process);
             if has_live_run(state, session.id()).await? {
                 debug!(
                     session = %session.id(),
@@ -177,12 +177,17 @@ fn observe_fact(
     session: corral_core::CorralSessionId,
     fact: Option<crate::provider::AgentFactKind>,
     observed_at: SystemTime,
+    process: &crate::platform::process::ProcessIdentity,
 ) {
+    // The version the observed executable's installation carries, bound to
+    // this process only if that metadata predates it (grill Q12).
+    let version = crate::provider::version::installed_version(provider, &process.executable)
+        .and_then(|installed| installed.bound_to(process.started));
     let Some(claim) = fact.and_then(|fact| {
         crate::attention::hook_fact_claim(
             provider,
             fact,
-            None,
+            version.as_deref(),
             corral_core::Assurance::Attested,
             corral_core::Channel::ExternalRuntime,
         )
