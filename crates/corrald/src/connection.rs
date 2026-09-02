@@ -709,10 +709,18 @@ async fn attention_dispute(request: &Request, state: &Arc<DaemonState>) -> Frame
             );
         }
     };
-    let current = state
-        .with_runtime(|runtime| runtime.attention.state(session).and_then(|(_, item)| item))
-        .flatten()
-        .map(|item| item.id());
+    let (current, claims) = state
+        .with_runtime(|runtime| {
+            (
+                runtime.attention.state(session).and_then(|(_, item)| item),
+                runtime.attention.claims(session),
+            )
+        })
+        .unwrap_or_default();
+    let current = current.map(|item| item.id());
+    // What the disputed state rested on, for the person triaging the dispute
+    // later: the journal record names the item, the log names the evidence.
+    tracing::debug!(%session, ?claims, "an attention item was disputed");
     let (item, stale) = match (named, current) {
         (Some(named), Some(current)) => (Some(named), named != current),
         (Some(named), None) => (Some(named), true),

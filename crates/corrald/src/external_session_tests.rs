@@ -480,3 +480,36 @@ fn a_reused_pid_is_not_the_process_the_run_named() {
         RunEnd::Exited(corral_core::ExitCause::Unknown),
     );
 }
+
+/// A corroborated delivery's fact becomes a claim about the Session it was
+/// filed under: Attested association on an external runtime, sealed only if
+/// the observed executable's version is (ADR 0015 D3, grill Q12).
+#[tokio::test]
+async fn a_corroborated_fact_is_claimed_for_the_discovered_session() {
+    let registry = registry("claims");
+    discovered(
+        &registry.state,
+        KnownProvider::Claude,
+        identity("session-abc"),
+        reached(4321, at(500)),
+        at(900),
+        Some(crate::provider::AgentFactKind::TurnEnded),
+    )
+    .await
+    .expect("recorded");
+
+    let sessions = registry.state.sessions().await.expect("sessions");
+    let session = sessions.first().expect("one session").id();
+    let claims = registry
+        .state
+        .with_runtime(|runtime| runtime.attention.claims(session))
+        .expect("runtime");
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].source, corral_core::EvidenceSource::ProviderHook);
+    assert_eq!(claims[0].association, corral_core::Assurance::Attested);
+    assert_eq!(claims[0].channel, corral_core::Channel::ExternalRuntime);
+    assert_eq!(claims[0].asserts, corral_core::SemanticState::Ready);
+    // `/usr/local/bin/claude` is no shape this build reads a version from,
+    // so the claim is unsealed and asserts nothing.
+    assert_eq!(claims[0].sealing, corral_core::Sealing::Unsealed);
+}

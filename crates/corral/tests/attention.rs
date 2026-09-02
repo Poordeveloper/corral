@@ -57,3 +57,37 @@ fn acknowledging_a_session_without_an_item_says_so() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output).trim(), "Nothing to acknowledge.");
 }
+
+/// Activity is entitled by construction — bytes on a PTY Corral owns are the
+/// agent drawing, whatever version it is — so a managed session that keeps
+/// drawing reads Working with nothing sealed, and Exited once it ends.
+#[test]
+fn a_drawing_session_reads_working_and_an_ended_one_exited() {
+    let account = TestAccount::new("working-from-activity");
+    let started = run(account
+        .corral()
+        .args([
+            "new",
+            "--",
+            "sh",
+            "-c",
+            "for i in $(seq 1 40); do echo tick; sleep 0.2; done",
+        ])
+        .stdin(std::process::Stdio::null()));
+    let session = stderr(&started)
+        .lines()
+        .find_map(|line| line.strip_prefix("session "))
+        .map(str::trim)
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("no session id in: {}", stderr(&started)));
+
+    let listed = || stdout(&run(account.corral().arg("list")));
+    support::wait_until(support::SETTLE, || listed().contains("Working"));
+    support::wait_until(support::SETTLE * 3, || listed().contains("Exited"));
+
+    // The journal saw the transitions, and says so per day.
+    let report = stdout(&run(account.corral().args(["attention", "report"])));
+    assert!(report.contains("day"), "{report}");
+    assert!(!report.contains("INCOMPLETE"), "{report}");
+    let _ = session;
+}

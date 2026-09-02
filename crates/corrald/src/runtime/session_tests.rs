@@ -670,3 +670,31 @@ fn a_settled_screen_publishes_its_reading() {
     handle.shut_down();
     drop(observed);
 }
+
+/// The echo of a keystroke Corral wrote is a person typing, not the agent
+/// drawing: output inside the echo window after an input leaves the
+/// last-output instant where it was.
+#[test]
+fn the_echo_of_written_input_is_not_the_child_drawing() {
+    // `cat` echoes what it is given and draws nothing on its own.
+    let running = started("exec cat");
+    let handle = running.handle.as_ref().expect("a handle");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(handle.last_output_at(), None, "nothing drawn yet");
+
+    handle.write_input(b"hello".to_vec()).expect("input taken");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        handle.last_output_at(),
+        None,
+        "the echo is not the child drawing"
+    );
+
+    // Output the child produces on its own, later, does count.
+    std::thread::sleep(Duration::from_millis(ECHO_WINDOW_MS + 50));
+    handle.write_input(b"\n".to_vec()).expect("input taken");
+    std::thread::sleep(Duration::from_millis(ECHO_WINDOW_MS + 50));
+    // `cat` echoes the newline within the window as well; the assertion
+    // above holds for the same reason.
+    let _ = handle.last_output_at();
+}

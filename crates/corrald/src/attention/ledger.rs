@@ -171,6 +171,20 @@ impl Ledger {
         }
     }
 
+    /// The claims held for a Session, newest last. Diagnostics and tests;
+    /// derivation reads the ledger through `tick`.
+    #[must_use]
+    pub fn claims(&self, session: CorralSessionId) -> Vec<Claim> {
+        self.sessions
+            .get(&session)
+            .map(|tracked| {
+                let mut held = tracked.claims.clone();
+                held.sort_by_key(|observed| observed.ordinal);
+                held.into_iter().map(|observed| observed.claim).collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The last activity claim's instant, so the screen thread's publication
     /// is turned into a claim once per new byte and not once per tick.
     #[must_use]
