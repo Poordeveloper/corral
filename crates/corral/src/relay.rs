@@ -70,7 +70,13 @@ pub const INTERFERENCE_BUDGET: Duration = Duration::from_millis(50);
 /// place — which it does silently, as everything on this path does.
 pub struct Invocation {
     pub provider: String,
-    pub token: String,
+    /// The launch this entry belongs to, and `None` for a globally installed
+    /// entry that belongs to none (ADR 0014 D1).
+    ///
+    /// An empty `--token` reads as absent for the same reason a missing value
+    /// does: this program's whole way of failing is silence, and the daemon
+    /// is what refuses a delivery it cannot place.
+    pub token: Option<String>,
     pub payload: PayloadSource,
 }
 
@@ -146,9 +152,18 @@ pub fn invocation(arguments: impl IntoIterator<Item = OsString>) -> Option<Invoc
     };
     Some(Invocation {
         provider,
-        token,
+        token: (!token.is_empty()).then_some(token),
         payload,
     })
+}
+
+/// This process's parent, as the operating system reports it.
+///
+/// The provider process is up this chain, usually one shell away, and finding
+/// which one is the daemon's work. What the relay contributes is the starting
+/// point, which it can only read about itself.
+fn parent_pid() -> u32 {
+    std::os::unix::process::parent_id()
 }
 
 /// Deliver one hook event, and never do anything else.
@@ -185,6 +200,11 @@ pub fn deliver(invocation: &Invocation, started: Instant) -> ExitCode {
     ) else {
         return fail_open;
     };
+    // Two numbers the operating system already holds. The relay reports where
+    // it stood and never walks anywhere: the walk is the daemon's, because
+    // this process is short-lived by contract and has a budget to keep
+    // (ADR 0014 D2).
+    let delivery = delivery.observed_at(std::process::id(), parent_pid());
     // Two different failures, kept apart. A frame too large for the channel is
     // what the payload marker exists for; a delivery that will not encode at
     // all is a definite error to fail open on, and answering that one with the

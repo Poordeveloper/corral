@@ -154,7 +154,7 @@ async fn take_one(stream: UnixStream, deliveries: Deliveries) {
     let accepted = read_delivery(request.params);
 
     if let Some(delivered) = accepted.map(|delivery| Delivered {
-        token: delivery.token,
+        scope: delivery.scope,
         provider: delivery.provider,
         payload: delivery.payload,
         payload_omitted: delivery.payload_omitted,
@@ -167,10 +167,28 @@ async fn take_one(stream: UnixStream, deliveries: Deliveries) {
 
 /// A delivery this build can act on, or nothing.
 struct Accepted {
-    token: LaunchToken,
+    scope: DeliveryScope,
     provider: String,
     payload: Option<String>,
     payload_omitted: Option<String>,
+}
+
+/// Which integration a delivery arrived through.
+///
+/// The two are not degrees of the same thing. A managed delivery names one
+/// launch Corral made and resolves to it; an external delivery names no
+/// launch because the entry that produced it belongs to none, and everything
+/// it may claim is decided by corroboration rather than by the token it does
+/// not have (ADR 0014 D1).
+pub(crate) enum DeliveryScope {
+    Managed(LaunchToken),
+    External {
+        /// Where the relay process stood, when it could say. The daemon's
+        /// ancestry walk starts here; absent means this relay did not report
+        /// it, never that the process had no parent.
+        relay_pid: Option<u32>,
+        relay_parent_pid: Option<u32>,
+    },
 }
 
 fn read_delivery(params: Option<serde_json::Value>) -> Option<Accepted> {
@@ -195,16 +213,31 @@ fn read_delivery(params: Option<serde_json::Value>) -> Option<Accepted> {
         return None;
     }
 
-    let Some(token) = LaunchToken::from_wire(&delivery.launch_token) else {
-        debug!(
-            shim = %delivery.shim_version,
-            "a hook delivery carried no usable launch token",
-        );
-        return None;
+    // Absence and unusability are different facts and are answered
+    // differently. No token at all is the global scope — a globally installed
+    // entry outlives every launch and belongs to none. A token that is
+    // present and will not parse names a launch this build cannot read, and
+    // reading it as external would let a corrupt managed delivery quietly
+    // become an unowned session.
+    let scope = match &delivery.launch_token {
+        None => DeliveryScope::External {
+            relay_pid: delivery.relay_pid,
+            relay_parent_pid: delivery.relay_parent_pid,
+        },
+        Some(raw) => match LaunchToken::from_wire(raw) {
+            Some(token) => DeliveryScope::Managed(token),
+            None => {
+                debug!(
+                    shim = %delivery.shim_version,
+                    "a hook delivery carried a launch token this build cannot read",
+                );
+                return None;
+            }
+        },
     };
 
     Some(Accepted {
-        token,
+        scope,
         provider: delivery.provider,
         payload: delivery.payload,
         payload_omitted: delivery.payload_omitted,

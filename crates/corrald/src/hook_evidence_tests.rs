@@ -107,13 +107,15 @@ async fn a_run_ending_arrives_behind_the_events_that_run_delivered() {
 
 fn delivered() -> Delivered {
     Delivered {
-        token: crate::provider::LaunchTokens::new()
-            .mint(crate::provider::LaunchScope {
-                session: corral_core::CorralSessionId::mint(),
-                run: corral_core::RunId::mint(),
-                provider: crate::provider::KnownProvider::Claude,
-            })
-            .expect("a token"),
+        scope: crate::hook_endpoint::DeliveryScope::Managed(
+            crate::provider::LaunchTokens::new()
+                .mint(crate::provider::LaunchScope {
+                    session: corral_core::CorralSessionId::mint(),
+                    run: corral_core::RunId::mint(),
+                    provider: crate::provider::KnownProvider::Claude,
+                })
+                .expect("a token"),
+        ),
         provider: "claude".to_owned(),
         payload: Some("{}".to_owned()),
         payload_omitted: None,

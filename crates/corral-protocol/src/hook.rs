@@ -124,7 +124,20 @@ pub struct HookDelivery {
     pub hook_protocol_version: u32,
     /// The opaque token `corrald` minted into this launch's injected hook
     /// command line. Correlation evidence, never authorization (ADR 0004 D5).
-    pub launch_token: String,
+    ///
+    /// Absent is the global scope: a globally installed entry outlives every
+    /// launch and belongs to none, so there is no token to carry
+    /// (ADR 0014 D1). Absence is a fact about scope and never a token that
+    /// went missing — a delivery whose entry *does* carry one and whose token
+    /// is unusable still names a launch, and the daemon drops that rather
+    /// than reading it as external.
+    ///
+    /// Additive inside `hook_protocol_version 1`, and the skew is documented
+    /// both ways: an older daemon meeting a token-less delivery cannot decode
+    /// it and drops it with diagnostics, which is degraded awareness on a
+    /// mixed pair and never interference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_token: Option<String>,
     /// Which provider's ingress this is. The daemon dispatches interpretation
     /// on it and never guesses.
     pub provider: String,
@@ -142,6 +155,20 @@ pub struct HookDelivery {
     /// build had no word for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload_omitted: Option<String>,
+    /// The relay process's own pid, and its parent's.
+    ///
+    /// Read from the process itself, costing no parsing and nothing against
+    /// the relay's budget. They are where the daemon's ancestry walk starts
+    /// (ADR 0014 D2): the relay is forbidden the walk — it is short-lived and
+    /// poor by contract — so it reports where it stood and the daemon does
+    /// the looking.
+    ///
+    /// Absent means this relay did not report them, never that the process
+    /// had none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_parent_pid: Option<u32>,
 }
 
 /// The receipt, and the whole of it.
@@ -172,7 +199,7 @@ impl HookDelivery {
     /// nothing truthful to say about it.
     #[must_use]
     pub fn new(
-        launch_token: String,
+        launch_token: Option<String>,
         provider: String,
         shim_version: String,
         payload: &[u8],
@@ -195,7 +222,22 @@ impl HookDelivery {
             shim_version,
             payload,
             payload_omitted,
+            relay_pid: None,
+            relay_parent_pid: None,
         })
+    }
+
+    /// The same delivery, saying where the relay process stood.
+    ///
+    /// Separate from `new` because observing the process is the caller's to
+    /// do and the caller's to skip: a relay that cannot read its own pid
+    /// still delivers, and the daemon degrades the corroboration rather than
+    /// losing the event.
+    #[must_use]
+    pub fn observed_at(mut self, pid: u32, parent_pid: u32) -> Self {
+        self.relay_pid = Some(pid);
+        self.relay_parent_pid = Some(parent_pid);
+        self
     }
 
     /// The same delivery with its payload dropped and marked.
@@ -216,6 +258,8 @@ impl HookDelivery {
             shim_version: self.shim_version.clone(),
             payload: None,
             payload_omitted: Some(PAYLOAD_OMITTED_OVERSIZE.to_owned()),
+            relay_pid: self.relay_pid,
+            relay_parent_pid: self.relay_parent_pid,
         }
     }
 }

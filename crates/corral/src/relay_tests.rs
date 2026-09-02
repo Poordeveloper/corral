@@ -18,7 +18,10 @@ fn a_relay_invocation_is_recognised_without_a_parser() {
     .expect("a relay invocation");
 
     assert_eq!(read.provider, "claude");
-    assert_eq!(read.token, "0123456789abcdef0123456789abcdef");
+    assert_eq!(
+        read.token.as_deref(),
+        Some("0123456789abcdef0123456789abcdef")
+    );
 }
 
 /// Skew is normal: an injected settings file names an absolute path and
@@ -42,7 +45,7 @@ fn arguments_from_a_later_build_are_ignored_rather_than_refused() {
     .expect("a relay invocation");
 
     assert_eq!(read.provider, "claude");
-    assert_eq!(read.token, "abc");
+    assert_eq!(read.token.as_deref(), Some("abc"));
 }
 
 /// A flag whose value is missing leaves the field empty rather than eating the
@@ -53,7 +56,7 @@ fn a_flag_without_its_value_leaves_the_field_empty() {
     let read = invocation(arguments(&["hook-relay", "--provider"])).expect("a relay invocation");
 
     assert_eq!(read.provider, "");
-    assert_eq!(read.token, "");
+    assert_eq!(read.token, None);
 
     // Mid-argv, where the next word is another flag rather than the end. One
     // missing value must not consume the flag after it and take its value with
@@ -62,7 +65,7 @@ fn a_flag_without_its_value_leaves_the_field_empty() {
         .expect("a relay invocation");
 
     assert_eq!(read.provider, "");
-    assert_eq!(read.token, "abc");
+    assert_eq!(read.token.as_deref(), Some("abc"));
 }
 
 #[test]
@@ -112,7 +115,10 @@ fn an_argv_payload_is_the_final_argument_verbatim() {
     .expect("a relay invocation");
 
     assert_eq!(read.provider, "codex");
-    assert_eq!(read.token, "0123456789abcdef0123456789abcdef");
+    assert_eq!(
+        read.token.as_deref(),
+        Some("0123456789abcdef0123456789abcdef")
+    );
     match read.payload {
         PayloadSource::Argument(bytes) => assert_eq!(bytes, payload.as_bytes()),
         PayloadSource::Stdin => panic!("an argv payload was read as standard input"),
@@ -136,7 +142,7 @@ fn an_argv_payload_is_taken_from_the_end_of_the_invocation() {
     .expect("a relay invocation");
 
     assert_eq!(read.provider, "codex");
-    assert_eq!(read.token, "abc");
+    assert_eq!(read.token.as_deref(), Some("abc"));
     match read.payload {
         PayloadSource::Argument(bytes) => {
             assert_eq!(bytes, b"{\"type\":\"agent-turn-complete\"}");
@@ -171,4 +177,62 @@ fn a_declared_argv_payload_that_is_absent_is_not_sought_on_standard_input() {
         format!("{:?}", deliver(&read, Instant::now())),
         format!("{:?}", ExitCode::SUCCESS),
     );
+}
+
+// The global scope: an entry installed once, outliving every launch
+// (ADR 0014 D1).
+
+/// A globally installed entry names no launch, so the invocation carries no
+/// token. That is a fact about scope, not a token this build failed to read.
+#[test]
+fn a_global_entry_invokes_the_relay_with_no_token() {
+    let read = invocation(arguments(&[
+        "hook-relay",
+        "--provider",
+        "claude",
+        "--integration-version",
+        "1",
+    ]))
+    .expect("a relay invocation");
+
+    assert_eq!(read.provider, "claude");
+    assert_eq!(read.token, None);
+}
+
+/// The version discriminant is the merge engine's, and the relay ignores it by
+/// the same tolerance that lets an installed entry outlive the binary that
+/// wrote it (ADR 0013 D2).
+#[test]
+fn the_integration_version_is_not_something_the_relay_reads() {
+    let with_version = invocation(arguments(&[
+        "hook-relay",
+        "--provider",
+        "codex",
+        "--integration-version",
+        "97",
+        "--payload-argv",
+        "{}",
+    ]))
+    .expect("a relay invocation");
+
+    assert_eq!(with_version.provider, "codex");
+    assert_eq!(with_version.token, None);
+    assert!(matches!(with_version.payload, PayloadSource::Argument(_)));
+}
+
+/// An empty token reads as absent. A provider that expanded the flag's value
+/// to nothing must not produce a delivery claiming to name a launch it does
+/// not name.
+#[test]
+fn an_empty_token_is_the_global_scope_rather_than_a_launch() {
+    let read = invocation(arguments(&[
+        "hook-relay",
+        "--provider",
+        "claude",
+        "--token",
+        "",
+    ]))
+    .expect("a relay invocation");
+
+    assert_eq!(read.token, None);
 }
