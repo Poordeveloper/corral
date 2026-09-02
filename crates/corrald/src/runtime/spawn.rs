@@ -1,6 +1,9 @@
 //! Creating a managed process on a PTY, and the facts that creation yields.
 
+use std::collections::HashSet;
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use corral_core::ExitCause;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -117,7 +120,7 @@ pub enum SpawnError {
 pub struct SpawnedRuntime {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    process_id: Option<u32>,
+    owned: Arc<OwnedChild>,
 }
 
 /// The terminal half of a managed runtime: everything about the screen.
@@ -163,12 +166,59 @@ impl ChildGroup {
     }
 }
 
+/// A child this daemon created, for as long as it is still this daemon's:
+/// from the spawn until the reaper has waited.
+///
+/// Wider than `TeardownWindow` by exactly the wait. The window closes before
+/// it because signalling the group is unsafe from then on; but until the wait
+/// returns the child is still this daemon's — and still running, if it closed
+/// its terminal and kept going. The sweep reads the whole process table, and
+/// this is what keeps it from taking that child for a runtime outside Corral.
+#[derive(Debug)]
+pub struct OwnedChild {
+    group: Option<ChildGroup>,
+    reaped: AtomicBool,
+}
+
+impl OwnedChild {
+    /// The group this child leads, while it is still this daemon's.
+    pub fn group(&self) -> Option<ChildGroup> {
+        if self.reaped.load(Ordering::Acquire) {
+            None
+        } else {
+            self.group
+        }
+    }
+}
+
+/// Every child this daemon has created and not yet reaped.
+#[derive(Default)]
+pub struct OwnedChildren(Vec<Arc<OwnedChild>>);
+
+impl OwnedChildren {
+    pub fn register(&mut self, child: Arc<OwnedChild>) {
+        self.0.push(child);
+    }
+
+    /// The groups still this daemon's. A reaped child is forgotten on the
+    /// way past: its number may name something else by now.
+    pub fn groups(&mut self) -> HashSet<u32> {
+        self.0.retain(|child| child.group().is_some());
+        self.0
+            .iter()
+            .filter_map(|child| child.group())
+            .map(ChildGroup::as_pid)
+            .collect()
+    }
+}
+
 /// The process half: the one thing that can establish how a child ended.
 ///
 /// Separate because reaping blocks, and the thread that owns a screen must
 /// never block on a process that may outlive its terminal.
 pub struct ChildReaper {
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    owned: Arc<OwnedChild>,
 }
 
 /// Start a validated request on a new PTY.
@@ -208,22 +258,31 @@ pub fn spawn(request: &LaunchRequest, geometry: PtyGeometry) -> Result<SpawnedRu
     // child exits, so the reader would never see EOF.
     drop(pair.slave);
 
-    let process_id = child.process_id();
+    // A pid past i32 is not something this platform produces; refusing is
+    // better than signalling a number that means something else.
+    let group = child
+        .process_id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .map(ChildGroup);
     Ok(SpawnedRuntime {
         master: pair.master,
         child,
-        process_id,
+        owned: Arc::new(OwnedChild {
+            group,
+            reaped: AtomicBool::new(false),
+        }),
     })
 }
 
 impl SpawnedRuntime {
     /// The group this child leads, if Corral knows its pid.
     pub fn child_group(&self) -> Option<ChildGroup> {
-        // A pid past i32 is not something this platform produces; refusing is
-        // better than signalling a number that means something else.
-        self.process_id
-            .and_then(|pid| i32::try_from(pid).ok())
-            .map(ChildGroup)
+        self.owned.group
+    }
+
+    /// The child, as the daemon's own for as long as it is.
+    pub fn owned(&self) -> Arc<OwnedChild> {
+        Arc::clone(&self.owned)
     }
 
     /// Split the runtime so the screen and the child can be owned separately.
@@ -232,12 +291,15 @@ impl SpawnedRuntime {
             ManagedTerminal {
                 master: self.master,
             },
-            ChildReaper { child: self.child },
+            ChildReaper {
+                child: self.child,
+                owned: self.owned,
+            },
         )
     }
 
     pub fn process_id(&self) -> Option<u32> {
-        self.process_id
+        self.owned.group.map(ChildGroup::as_pid)
     }
 }
 
@@ -330,7 +392,11 @@ impl ChildReaper {
     /// crossing that line would make every consumer decide for itself what
     /// `137` means (`runtime/mod.rs`).
     pub fn wait(&mut self) -> io::Result<ExitCause> {
-        self.child.wait().map(|status| {
+        let waited = self.child.wait();
+        // However the wait came back, the daemon has no further claim on the
+        // number: it is not going to wait again (ADR 0007 L4).
+        self.owned.reaped.store(true, Ordering::Release);
+        waited.map(|status| {
             if status.signal().is_some() {
                 // Includes Corral's own hang-up. That a signal ended the child
                 // is a fact about the ending, not a claim about who sent it.
@@ -341,6 +407,11 @@ impl ChildReaper {
                 ExitCause::Failed
             }
         })
+    }
+
+    /// The child, as the daemon's own for as long as it is.
+    pub fn owned(&self) -> Arc<OwnedChild> {
+        Arc::clone(&self.owned)
     }
 }
 

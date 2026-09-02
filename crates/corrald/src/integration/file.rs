@@ -369,6 +369,13 @@ const BACKUP_DIR: &str = "integration-backups";
 
 /// Write the candidate beside the file and rename it into place.
 ///
+/// The temporary file is this publish's alone: a fresh name, opened
+/// exclusively. Two mutations of one file can be in flight at once, and a name
+/// they shared would let one rename the other's candidate into place and
+/// report success for bytes it never validated. With its own file each publish
+/// renames exactly what it wrote, and a name already taken is a refusal rather
+/// than a file to reuse.
+///
 /// The identity check sits between the temporary file and the rename, as late
 /// as it can: a provider that reserialized its own settings in that window
 /// published a file this operation never read, and renaming over it would
@@ -380,32 +387,25 @@ fn publish(path: &Path, candidate: &str, expected: Option<Identity>) -> Result<(
     std::fs::create_dir_all(directory).map_err(|error| Trigger::NotWritable {
         detail: error.to_string(),
     })?;
-    let partial = directory.join(format!(
-        ".{}.corral-partial",
-        path.file_name().map_or_else(
-            || "configuration".to_owned(),
-            |name| name.to_string_lossy().into_owned()
-        )
-    ));
+    let partial = partial_beside(path, directory)?;
 
     let mode = std::fs::metadata(path)
         .map(|data| data.permissions().mode() & 0o777)
         .unwrap_or(CREATED_MODE);
-    let written = std::fs::OpenOptions::new()
+    // A name that is already taken is someone else's file, and it is left
+    // alone: nothing of this publish exists on disk until the open succeeds.
+    let mut file = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(mode)
         .open(&partial)
-        .and_then(|mut file| {
-            file.write_all(candidate.as_bytes())?;
-            file.sync_all()
-        });
+        .map_err(not_writable)?;
+    let written = file
+        .write_all(candidate.as_bytes())
+        .and_then(|()| file.sync_all());
     if let Err(error) = written {
         let _ = std::fs::remove_file(&partial);
-        return Err(Trigger::NotWritable {
-            detail: error.to_string(),
-        });
+        return Err(not_writable(error));
     }
 
     if current_identity(path) != expected {
@@ -414,14 +414,50 @@ fn publish(path: &Path, candidate: &str, expected: Option<Identity>) -> Result<(
     }
     std::fs::rename(&partial, path).map_err(|error| {
         let _ = std::fs::remove_file(&partial);
-        Trigger::NotWritable {
-            detail: error.to_string(),
-        }
+        not_writable(error)
     })
+}
+
+/// A name in the file's directory for one publish's candidate, and no other's.
+fn partial_beside(path: &Path, directory: &Path) -> Result<PathBuf, Trigger> {
+    let mut nonce = [0_u8; 8];
+    getrandom::fill(&mut nonce).map_err(|error| Trigger::NotWritable {
+        detail: format!("no randomness to name a temporary file: {error}"),
+    })?;
+    let name = path.file_name().map_or_else(
+        || "configuration".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let nonce = nonce
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(directory.join(format!(".{name}.corral-partial-{nonce}")))
 }
 
 fn current_identity(path: &Path) -> Option<Identity> {
     std::fs::metadata(path).ok().map(|data| Identity::of(&data))
+}
+
+/// The temporary files a publish of this path would write beside it, for a
+/// test to count what a mutation left behind.
+#[cfg(test)]
+pub(super) fn partials_beside(path: &Path) -> Vec<PathBuf> {
+    let Some(directory) = path.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().contains(".corral-partial-"))
+        })
+        .collect()
 }
 
 /// The path a backup of this target would be written to, for a test to read.

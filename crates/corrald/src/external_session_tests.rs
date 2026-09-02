@@ -53,6 +53,7 @@ fn reached(pid: u32, started: SystemTime) -> Corroboration {
         process: Box::new(ProcessIdentity {
             pid,
             parent: 1,
+            group: pid,
             started,
             executable: PathBuf::from("/usr/local/bin/claude"),
         }),
@@ -243,6 +244,7 @@ async fn a_store_refusal_that_is_not_succession_reaches_the_caller() {
         &ProcessIdentity {
             pid: 4321,
             parent: 1,
+            group: 4321,
             started: at(500),
             executable: PathBuf::from("/usr/local/bin/claude"),
         },
@@ -269,6 +271,7 @@ async fn a_discovery_shows_the_runtime_under_its_session() {
     let process = ProcessIdentity {
         pid: 4321,
         parent: 1,
+        group: 4321,
         started: at(500),
         executable: PathBuf::from("/usr/local/bin/claude"),
     };
@@ -363,6 +366,7 @@ fn one_pid_at_two_start_times_is_two_incarnations() {
     let first = ProcessIdentity {
         pid: 4321,
         parent: 1,
+        group: 4321,
         started: at(500),
         executable: PathBuf::from("/usr/local/bin/claude"),
     };
@@ -456,6 +460,7 @@ fn a_reused_pid_is_not_the_process_the_run_named() {
         crate::platform::process::Observation::Identified(Box::new(ProcessIdentity {
             pid: 4321,
             parent: 1,
+            group: 4321,
             started: at(900),
             executable: PathBuf::from("/usr/bin/something-else"),
         }));

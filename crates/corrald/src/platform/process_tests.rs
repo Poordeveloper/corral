@@ -12,6 +12,10 @@ fn this_process_identifies_itself() {
 
     assert_eq!(identity.pid, std::process::id());
     assert_eq!(identity.parent, std::os::unix::process::parent_id());
+    assert_eq!(
+        identity.group,
+        rustix::process::getpgrp().as_raw_pid().unsigned_abs()
+    );
     assert!(identity.executable.is_absolute());
     assert!(
         identity.started <= SystemTime::now(),

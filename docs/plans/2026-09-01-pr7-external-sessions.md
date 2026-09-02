@@ -161,6 +161,29 @@ identified incarnation gone, the sweep ends the Run it names
 before, because a row that says running from an open Run nothing closes
 would be the stale-running claim the runtime-truth law forbids.
 
+The table holds only what runs *outside* Corral. A pass reads every
+provider process, including the ones this daemon launched, and those are
+excluded before the table absorbs the pass — by process group, not pid or
+ancestry: a managed child is its own group leader, what it spawns inherits
+the group (Codex's launcher hands off to a native child), and a launcher
+that exits would sever descent by parent. A child is Corral's from the
+spawn until the reaper has waited, which is wider than the teardown window
+on purpose — a runtime that closed its terminal but is still running is
+still Corral's — and is registered at the spawn, before its Run is
+durable, because a pass can meet the process in that window. The owned
+groups are sampled on both sides of a pass, so a child reaped mid-pass was
+Corral's when read. Consequence: a provider a person starts by hand inside
+a Corral-hosted shell has a job-control group of its own and is listed as
+running outside Corral, which is true.
+
+The integration writer serializes per provider: an enable, disable, or
+startup repair is intent recorded and then the file brought to it, held
+under one turn across the whole sequence, because the write's identity
+check cannot order two Corral writers — both pass it against the same
+original and the second rename discards the first. Each publish also
+writes a temporary file of its own name, opened exclusively, so no writer
+renames another's candidate into place.
+
 **8. CLI.** `corral integration status|enable|disable --provider
 claude|codex` over new RPC methods (daemon executes; ADR 0013 D1). Enable
 runs install and reports triggers honestly; disable runs uninstall and
@@ -295,13 +318,6 @@ disruption is a stop on the default-install shape.
 
 ## Follow-ups
 
-- The sweep recognizes every provider process on the table, including
-  the ones Corral itself launched, so on Linux a managed session's own
-  runtime also appears as an identity-less provisional row. Excluding
-  owned processes needs the sweep to know descent from this daemon (the
-  managed child is its own process group, and `ProcessIdentity` carries a
-  parent), which is a recognizer question the matrix has not measured.
-  Own task, before the dogfood A-window.
 - The full discovery coverage-audit harness (ROADMAP §9.2) beyond the
   matrix's host scenarios — release-gate machinery, own task.
 - Launch-time handshake ("not managed until a hook arrived") from the PR5

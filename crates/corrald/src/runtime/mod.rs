@@ -42,7 +42,7 @@ pub use snapshot::{
 };
 pub use spawn::{
     ChildReaper, ImpossibleGeometry, MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, ManagedTerminal,
-    PtyGeometry, SpawnError, SpawnedRuntime, TeardownWindow, spawn,
+    OwnedChild, OwnedChildren, PtyGeometry, SpawnError, SpawnedRuntime, TeardownWindow, spawn,
 };
 pub use stream::{
     Delivery, Desynchronised, SUBSCRIBER_QUEUE_BYTES, SUBSCRIBER_QUEUE_FRAMES, TerminalStream,

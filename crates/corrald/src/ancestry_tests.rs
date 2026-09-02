@@ -23,6 +23,7 @@ impl Tree {
             Observation::Identified(Box::new(ProcessIdentity {
                 pid,
                 parent,
+                group: pid,
                 started: SystemTime::UNIX_EPOCH,
                 executable: PathBuf::from(executable),
             })),

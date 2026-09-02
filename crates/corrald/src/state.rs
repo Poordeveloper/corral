@@ -18,7 +18,9 @@ use crate::hook_evidence::{Deliveries, Ingest};
 use crate::in_flight::InFlightCommands;
 use crate::policy;
 use crate::provider::{ReportedSessions, SharedLaunchTokens};
-use crate::runtime::{AttachTokens, Integrity, ManagedSessions, RunObservations, observe_runs};
+use crate::runtime::{
+    AttachTokens, Integrity, ManagedSessions, OwnedChildren, RunObservations, observe_runs,
+};
 
 /// How long a departing daemon waits for its last observed facts to land.
 ///
@@ -102,6 +104,10 @@ pub struct DaemonState {
     /// there (ADR 0014 D5).
     seen_runtimes: crate::sweep::SharedSeenRuntimes,
 
+    /// The per-provider turn to mutate a user's configuration, taken by every
+    /// operation that records intent and writes the file after it.
+    integration_turns: crate::integration::WriteTurns,
+
     /// Where the hook endpoint puts what it received, and the receiver the
     /// server hands to the one task that interprets it.
     deliveries: Deliveries,
@@ -133,6 +139,10 @@ pub struct DaemonState {
 #[derive(Default)]
 pub struct Runtime {
     pub sessions: ManagedSessions,
+    /// Every child this daemon spawned and has not reaped, registered at the
+    /// spawn rather than with the session: a sweep can meet the process
+    /// before its Run is durable and its handle is here.
+    pub owned: OwnedChildren,
     pub attach_tokens: AttachTokens,
     /// What providers have reported about those sessions. Live evidence: a
     /// restart loses it and the rows return to bare runtime truth
@@ -173,6 +183,7 @@ impl DaemonState {
             launch_dir: launch_dir.to_path_buf(),
             state_dir: state_dir.to_path_buf(),
             seen_runtimes: crate::sweep::SharedSeenRuntimes::new(),
+            integration_turns: crate::integration::WriteTurns::default(),
             deliveries,
             incoming: Mutex::new(Some(incoming)),
             resuming: Mutex::new(HashSet::new()),
@@ -350,6 +361,11 @@ impl DaemonState {
     /// The provider runtimes the sweep has found.
     pub fn seen_runtimes(&self) -> &crate::sweep::SharedSeenRuntimes {
         &self.seen_runtimes
+    }
+
+    /// The turn an integration operation takes before it writes.
+    pub fn integration_turns(&self) -> &crate::integration::WriteTurns {
+        &self.integration_turns
     }
 
     /// The bindings recorded against one Session.

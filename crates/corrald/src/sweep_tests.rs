@@ -13,6 +13,7 @@ fn candidate(pid: u32, started: u64, provider: KnownProvider) -> RuntimeCandidat
         process: ProcessIdentity {
             pid,
             parent: 1,
+            group: pid,
             started: at(started),
             executable: PathBuf::from("/usr/local/bin/claude"),
         },
@@ -263,5 +264,35 @@ fn a_runtime_keeps_its_row_identity_across_passes() {
     assert_eq!(
         seen.all().next().expect("the runtime").provisional_id(),
         shown_as,
+    );
+}
+
+/// A pass keeps only what is outside Corral. The daemon's own child is on the
+/// same table as every other provider process, and so is what it spawned —
+/// a launcher's native child runs in the launcher's group — while a provider
+/// in some other group is somebody else's however it is parented.
+#[test]
+fn a_pass_keeps_only_the_runtimes_outside_corral() {
+    let corrals_child = 500;
+    let mut own = candidate(corrals_child, 100, KnownProvider::Codex);
+    own.process.group = corrals_child;
+    let mut spawned_by_it = candidate(501, 101, KnownProvider::Codex);
+    spawned_by_it.process.parent = corrals_child;
+    spawned_by_it.process.group = corrals_child;
+    let mut somebody_elses = candidate(600, 100, KnownProvider::Claude);
+    somebody_elses.process.parent = corrals_child;
+    somebody_elses.process.group = 600;
+
+    let pass = read(vec![own, spawned_by_it, somebody_elses.clone()])
+        .outside(&HashSet::from([corrals_child]));
+
+    assert_eq!(
+        pass,
+        read(vec![somebody_elses]),
+        "the daemon's own group was not left out",
+    );
+    assert_eq!(
+        Pass::Unavailable.outside(&HashSet::from([corrals_child])),
+        Pass::Unavailable
     );
 }

@@ -112,6 +112,30 @@ pub enum Pass {
     Unavailable,
 }
 
+impl Pass {
+    /// This pass less the runtimes Corral is running itself.
+    ///
+    /// A managed child is a provider process on the same table as everyone
+    /// else's, and a pass that kept it would list the session a second time,
+    /// as a runtime outside Corral. What tells it apart is the process group
+    /// the daemon created it as: not its pid, because a launcher's native
+    /// child runs one hop below the pid Corral holds, and not its ancestry,
+    /// which a launcher that exits would sever.
+    #[must_use]
+    pub fn outside(self, owned_groups: &HashSet<u32>) -> Self {
+        match self {
+            Self::Read {
+                mut found,
+                uninspected,
+            } => {
+                found.retain(|candidate| !owned_groups.contains(&candidate.process.group));
+                Self::Read { found, uninspected }
+            }
+            Self::Unavailable => Self::Unavailable,
+        }
+    }
+}
+
 /// Read the process table once and recognize what is on it.
 ///
 /// Blocking, and the caller's job to keep off the reactor: a pass is a series
@@ -314,13 +338,16 @@ pub async fn sweep_until_shutdown(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     loop {
-        let pass = match tokio::task::spawn_blocking(once).await {
-            Ok(pass) => pass,
-            // The blocking pool is gone or the task panicked. Neither says
-            // anything about what is running, so neither retires a runtime.
-            Err(_) => Pass::Unavailable,
-        };
-        let changes = state.seen_runtimes().absorb(pass);
+        let changes = settle(&state, async {
+            match tokio::task::spawn_blocking(once).await {
+                Ok(pass) => pass,
+                // The blocking pool is gone or the task panicked. Neither
+                // says anything about what is running, so neither retires a
+                // runtime.
+                Err(_) => Pass::Unavailable,
+            }
+        })
+        .await;
         for candidate in &changes.appeared {
             tracing::info!(
                 provider = candidate.provider().as_str(),
@@ -343,4 +370,33 @@ pub async fn sweep_until_shutdown(
             () = tokio::time::sleep(crate::policy::SWEEP_CADENCE) => {}
         }
     }
+}
+
+/// Read the table, however the caller reads it, and fold in what is outside
+/// Corral.
+///
+/// The daemon's own children are sampled on both sides of the read. A child
+/// reaped while the table was being read was Corral's when the pass saw it,
+/// and only the sample taken before the read still says so; one that was
+/// spawned during the read is in the sample after it.
+pub async fn settle(
+    state: &Arc<crate::state::DaemonState>,
+    read: impl std::future::Future<Output = Pass>,
+) -> Changes {
+    let Some(mut owned) = owned_groups(state) else {
+        return Changes::default();
+    };
+    let pass = read.await;
+    let Some(after) = owned_groups(state) else {
+        return Changes::default();
+    };
+    owned.extend(after);
+    state.seen_runtimes().absorb(pass.outside(&owned))
+}
+
+/// `None` when the runtime cannot be asked. A daemon that cannot say which
+/// children are its own cannot tell them from the rest of the table, and a
+/// pass it cannot filter changes nothing.
+fn owned_groups(state: &crate::state::DaemonState) -> Option<HashSet<u32>> {
+    state.with_runtime(|runtime| runtime.owned.groups())
 }

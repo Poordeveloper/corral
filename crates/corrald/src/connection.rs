@@ -4,8 +4,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use corral_core::{
-    Command, CommandFingerprint, CommandId, CommandKind, CorralSessionId, IntegrationIntent,
-    ProviderId, RepairFingerprint, RepairableDrift, RunId,
+    Command, CommandFingerprint, CommandId, CommandKind, CorralSessionId, ProviderId, RunId,
 };
 
 use corral_protocol::method::{
@@ -652,10 +651,9 @@ async fn session_new(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
 /// `integration.disable`.
 ///
 /// The daemon performs the operation; a client never writes a provider's
-/// configuration itself (ADR 0013 D1). Enable records intent *before* it
-/// installs, so a refused merge still leaves a decision the user can act on —
-/// the file is evidence of what is installed and never the record of what was
-/// chosen (D5/D6).
+/// configuration itself (ADR 0013 D1). The sequence each operation is —
+/// intent recorded, then the file brought to it — lives with the one mutator,
+/// which is also what keeps two connections' operations from interleaving.
 async fn integration_request(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
     let id = request.id;
     let invalid = |detail: String| ProtocolError::new(ErrorCode::InvalidParams, detail);
@@ -716,33 +714,18 @@ async fn integration_request(request: &Request, state: &Arc<DaemonState>) -> Dis
             let (target, relay) = (target.clone(), relay.clone());
             integration::off_the_reactor(move || integration::status(&target, &relay)).await
         }
-        // Enabling is the explicit user action that re-arms repair: a breaker
-        // opened because something kept undoing Corral's integration stays
-        // open until the user says so, and this is them saying so (grill Q4′).
+        // Nothing is published on a store failure: the store can no longer
+        // vouch for the intent it was asked to record, and the daemon stops
+        // serving rather than answering from it (ADR 0002, Q14).
         method::INTEGRATION_ENABLE => {
-            match record_intent(state, provider, IntegrationIntent::Enabled, now).await {
-                Ok(()) => match restore_repair_authority(state, &target).await {
-                    Ok(()) => {
-                        let (target, relay) = (target.clone(), relay.clone());
-                        integration::off_the_reactor(move || {
-                            integration::install(&target, &relay, now, &state_dir)
-                        })
-                        .await
-                    }
-                    Err(error) => return Dispatch::FailClosed(error),
-                },
+            match integration::enable(state, target.clone(), relay.clone(), now, state_dir).await {
+                Ok(standing) => standing,
                 Err(error) => return Dispatch::FailClosed(error),
             }
         }
         method::INTEGRATION_DISABLE => {
-            match record_intent(state, provider, IntegrationIntent::Disabled, now).await {
-                Ok(()) => {
-                    let (target, relay) = (target.clone(), relay.clone());
-                    integration::off_the_reactor(move || {
-                        integration::uninstall(&target, &relay, now, &state_dir)
-                    })
-                    .await
-                }
+            match integration::disable(state, target.clone(), relay.clone(), now, state_dir).await {
+                Ok(standing) => standing,
                 Err(error) => return Dispatch::FailClosed(error),
             }
         }
@@ -775,47 +758,6 @@ async fn integration_request(request: &Request, state: &Arc<DaemonState>) -> Dis
         id,
         integration_wire_value(provider, &target, &standing),
     ))
-}
-
-/// Clear every repair breaker this file could have opened.
-///
-/// Both repairable drift classes, because the user's action is about the
-/// integration and not about whichever recurrence happened to trip first.
-/// Ownership conflict is deliberately not among them: it is never
-/// auto-repaired, so it never had a breaker to clear.
-async fn restore_repair_authority(
-    state: &Arc<DaemonState>,
-    target: &integration::Target,
-) -> Result<(), corral_state::StateError> {
-    let Ok(named) = ProviderId::new(target.provider().as_str()) else {
-        return Ok(());
-    };
-    for drift in [RepairableDrift::Missing, RepairableDrift::OldRepresentation] {
-        state
-            .restore_repair_authority(RepairFingerprint::new(
-                named.clone(),
-                target.config_target(),
-                drift,
-            ))
-            .await?;
-    }
-    Ok(())
-}
-
-async fn record_intent(
-    state: &Arc<DaemonState>,
-    provider: KnownProvider,
-    intent: IntegrationIntent,
-    now: SystemTime,
-) -> Result<(), corral_state::StateError> {
-    let Ok(named) = ProviderId::new(provider.as_str()) else {
-        // A name this build declares cannot fail the domain's own rule; if it
-        // ever did, the honest answer is to change nothing rather than record
-        // a decision under a name nothing else will match.
-        warn!("a provider name this build declares is not a usable provider id");
-        return Ok(());
-    };
-    state.set_integration_intent(named, intent, now).await
 }
 
 /// The answer when Corral cannot name itself or the file it would write.

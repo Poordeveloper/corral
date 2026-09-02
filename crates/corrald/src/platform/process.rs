@@ -24,6 +24,11 @@ use std::time::SystemTime;
 pub struct ProcessIdentity {
     pub pid: u32,
     pub parent: u32,
+    /// The process group, which is what says whether a process descends from
+    /// a Corral launch: a managed child is created as its own group leader,
+    /// and what it spawns inherits the group unless it asks for one of its
+    /// own. Descent by parent would not do — a launcher that exits severs it.
+    pub group: u32,
     /// When the kernel says this process began.
     ///
     /// Authoritative occurrence time: it comes from the runtime rather than
@@ -152,7 +157,9 @@ mod implementation {
         let Ok(executable) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
             return Observation::NotPermitted;
         };
-        let (Some(parent), Some(ticks)) = (fields.parent, fields.started_ticks) else {
+        let (Some(parent), Some(group), Some(ticks)) =
+            (fields.parent, fields.group, fields.started_ticks)
+        else {
             return Observation::NotPermitted;
         };
         let Some(boot) = boot_time() else {
@@ -161,6 +168,7 @@ mod implementation {
         Observation::Identified(Box::new(ProcessIdentity {
             pid,
             parent,
+            group,
             started: boot + Duration::from_millis(ticks * 1_000 / TICKS_PER_SECOND),
             executable,
         }))
@@ -168,6 +176,7 @@ mod implementation {
 
     struct StatFields {
         parent: Option<u32>,
+        group: Option<u32>,
         started_ticks: Option<u64>,
     }
 
@@ -182,6 +191,7 @@ mod implementation {
         // `rest[0]` is the state field, which `proc(5)` numbers 3.
         Some(StatFields {
             parent: rest.get(1).and_then(|raw| raw.parse().ok()),
+            group: rest.get(2).and_then(|raw| raw.parse().ok()),
             started_ticks: rest.get(19).and_then(|raw| raw.parse().ok()),
         })
     }

@@ -429,6 +429,124 @@ fn a_file_renamed_into_place_while_corral_writes_aborts_rather_than_clobbering()
     );
 }
 
+/// A publish writes only into a file it created. A temporary file another
+/// writer left beside the configuration — a publish that crashed, or one in
+/// flight — is neither written into nor renamed into place, so what lands is
+/// exactly the candidate this publish validated, and the other file is left
+/// for its owner.
+#[test]
+fn a_publish_writes_only_into_a_temporary_file_of_its_own() {
+    let scratch = Scratch::new("own-partial");
+    let target = scratch.target(KnownProvider::Claude);
+    scratch.seed(&target, A_USERS_CLAUDE_SETTINGS);
+    let directory = target.path().parent().expect("a directory");
+    let another_writers = [
+        directory.join(".settings.json.corral-partial"),
+        directory.join(".settings.json.corral-partial-0000000000000000"),
+    ];
+    for partial in &another_writers {
+        std::fs::write(partial, "not a candidate").expect("another writer's file");
+    }
+
+    let standing = install(
+        &target,
+        &relay(KnownProvider::Claude),
+        now(),
+        &scratch.state_dir(),
+    );
+
+    assert_eq!(standing, Standing::Installed);
+    for partial in &another_writers {
+        assert_eq!(
+            std::fs::read_to_string(partial).expect("the other writer's file is still there"),
+            "not a candidate"
+        );
+    }
+    assert_eq!(
+        file::partials_beside(target.path()),
+        vec![another_writers[1].clone()],
+        "the publish left nothing of its own behind"
+    );
+}
+
+/// Two operations on one provider in flight together — one connection
+/// enabling while another disables — end with the recorded intent and the
+/// file agreeing, and each reporting the standing it produced rather than a
+/// refusal over a file only Corral touched. The write's own identity check
+/// cannot provide this: both writers pass it against the same original, and
+/// the second rename discards the first while both report success.
+#[tokio::test]
+async fn operations_in_flight_together_leave_intent_and_file_agreeing() {
+    let scratch = Scratch::new("serialized");
+    let state = daemon_state(&scratch);
+    let target = scratch.target(KnownProvider::Claude);
+    scratch.seed(&target, A_USERS_CLAUDE_SETTINGS);
+    let relay = relay(KnownProvider::Claude);
+    let provider = ProviderId::new("claude").expect("a provider id");
+
+    for round in 0..6 {
+        let enabling = enable(
+            &state,
+            target.clone(),
+            relay.clone(),
+            now(),
+            scratch.state_dir(),
+        );
+        let disabling = disable(
+            &state,
+            target.clone(),
+            relay.clone(),
+            now(),
+            scratch.state_dir(),
+        );
+        // Alternating which is polled first, so both orders are exercised.
+        let (enabled, disabled) = if round % 2 == 0 {
+            tokio::join!(enabling, disabling)
+        } else {
+            let (disabled, enabled) = tokio::join!(disabling, enabling);
+            (enabled, disabled)
+        };
+
+        assert_eq!(
+            enabled.expect("the store"),
+            Some(Standing::Installed),
+            "round {round}"
+        );
+        assert_eq!(
+            disabled.expect("the store"),
+            Some(Standing::NotInstalled),
+            "round {round}"
+        );
+        let expected = match state
+            .integration_intent(provider.clone())
+            .await
+            .expect("the store")
+            .map(|recorded| recorded.intent())
+        {
+            Some(IntegrationIntent::Enabled) => Standing::Installed,
+            Some(IntegrationIntent::Disabled) => Standing::NotInstalled,
+            None => panic!("an operation ran without recording a decision"),
+        };
+        assert_eq!(status(&target, &relay), expected, "round {round}");
+        assert!(
+            file::partials_beside(target.path()).is_empty(),
+            "round {round} left a temporary file behind"
+        );
+    }
+}
+
+/// A daemon's state on this scratch, for the operations that record intent.
+fn daemon_state(scratch: &Scratch) -> Arc<DaemonState> {
+    Arc::new(
+        DaemonState::open(
+            &scratch.root.join("registry.sqlite3"),
+            &scratch.root.join("launch"),
+            &scratch.state_dir(),
+        )
+        .expect("open the registry"),
+    )
+}
+
 /// A dotfiles user's configuration is a link into a repository. Corral edits
 /// the file the link names and leaves the link as the user made it: a
 /// replacement that turned the link into a regular file would sever an

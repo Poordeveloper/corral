@@ -128,6 +128,7 @@ async fn an_external_runtime_is_listed_under_the_session_discovery_names() {
     let process = crate::platform::process::ProcessIdentity {
         pid: 4321,
         parent: 1,
+        group: 4321,
         started: std::time::UNIX_EPOCH + std::time::Duration::from_secs(500),
         executable: PathBuf::from("/usr/local/bin/claude"),
     };
@@ -174,6 +175,100 @@ async fn an_external_runtime_is_listed_under_the_session_discovery_names() {
         json!({"name": "claude", "external_id": "session-abc"})
     );
     assert_eq!(rows[0]["terminal_access"], "unavailable");
+}
+
+/// A session Corral launched is one row, whatever the sweep meets. Its
+/// process is on the same table as every provider outside Corral, and a pass
+/// that found it — as a pass on Linux does — must not list the session a
+/// second time as a runtime outside Corral, while a runtime in a group that
+/// is not Corral's is listed as before.
+#[tokio::test]
+async fn a_managed_runtime_the_sweep_finds_is_not_listed_a_second_time() {
+    let registry = Registry::new("owned-runtime");
+    let session = new_raw_session(&registry.state, &["/bin/sh", "-c", "sleep 30"]).await;
+    let owned = registry
+        .state
+        .with_runtime(|runtime| runtime.owned.groups())
+        .expect("the runtime");
+    assert_eq!(owned.len(), 1, "the launch registered its child");
+    let child = *owned.iter().next().expect("the child's group");
+
+    let as_the_sweep_sees_it = |pid: u32, group: u32| {
+        crate::sweep::RuntimeCandidate::recognized(
+            crate::provider::KnownProvider::Claude,
+            crate::platform::process::ProcessIdentity {
+                pid,
+                parent: std::process::id(),
+                group,
+                started: std::time::UNIX_EPOCH + std::time::Duration::from_secs(500),
+                executable: PathBuf::from("/usr/local/bin/claude"),
+            },
+        )
+    };
+    let changes = crate::sweep::settle(&registry.state, async {
+        crate::sweep::Pass::Read {
+            found: vec![as_the_sweep_sees_it(child, child)],
+            uninspected: Default::default(),
+        }
+    })
+    .await;
+
+    assert_eq!(changes, crate::sweep::Changes::default());
+    let rows = session_rows(&registry.state).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "the managed session was listed again: {rows:?}"
+    );
+    assert_eq!(rows[0]["session_id"], session);
+    assert_eq!(rows[0]["origin"], method::ORIGIN_MANAGED);
+
+    let changes = crate::sweep::settle(&registry.state, async {
+        crate::sweep::Pass::Read {
+            found: vec![
+                as_the_sweep_sees_it(child, child),
+                as_the_sweep_sees_it(child + 1, 1),
+            ],
+            uninspected: Default::default(),
+        }
+    })
+    .await;
+
+    assert_eq!(changes.appeared.len(), 1);
+    let rows = session_rows(&registry.state).await;
+    assert_eq!(rows.len(), 2, "a runtime outside Corral is still listed");
+
+    registry
+        .state
+        .with_runtime(|runtime| runtime.sessions.get(session.parse().expect("an id")))
+        .flatten()
+        .expect("the session")
+        .shut_down();
+}
+
+/// `session.new` for a plain command, answered with the Session it started.
+async fn new_raw_session(state: &Arc<DaemonState>, argv: &[&str]) -> String {
+    let Dispatch::Reply(Frame::Response(response)) = dispatch(
+        &request(
+            method::SESSION_NEW,
+            Some(json!({
+                "command_id": corral_core::CorralSessionId::mint().to_string(),
+                "argv": argv,
+            })),
+        ),
+        state,
+    )
+    .await
+    else {
+        panic!("expected a plain reply");
+    };
+    match response.outcome {
+        Outcome::Result(value) => value["session_id"]
+            .as_str()
+            .expect("a session id")
+            .to_owned(),
+        Outcome::Error(error) => panic!("expected a started session, got {error}"),
+    }
 }
 
 async fn session_rows(state: &Arc<DaemonState>) -> Vec<serde_json::Value> {

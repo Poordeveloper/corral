@@ -17,16 +17,45 @@ mod file;
 mod trigger;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use corral_core::{
-    ConfigTarget, IntegrationIntent, RepairAuthority, RepairFingerprint, RepairableDrift,
+    ConfigTarget, IntegrationIntent, ProviderId, RepairAuthority, RepairFingerprint,
+    RepairableDrift,
 };
+use corral_state::StateError;
 
 use crate::provider::KnownProvider;
 use crate::provider::launch::RelayInvocation;
+use crate::state::DaemonState;
 
 pub use trigger::Trigger;
+
+/// One mutation of a provider's configuration at a time.
+///
+/// An operation is a sequence — record what the user chose, then bring the
+/// file to it — and two sequences interleaved can leave the record saying one
+/// thing and the file another, each reporting success. The write's own
+/// identity check does not close that: two Corral writers read the same file,
+/// both pass the check, and the second rename discards the first. So the
+/// sequence is what is serialized, per provider, for as long as any operation
+/// that may write is in flight — an explicit enable or disable, and the repair
+/// a daemon start runs beside whatever its connections are doing.
+#[derive(Default)]
+pub struct WriteTurns {
+    claude: tokio::sync::Mutex<()>,
+    codex: tokio::sync::Mutex<()>,
+}
+
+impl WriteTurns {
+    async fn take(&self, provider: KnownProvider) -> tokio::sync::MutexGuard<'_, ()> {
+        match provider {
+            KnownProvider::Claude => self.claude.lock().await,
+            KnownProvider::Codex => self.codex.lock().await,
+        }
+    }
+}
 
 /// What one provider's integration looks like right now.
 ///
@@ -214,6 +243,83 @@ pub fn uninstall(
     }
 }
 
+/// Record that the user chose the integration, then install it.
+///
+/// Intent before the write, so a refused merge still leaves a decision the
+/// user can act on: the file is evidence of what is installed and never the
+/// record of what was chosen (D5/D6). Enabling is also the explicit user
+/// action that re-arms repair: a breaker opened because something kept
+/// undoing Corral's integration stays open until the user says so, and this
+/// is them saying so (grill Q4′).
+///
+/// `None` is an operation that did not run at all, which is not a standing.
+pub async fn enable(
+    state: &Arc<DaemonState>,
+    target: Target,
+    relay: RelayInvocation,
+    now: SystemTime,
+    state_dir: PathBuf,
+) -> Result<Option<Standing>, StateError> {
+    let _turn = state.integration_turns().take(target.provider()).await;
+    record_intent(state, target.provider(), IntegrationIntent::Enabled, now).await?;
+    restore_repair_authority(state, &target).await?;
+    Ok(off_the_reactor(move || install(&target, &relay, now, &state_dir)).await)
+}
+
+/// Record that the user withdrew the integration, then take it out.
+pub async fn disable(
+    state: &Arc<DaemonState>,
+    target: Target,
+    relay: RelayInvocation,
+    now: SystemTime,
+    state_dir: PathBuf,
+) -> Result<Option<Standing>, StateError> {
+    let _turn = state.integration_turns().take(target.provider()).await;
+    record_intent(state, target.provider(), IntegrationIntent::Disabled, now).await?;
+    Ok(off_the_reactor(move || uninstall(&target, &relay, now, &state_dir)).await)
+}
+
+/// Clear every repair breaker this file could have opened.
+///
+/// Both repairable drift classes, because the user's action is about the
+/// integration and not about whichever recurrence happened to trip first.
+/// Ownership conflict is deliberately not among them: it is never
+/// auto-repaired, so it never had a breaker to clear.
+async fn restore_repair_authority(
+    state: &Arc<DaemonState>,
+    target: &Target,
+) -> Result<(), StateError> {
+    let Ok(named) = ProviderId::new(target.provider().as_str()) else {
+        return Ok(());
+    };
+    for drift in [RepairableDrift::Missing, RepairableDrift::OldRepresentation] {
+        state
+            .restore_repair_authority(RepairFingerprint::new(
+                named.clone(),
+                target.config_target(),
+                drift,
+            ))
+            .await?;
+    }
+    Ok(())
+}
+
+async fn record_intent(
+    state: &Arc<DaemonState>,
+    provider: KnownProvider,
+    intent: IntegrationIntent,
+    now: SystemTime,
+) -> Result<(), StateError> {
+    let Ok(named) = ProviderId::new(provider.as_str()) else {
+        // A name this build declares cannot fail the domain's own rule; if it
+        // ever did, the honest answer is to change nothing rather than record
+        // a decision under a name nothing else will match.
+        tracing::warn!("a provider name this build declares is not a usable provider id");
+        return Ok(());
+    };
+    state.set_integration_intent(named, intent, now).await
+}
+
 /// Bring drift back to what intent says should be installed, inside the
 /// authority that intent grants.
 ///
@@ -223,13 +329,14 @@ pub fn uninstall(
 /// is one Corral can prove it owns, and the repair budget for that exact
 /// drift is not spent.
 pub async fn repair(
-    state: &std::sync::Arc<crate::state::DaemonState>,
+    state: &Arc<DaemonState>,
     target: Target,
     relay: RelayInvocation,
     now: SystemTime,
     state_dir: PathBuf,
-) -> Result<Standing, corral_state::StateError> {
-    let provider = match corral_core::ProviderId::new(target.provider().as_str()) {
+) -> Result<Standing, StateError> {
+    let _turn = state.integration_turns().take(target.provider()).await;
+    let provider = match ProviderId::new(target.provider().as_str()) {
         Ok(provider) => provider,
         Err(error) => {
             tracing::warn!(%error, "a provider name this build declares is not a usable provider id");
@@ -283,7 +390,7 @@ pub async fn repair(
 /// Failure is reported and never fatal: a provider file Corral cannot repair
 /// costs awareness of that provider's sessions, and a daemon that refused to
 /// serve over it would cost the user everything else Corral does.
-pub async fn repair_at_startup(state: std::sync::Arc<crate::state::DaemonState>) {
+pub async fn repair_at_startup(state: Arc<DaemonState>) {
     let now = SystemTime::now();
     let state_dir = state.state_dir().to_path_buf();
     for provider in KnownProvider::ALL {
