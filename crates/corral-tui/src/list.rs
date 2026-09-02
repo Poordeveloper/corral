@@ -231,44 +231,53 @@ async fn show(
             }
         }
 
-        // The question, which a keystroke does not cancel. Abandoning one
+        // A question, which a keystroke does not cancel. Abandoning one
         // leaves the socket where its next read is the answer to a question
         // nobody is holding, and the connection has to be thrown away with it
         // — so the keys are answered while it is out, and it is waited for
-        // even by someone on their way to a session.
-        let answered = {
-            let mut question = std::pin::pin!(daemon.sessions());
-            loop {
-                tokio::select! {
-                    answered = &mut question => break answered,
-                    typed = keys.next() => match arriving(typed, &mut keyboard, keys, list) {
-                        Typed::Chose(chosen) => {
-                            // Waited out only when what comes next needs this
-                            // connection. Somebody leaving the surface does not,
-                            // and making them wait for an answer nobody will read
-                            // is the opposite of the point.
-                            if !matches!(chosen, Chosen::Quit) {
-                                let _ = question.await;
+        // even by someone on their way to a session. A macro rather than a
+        // helper because it returns from `show` on the person's behalf.
+        macro_rules! answered_while_typing {
+            ($question:expr) => {{
+                let mut question = std::pin::pin!($question);
+                loop {
+                    tokio::select! {
+                        answered = &mut question => break answered,
+                        typed = keys.next() => match arriving(typed, &mut keyboard, keys, list) {
+                            Typed::Chose(chosen) => {
+                                // Waited out only when what comes next needs
+                                // this connection. Somebody leaving the surface
+                                // does not, and making them wait for an answer
+                                // nobody will read is the opposite of the point.
+                                if !matches!(chosen, Chosen::Quit) {
+                                    let _ = question.await;
+                                }
+                                return Ok(chosen);
                             }
-                            return Ok(chosen);
+                            Typed::Closed => return Ok(Chosen::Quit),
+                            Typed::Handled => draw(screen, list)?,
+                        },
+                        () = tokio::time::sleep(ESCAPE_GRACE), if keyboard.undecided() => {
+                            settle(&mut keyboard, list);
+                            draw(screen, list)?;
                         }
-                        Typed::Closed => return Ok(Chosen::Quit),
-                        Typed::Handled => draw(screen, list)?,
-                    },
-                    () = tokio::time::sleep(ESCAPE_GRACE), if keyboard.undecided() => {
-                        settle(&mut keyboard, list);
-                        draw(screen, list)?;
                     }
                 }
-            }
-        };
+            }};
+        }
 
+        let answered = answered_while_typing!(daemon.sessions());
         list.take(answered.map(decode));
-        // A second question on the same poll. Its failure costs the counts and
-        // nothing else: the rows are already current.
-        let summary = daemon.summary().await.ok();
-        list.take_summary(summary);
         draw(screen, list)?;
+        // The counts, asked only of a daemon that just answered: one that did
+        // not will not answer this either, and a person must not wait out a
+        // second silence to be told about the first. Its own failure costs the
+        // counts and nothing else — the rows are already current.
+        if list.unanswered.is_none() {
+            let summary = answered_while_typing!(daemon.summary()).ok();
+            list.take_summary(summary);
+            draw(screen, list)?;
+        }
     }
 }
 
