@@ -387,7 +387,7 @@ fn back_up(target: &Target, bytes: &str, now: SystemTime, state_dir: &Path) -> R
         .map(|(moment, _)| moment.attempt + 1)
         .max()
         .unwrap_or(0);
-    let mut file = None;
+    let mut opened = None;
     for attempt in first..first.saturating_add(BACKUPS_PER_MOMENT) {
         let backup = directory.join(BackupMoment { stamp, attempt }.file_name(provider, &name));
         match std::fs::OpenOptions::new()
@@ -395,26 +395,39 @@ fn back_up(target: &Target, bytes: &str, now: SystemTime, state_dir: &Path) -> R
             .create_new(true)
             .open(&backup)
         {
-            Ok(opened) => {
-                file = Some(opened);
+            Ok(file) => {
+                opened = Some((backup, file));
                 break;
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(not_writable(error)),
         }
     }
-    let Some(mut file) = file else {
+    let Some((backup, mut file)) = opened else {
         return Err(Trigger::NotWritable {
             detail: format!(
                 "every backup name for this moment is taken: {provider}-{stamp}-{name}"
             ),
         });
     };
-    file.write_all(bytes.as_bytes()).map_err(not_writable)?;
+    // Durable before the overwrite it exists to survive: the bytes, and then
+    // the name, which syncing the file alone leaves unpromised. A copy that
+    // failed part-way is removed rather than left to be counted as whole by
+    // the next scan and retire a whole one in its place.
+    let durable = file
+        .write_all(bytes.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| std::fs::File::open(&directory)?.sync_all());
+    if let Err(error) = durable {
+        let _ = std::fs::remove_file(&backup);
+        return Err(not_writable(error));
+    }
 
     // A copy that will not go refuses the mutation: the bound is part of the
     // backup contract, and a state directory that will not give up a file is
-    // broken in a way to hear about before more is written into it.
+    // broken in a way to hear about before more is written into it. The
+    // removals are not synced — a copy that outlives a crash is over the
+    // bound until the next mutation, which is nothing to sync a directory for.
     if kept.len() >= BACKUPS_RETAINED {
         kept.sort();
         for (_, stale) in kept.drain(..kept.len() + 1 - BACKUPS_RETAINED) {
