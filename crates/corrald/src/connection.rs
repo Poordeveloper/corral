@@ -195,10 +195,16 @@ async fn bootstrap(
         // for the life of the process. Serving the method is not the question
         // a capability answers; whether the offer leads anywhere is. The bind
         // is attempted before the first hello, so the answer is known here.
-        capabilities: if state.hook_endpoint_was_bound() {
-            BTreeSet::from([capability::MANAGED_SESSIONS.to_owned()])
-        } else {
-            BTreeSet::new()
+        capabilities: {
+            // Unconditional: every session this daemon can see is derived
+            // over, whether or not it can start one, and a client that must
+            // decide whether to show a state at all asks here rather than
+            // discovering `method_not_found` in front of a person.
+            let mut capabilities = BTreeSet::from([capability::ATTENTION.to_owned()]);
+            if state.hook_endpoint_was_bound() {
+                capabilities.insert(capability::MANAGED_SESSIONS.to_owned());
+            }
+            capabilities
         },
         compatibility_result: verdict,
     };
