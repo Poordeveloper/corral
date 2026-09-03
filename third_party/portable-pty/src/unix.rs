@@ -30,16 +30,32 @@ fn openpty(size: PtySize) -> anyhow::Result<(UnixMasterPty, UnixSlavePty)> {
         ws_ypixel: size.pixel_height,
     };
 
-    let result = unsafe {
-        // BSDish systems may require mut pointers to some args
-        #[allow(clippy::unnecessary_mut_passed)]
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &mut size,
-        )
+    // CORRAL PATCH 2: one allocation at a time per process.
+    //
+    // `openpty`'s first step opens /dev/ptmx, and on macOS that step fails
+    // intermittently when threads of one process reach it at once — measured
+    // at up to 12 in 3200 allocations, with errnos that do not describe it
+    // (ENXIO, and a plain -6, which is not an errno). It is not exhaustion,
+    // and it is not the ptsname static buffer: the failure is in acquiring the
+    // master. Serializing within the process removes it; concurrency between
+    // processes never reproduced it. See CORRAL_PATCHES.md.
+    static ALLOCATING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let result = {
+        // Nothing in the section below unwinds, so a poisoned gate would mean
+        // a panic that cannot come from here; it is taken either way rather
+        // than turned into a failure to allocate.
+        let _one_at_a_time = ALLOCATING.lock().unwrap_or_else(|held| held.into_inner());
+        unsafe {
+            // BSDish systems may require mut pointers to some args
+            #[allow(clippy::unnecessary_mut_passed)]
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut size,
+            )
+        }
     };
 
     if result != 0 {

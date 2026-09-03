@@ -366,3 +366,51 @@ fn a_child_is_the_daemons_own_until_it_is_reaped() {
     assert_eq!(owned.group(), None);
     assert!(children.groups().is_empty(), "a reaped child is forgotten");
 }
+
+/// Allocating a PTY concurrently inside one process must not fail.
+///
+/// Unpatched, `libc::openpty`'s first step — `posix_openpt`, which opens
+/// `/dev/ptmx` — fails intermittently when threads of one process reach it at
+/// once, at rates that reached 8 in 1600 on the measured machine. It is not
+/// exhaustion: the peak here is one pty per thread. The daemon spawns sessions
+/// concurrently, so unpatched this is `corral new` telling a person the daemon
+/// could not allocate a pty, for a reason nothing about their request explains.
+///
+/// The failing errno is not usable evidence — `ENXIO` and a plain `-6`, which
+/// is not an errno — so the assertion is on the allocation succeeding, never
+/// on how it failed.
+#[test]
+fn ptys_allocated_at_once_are_all_allocated() {
+    const THREADS: usize = 32;
+    const EACH: usize = 100;
+
+    let ready = Arc::new(std::sync::Barrier::new(THREADS));
+    let threads: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let ready = Arc::clone(&ready);
+            std::thread::spawn(move || {
+                let mut failures = Vec::new();
+                ready.wait();
+                for _ in 0..EACH {
+                    match native_pty_system().openpty(GEOMETRY.to_pty_size()) {
+                        Ok(pair) => drop(pair),
+                        Err(error) => failures.push(error.to_string()),
+                    }
+                }
+                failures
+            })
+        })
+        .collect();
+    let failures: Vec<String> = threads
+        .into_iter()
+        .flat_map(|thread| thread.join().expect("the allocating thread"))
+        .collect();
+
+    assert!(
+        failures.is_empty(),
+        "{} of {} concurrent allocations failed: {:?}",
+        failures.len(),
+        THREADS * EACH,
+        &failures[..failures.len().min(3)]
+    );
+}
