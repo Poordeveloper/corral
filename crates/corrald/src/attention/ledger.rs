@@ -10,8 +10,7 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 use corral_core::{
-    AttentionItemId, AttentionReason, AttentionState, Claim, CorralSessionId, EvidenceSource,
-    MainState,
+    AttentionItemId, AttentionReason, AttentionState, Claim, CorralSessionId, MainState,
 };
 use corral_protocol::method::{AttentionCount, AttentionSummaryResult};
 
@@ -72,20 +71,32 @@ impl Ledger {
     /// Record one claim about a Session, as the next observation in the
     /// daemon's sequence.
     pub fn observe(&mut self, session: CorralSessionId, claim: Claim, observed_at: SystemTime) {
-        self.ordinal += 1;
-        let observed = Observed {
-            claim,
-            observed_at,
-            ordinal: self.ordinal,
-        };
+        let ordinal = self.ordinal + 1;
         let tracked = self
             .sessions
             .entry(session)
             .or_insert_with(|| Tracked::new(observed_at));
+        // A claim presented again without having been established again is the
+        // same fact, not a later one. The daemon polls its sources on a clock,
+        // and an unchanged reading taking a newer place in the sequence would
+        // let polling decide which claim contradicted which — the one thing
+        // the sequence exists to answer (grill Q3).
+        if tracked
+            .claims
+            .iter()
+            .any(|held| held.claim == claim && observed_at <= held.observed_at)
+        {
+            return;
+        }
         tracked.claims.retain(|held| {
             (held.claim.source, held.claim.asserts) != (claim.source, claim.asserts)
         });
-        tracked.claims.push(observed);
+        tracked.claims.push(Observed {
+            claim,
+            observed_at,
+            ordinal,
+        });
+        self.ordinal = ordinal;
     }
 
     /// Re-derive every Session at `now` and report what changed.
@@ -195,20 +206,6 @@ impl Ledger {
                 held.into_iter().map(|observed| observed.claim).collect()
             })
             .unwrap_or_default()
-    }
-
-    /// The last activity claim's instant, so the screen thread's publication
-    /// is turned into a claim once per new byte and not once per tick.
-    #[must_use]
-    pub fn last_activity(&self, session: CorralSessionId) -> Option<SystemTime> {
-        self.sessions.get(&session).and_then(|tracked| {
-            tracked
-                .claims
-                .iter()
-                .filter(|held| held.claim.source == EvidenceSource::PtyActivity)
-                .map(|held| held.observed_at)
-                .max()
-        })
     }
 }
 

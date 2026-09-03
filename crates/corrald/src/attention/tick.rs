@@ -30,16 +30,15 @@ pub fn tick_once(state: &Arc<DaemonState>, now: SystemTime) -> Vec<Change> {
                 let Some(drawn) = handle.last_output_at() else {
                     continue;
                 };
-                let already = runtime.attention.last_activity(session.session);
-                if already.is_none_or(|at| drawn > at) {
-                    activity.push((session.session, drawn));
-                }
+                activity.push((session.session, drawn));
             }
-            // Screen readings are re-observed every tick for as long as the
-            // screen thread still publishes them: a blocker that stays visible
-            // is always the newest claim (ADR 0015 D4). An unsealed reading is
-            // observed too and refused by entitlement, which is what makes it
-            // countable without making it a claim.
+            // Both sources are presented every tick, and the ledger keeps
+            // only what is actually newer: a screen that still supports its
+            // reading dates it forward and so stays the newest claim (ADR 0015
+            // D4), while one that has not been read again presents the same
+            // fact and changes nothing. An unsealed reading is presented too
+            // and refused by entitlement, which is what makes it countable
+            // without making it a claim.
             let mut readings = Vec::new();
             for session in runtime.sessions.describe() {
                 let Some(handle) = runtime.sessions.get(session.session) else {

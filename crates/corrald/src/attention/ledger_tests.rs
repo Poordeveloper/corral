@@ -310,3 +310,37 @@ fn activity_after_a_cleared_blocker_is_working_not_a_revived_blocker() {
         MainState::Working
     );
 }
+
+/// Polling is not evidence. The tick re-presents whatever the screen last
+/// published once a second, so a reading the screen has not re-evaluated
+/// arrives again as the same fact at the same instant. It must not take a
+/// newer place in the causal order, because "newest" is what decides which
+/// claim contradicted which (grill Q3), and a poll that outranked a hook
+/// would let a screen reading contradict evidence that arrived after it.
+#[test]
+fn re_presenting_an_unchanged_reading_does_not_make_it_newer() {
+    let mut ledger = Ledger::new(Horizons::default());
+    let session = CorralSessionId::mint();
+    let screen_ready = Claim {
+        source: EvidenceSource::ScreenDetection,
+        ..hook(SemanticState::Ready)
+    };
+    ledger.observe(session, screen_ready, later(1));
+    ledger.observe(session, hook(SemanticState::NeedsYou), later(2));
+    ledger.observe(session, screen_ready, later(1));
+    ledger.tick(later(3), running);
+    assert_eq!(
+        ledger.state(session).expect("tracked").0.main(),
+        MainState::NeedsYou,
+        "the hook arrived after the reading and nothing has contradicted it"
+    );
+
+    // Past the screen's horizon the reading is not even fresh, while the hook
+    // has five minutes left. A poll must not have quietly removed it.
+    ledger.observe(session, screen_ready, later(1));
+    ledger.tick(later(9), running);
+    assert_eq!(
+        ledger.state(session).expect("tracked").0.main(),
+        MainState::NeedsYou
+    );
+}
