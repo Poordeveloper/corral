@@ -615,6 +615,16 @@ semantic-capable rule exists merely because code preceded evidence.
 - Dogfood measurements the plan commits to recording: stale Needs You
   duration after native approval; how often it is noticeable; whether
   later events clear it.
+- Eviction for the live tables that only grow: the ledger keeps a tracker
+  per Session it ever observed. It is small and it is not wrong; a daemon
+  alive for weeks still accumulates.
+- The screen thread wakes every settle interval even where no manifest is
+  attached and nothing was drawn since the last reading. Blocking until
+  there is something to read costs nothing and is what it did before.
+- `AttentionReason::RuntimeEnded` has no wire spelling, so the encoder
+  sends it as an unrecognized reason. Nothing mints such an item today —
+  an exit ends items rather than opening one — so the arm is unreachable;
+  it should become reachable or go.
 
 ## Grill status
 
