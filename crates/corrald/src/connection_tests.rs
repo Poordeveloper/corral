@@ -934,3 +934,37 @@ async fn a_history_row_is_listed_with_its_origin_and_recency() {
         "never the encoded name as a path"
     );
 }
+
+/// The refusals a read may meet, and the one thing that is not a refusal.
+///
+/// `Busy` in particular: the registry gate a request passes is not the read
+/// the decision makes, so another writer can take the store between them —
+/// and a transient condition answered as a fatal one ends the daemon for
+/// every session, not just the one asked about.
+#[test]
+fn a_store_refusal_a_read_meets_is_answered_and_only_a_fatal_one_is_not() {
+    use corral_state::{FatalState, Refusal, StateError};
+
+    let busy = refused_reading(StateError::Refused(Refusal::Busy {
+        detail: "database is locked".to_owned(),
+    }))
+    .expect("a refusal, not a fatal state");
+    assert_eq!(busy.code, ErrorCode::Busy);
+
+    // Every other refusal is about what was asked, not about the store.
+    let unknown = refused_reading(StateError::Refused(Refusal::UnknownSession(
+        corral_core::CorralSessionId::mint(),
+    )))
+    .expect("a refusal, not a fatal state");
+    assert_eq!(unknown.code, ErrorCode::InvalidParams);
+
+    // And a store that can no longer be trusted still ends the daemon, which
+    // is the case this must not have swallowed.
+    assert!(
+        refused_reading(StateError::Fatal(FatalState::SchemaVersionMismatch {
+            expected: 2,
+            found: Some(1),
+        }))
+        .is_err()
+    );
+}
