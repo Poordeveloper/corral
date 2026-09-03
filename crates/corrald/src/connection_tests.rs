@@ -670,3 +670,97 @@ async fn attention_report_refuses_a_since_that_is_not_a_day() {
     );
     assert!(value["days"].as_array().expect("days").is_empty());
 }
+
+/// A record the journal could not write is evidence that is gone, and the
+/// marker is the only thing that can say so. When that cannot be written
+/// either, no report of this journal may claim to be complete again: the
+/// smaller count it would answer is the silent incompleteness D8 forbids.
+#[tokio::test]
+async fn a_journal_that_lost_a_record_it_could_not_mark_refuses_to_report() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let registry = Registry::new("journal-unreportable");
+    let diagnostics = registry.directory.join("diagnostics");
+    let opened = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_788_350_400);
+    registry.state.attach_journal(
+        crate::attention::Journal::open(&diagnostics, crate::attention::Budget::default(), opened)
+            .expect("journal"),
+    );
+    assert!(!registry.state.journal_unreportable());
+
+    // Nothing can be created here any more: the next day's file cannot be
+    // opened, and neither can its marker.
+    std::fs::set_permissions(&diagnostics, PermissionsExt::from_mode(0o500)).expect("chmod");
+    registry.state.journal_append(
+        opened + std::time::Duration::from_secs(24 * 60 * 60),
+        vec![crate::attention::Record::Dispute(
+            crate::attention::DisputeRecord {
+                session: corral_core::CorralSessionId::mint(),
+                item: None,
+                stale: false,
+            },
+        )],
+    );
+    std::fs::set_permissions(&diagnostics, PermissionsExt::from_mode(0o700)).expect("restore");
+
+    assert!(
+        registry.state.journal_unreportable(),
+        "a lost record nobody could mark"
+    );
+    assert_eq!(
+        error_code(dispatch(&request(method::ATTENTION_REPORT, None), &registry.state).await).0,
+        ErrorCode::Busy
+    );
+}
+
+/// The scenario the marker exists for: a day is written, a later record
+/// cannot be, and the day must not go on reading as a complete count of what
+/// happened. The writer marks it, and the report says INCOMPLETE rather than
+/// answering the smaller number (ADR 0015 D8).
+#[tokio::test]
+async fn a_record_the_journal_could_not_write_makes_its_day_report_incomplete() {
+    let registry = Registry::new("journal-write-failed");
+    let diagnostics = registry.directory.join("diagnostics");
+    let opened = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_788_350_400);
+    registry.state.attach_journal(
+        crate::attention::Journal::open(&diagnostics, crate::attention::Budget::default(), opened)
+            .expect("journal"),
+    );
+    let dispute = || {
+        vec![crate::attention::Record::Dispute(
+            crate::attention::DisputeRecord {
+                session: corral_core::CorralSessionId::mint(),
+                item: None,
+                stale: false,
+            },
+        )]
+    };
+    registry.state.journal_append(opened, dispute());
+
+    // A stale entry the daily prune cannot remove: the next day's rollover
+    // fails before the record reaches the file. The directory itself stays
+    // writable, so the marker can still be written.
+    std::fs::create_dir(diagnostics.join("attention-journal-2020-01-01.incomplete"))
+        .expect("a stale entry prune will choke on");
+    let next_day = opened + std::time::Duration::from_secs(24 * 60 * 60);
+    registry.state.journal_append(next_day, dispute());
+
+    assert!(
+        !registry.state.journal_unreportable(),
+        "the marker was written, so reporting still answers"
+    );
+    let value =
+        result_value(dispatch(&request(method::ATTENTION_REPORT, None), &registry.state).await);
+    let days = value["days"].as_array().expect("days");
+    let written = days
+        .iter()
+        .find(|day| day["disputes"] == 1)
+        .expect("the day that was written");
+    assert_eq!(written["incomplete"], false);
+    let lost = days
+        .iter()
+        .find(|day| day["incomplete"] == true && day["date"] != "2020-01-01")
+        .expect("the day whose record was lost");
+    assert_ne!(lost["date"], written["date"], "the day after");
+    assert_eq!(lost["disputes"], 0, "the record never reached the file");
+}

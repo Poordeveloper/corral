@@ -328,3 +328,19 @@ fn a_record_the_reader_cannot_place_makes_its_day_incomplete() {
         );
     }
 }
+
+/// A record that could not be written leaves no file behind, so the marker is
+/// the only thing on disk saying the day existed. Reporting only the days that
+/// have files would drop exactly the day the marker exists to name.
+#[test]
+fn a_day_that_is_only_a_marker_is_reported_and_incomplete() {
+    let dir = scratch();
+    let mut journal = Journal::open(&dir, Budget::default(), noon()).expect("open");
+    journal.mark_incomplete(noon()).expect("the marker");
+
+    let report = report(&dir).expect("report");
+    let day = report.days.first().expect("a day");
+    assert_eq!(day.date, "2026-09-02");
+    assert_eq!(day.transitions, 0);
+    assert!(day.incomplete, "a day nothing could be written to");
+}

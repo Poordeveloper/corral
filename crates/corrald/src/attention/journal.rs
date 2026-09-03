@@ -157,12 +157,30 @@ impl Journal {
             // The budget is met by refusing, never by rotating earlier
             // records away: the marker says the day's evidence is partial.
             day.incomplete = true;
-            std::fs::write(self.dir.join(file_name(date, INCOMPLETE_SUFFIX)), b"")?;
+            write_marker(&self.dir, date)?;
             return Ok(Appended::Incomplete);
         }
         day.file.write_all(line.as_bytes())?;
         day.written += line.len() as u64;
         Ok(Appended::Written)
+    }
+
+    /// Say that this day's evidence is partial, whatever made it so.
+    ///
+    /// The budget marks its own day on the way past; this is for the caller
+    /// that could not write a record at all, where nothing else would be left
+    /// on disk to say a record is missing. The marker's own failure is
+    /// returned rather than logged, because a day nobody could mark is a day
+    /// no report can describe honestly (ADR 0015 D8).
+    pub fn mark_incomplete(&mut self, now: SystemTime) -> std::io::Result<()> {
+        let date = CivilDate::of(now);
+        write_marker(&self.dir, date)?;
+        if let Some(day) = self.day.as_mut()
+            && day.date == date
+        {
+            day.incomplete = true;
+        }
+        Ok(())
     }
 
     /// Remove every day past retention, marker included.
@@ -352,6 +370,10 @@ pub fn names_a_day(text: &str) -> bool {
         && CivilDate::parse(text).is_some_and(|date| date.is_real() && date.to_string() == text)
 }
 
+fn write_marker(dir: &Path, date: CivilDate) -> std::io::Result<()> {
+    std::fs::write(dir.join(file_name(date, INCOMPLETE_SUFFIX)), b"")
+}
+
 fn file_name(date: CivilDate, suffix: &str) -> String {
     format!("{FILE_PREFIX}{date}{suffix}")
 }
@@ -389,19 +411,29 @@ pub fn report(dir: &Path) -> std::io::Result<Report> {
     // An entry the directory cannot yield is a day that would simply not be
     // in the answer, with nothing saying so. The failure travels instead, as
     // it already does in `prune`.
-    let mut names: Vec<String> = Vec::new();
+    let mut dates: std::collections::BTreeSet<CivilDate> = std::collections::BTreeSet::new();
     for entry in std::fs::read_dir(dir)? {
         let name = entry?.file_name().to_string_lossy().into_owned();
-        if name.starts_with(FILE_PREFIX) && name.ends_with(FILE_SUFFIX) {
-            names.push(name);
+        if !name.starts_with(FILE_PREFIX) {
+            continue;
+        }
+        // A day can be a marker with no file behind it: the record that would
+        // have opened the file is the one that could not be written. Reporting
+        // only the days that have files would drop exactly the day the marker
+        // exists to name.
+        if (name.ends_with(FILE_SUFFIX) || name.ends_with(INCOMPLETE_SUFFIX))
+            && let Some(date) = date_of_file(&name)
+        {
+            dates.insert(date);
         }
     }
-    names.sort();
-    for name in names {
-        let Some(date) = date_of_file(&name) else {
-            continue;
+    for date in dates {
+        let path = dir.join(file_name(date, FILE_SUFFIX));
+        let text = if path.exists() {
+            std::fs::read_to_string(&path)?
+        } else {
+            String::new()
         };
-        let text = std::fs::read_to_string(dir.join(&name))?;
         let mut day = DayReport {
             date: date.to_string(),
             transitions: 0,

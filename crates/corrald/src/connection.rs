@@ -656,6 +656,18 @@ async fn attention_report(request: &Request, state: &Arc<DaemonState>) -> Frame 
             ),
         );
     }
+    // A journal that lost a record with nothing on disk to say so can no
+    // longer answer for any day: the smaller count it would give is exactly
+    // the silent incompleteness D8 forbids.
+    if state.journal_unreportable() {
+        return Frame::error(
+            id,
+            ProtocolError::new(
+                ErrorCode::Busy,
+                "the attention journal lost a record it could not mark; reporting is refused",
+            ),
+        );
+    }
     let Some(dir) = state.journal_dir() else {
         return Frame::result(
             id,
