@@ -137,9 +137,13 @@ def hook_is(name):
     return lambda rec: hook_event_name(rec) == name
 
 def base_env():
+    # The updater is off because a provider that replaces itself mid-run makes
+    # the capture's version a guess: the first matrix run recorded Claude Code
+    # 2.1.258 and the updater had removed that binary by the next day.
     return {"PATH": "/root/.local/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
             "HOME": "/root", "TERM": "xterm-256color", "LANG": "C.UTF-8", "USER": "root",
-            "SHELL": "/bin/bash", "COLORTERM": "truecolor"}
+            "SHELL": "/bin/bash", "COLORTERM": "truecolor",
+            "DISABLE_AUTOUPDATER": "1"}
 
 CLAUDE_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
                       "Notification", "Stop", "SubagentStop", "PreCompact", "SessionEnd",
@@ -404,6 +408,107 @@ def x08_resume_picker(out):
     argv = ["codex", "resume"]
     r = Run(out, argv, "/root/proj", base_env(), 40, 120)
     r.sleep(3); r.quiet(1, 20); r.mark("resume_picker"); r.key("Esc"); r.sleep(1); r.key("CtrlC"); r.sleep(1); r.end(5)
+
+# ------------------------------------------- the scenarios the first run missed
+
+ERROR_SERVER = r"""
+import http.server, json
+class H(http.server.BaseHTTPRequestHandler):
+    def respond(self):
+        body = json.dumps({"type": "error", "error": {"type": "api_error",
+                           "message": "Internal server error"}}).encode()
+        self.send_response(500); self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body))); self.end_headers()
+        self.wfile.write(body)
+    do_POST = respond
+    do_GET = respond
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", 8787), H).serve_forever()
+"""
+
+@scenario
+def c13_compaction(out):
+    """Compaction itself, which C8 could not reach: its answer there was "Not
+    enough messages to compact", so this builds a conversation first."""
+    r = claude(out)
+    r.wait_for(READY, 90); r.mark("prompt_ready")
+    for i in range(6):
+        r.submit("List %d common English verbs, one per line, no commentary." % (20 + i))
+        r.wait_hook(hook_is("Stop"), 180); r.quiet(3, 60); r.mark("turn_%d_ready" % i)
+    r.submit("/compact"); r.mark("compact_submitted")
+    r.wait_hook(hook_is("PreCompact"), 60); r.mark("pre_compact_hook")
+    for i in range(12):
+        r.sleep(1.0); r.mark("compacting_%d" % i, last_output_ns=r.last_output_ns)
+    r.quiet(3, 240); r.mark("after_compact")
+    r.submit("Reply with exactly: ok"); r.wait_hook(hook_is("Stop"), 180)
+    r.quiet(3, 60); r.mark("ready_after_compact")
+    r.submit("/exit"); r.wait_hook(hook_is("SessionEnd"), 30); r.end()
+
+@scenario
+def c14_api_error_500(out):
+    """A turn the API refuses, inside an otherwise healthy session. The base URL
+    is a local server that answers every request 500, so no account request is
+    made and the screen is the one a person sees when a turn fails."""
+    settings, hooks_file = claude_settings(out)
+    server = subprocess.Popen([sys.executable, "-c", ERROR_SERVER])
+    try:
+        time.sleep(1)
+        env = base_env(); env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:8787"
+        r = Run(out, ["claude", "--model", "haiku", "--settings", settings],
+                "/root/proj", env, 40, 120, hooks_file)
+        r.wait_for(READY, 90); r.mark("prompt_ready"); r.quiet(2, 30); r.mark("idle_before_error")
+        r.submit("Reply with exactly: ok"); r.mark("submitted")
+        for i in range(15):
+            r.sleep(1.0); r.mark("after_submit_%d" % i, last_output_ns=r.last_output_ns)
+        r.quiet(5, 240); r.mark("error_settled")
+        r.sleep(30); r.mark("thirty_s_after_error", last_output_ns=r.last_output_ns)
+        r.submit("/exit"); r.sleep(3); r.end()
+    finally:
+        server.terminate()
+
+@scenario
+def c15_api_unreachable(out):
+    """The other failure a person meets: nothing answering at all."""
+    settings, hooks_file = claude_settings(out)
+    env = base_env(); env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:9"
+    r = Run(out, ["claude", "--model", "haiku", "--settings", settings],
+            "/root/proj", env, 40, 120, hooks_file)
+    r.wait_for(READY, 90); r.mark("prompt_ready")
+    r.submit("Reply with exactly: ok"); r.mark("submitted")
+    for i in range(15):
+        r.sleep(1.0); r.mark("after_submit_%d" % i, last_output_ns=r.last_output_ns)
+    r.quiet(5, 240); r.mark("error_settled")
+    r.submit("/exit"); r.sleep(3); r.end()
+
+@scenario
+def x09_slash_popup(out):
+    """The popup `/` opens, which X6 could not capture: it is also this
+    version's command inventory, and tells x10 whether /compact exists."""
+    r = codex(out)
+    r.wait_for(CODEX_READY, 120); r.sleep(1.5); r.quiet(2, 30); r.mark("prompt_ready")
+    r.send("/"); r.sleep(1.5); r.quiet(1, 20); r.mark("slash_popup")
+    r.send("com"); r.sleep(1.0); r.quiet(1, 20); r.mark("slash_popup_filtered")
+    r.key("Esc"); r.sleep(1); r.quiet(1, 15); r.mark("after_esc")
+    r.key("CtrlU"); r.sleep(0.5); r.quiet(1, 10); r.mark("cleared")
+    r.submit("/quit"); r.sleep(2); r.end()
+
+@scenario
+def x10_compaction(out):
+    """Codex compaction on its own line: X6's `/compact` was appended to a
+    paste and submitted as one message."""
+    r = codex(out)
+    r.wait_for(CODEX_READY, 120); r.sleep(1.5); r.quiet(2, 30); r.mark("prompt_ready")
+    for i in range(5):
+        r.submit("List %d common English verbs, one per line, no commentary." % (20 + i))
+        r.wait_hook(notify_is("agent-turn-complete"), 240); r.quiet(3, 60); r.mark("turn_%d_ready" % i)
+    r.submit("/compact"); r.mark("compact_submitted")
+    for i in range(15):
+        r.sleep(1.0); r.mark("compacting_%d" % i, last_output_ns=r.last_output_ns)
+    r.quiet(3, 240); r.mark("after_compact")
+    r.submit("Reply with exactly: ok")
+    r.wait_hook(notify_is("agent-turn-complete"), 240); r.quiet(3, 60); r.mark("ready_after_compact")
+    r.submit("/quit"); r.sleep(2); r.end()
+
 
 if __name__ == "__main__":
     name = sys.argv[1]; root = sys.argv[2] if len(sys.argv) > 2 else "/matrix/out"

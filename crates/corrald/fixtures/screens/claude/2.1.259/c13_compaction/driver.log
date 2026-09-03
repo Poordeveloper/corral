@@ -1,0 +1,44 @@
+1149374 mark resize
+1181372 started pid=1385326
+809370989 wait_for '❯|manual mode on|auto mode on' matched at +799
+809443338 mark prompt_ready
+5045615415 wait_hook matched record 2
+8074874931 mark quiet
+8074945352 mark turn_0_ready
+12136810817 wait_hook matched record 4
+15140843357 mark quiet
+15140875009 mark turn_1_ready
+19184343261 wait_hook matched record 6
+22188857473 mark quiet
+22188929436 mark turn_2_ready
+26403854998 wait_hook matched record 8
+29407840872 mark quiet
+29407872324 mark turn_3_ready
+33374029235 wait_hook matched record 10
+36377849166 mark quiet
+36377888343 mark turn_4_ready
+40488879970 wait_hook matched record 12
+43492870109 mark quiet
+43492897460 mark turn_5_ready
+43994094948 mark compact_submitted
+44072526046 wait_hook matched record 13
+44072578492 mark pre_compact_hook
+45072749060 mark compacting_0
+46072952560 mark compacting_1
+47073118241 mark compacting_2
+48073290618 mark compacting_3
+49073474912 mark compacting_4
+50073657787 mark compacting_5
+51073817262 mark compacting_6
+52073958484 mark compacting_7
+53074128504 mark compacting_8
+54074291206 mark compacting_9
+55074480552 mark compacting_10
+56074667177 mark compacting_11
+59076858815 mark quiet
+59076894396 mark after_compact
+61228199273 wait_hook matched record 17
+64231833503 mark quiet
+64231860953 mark ready_after_compact
+65073114354 wait_hook matched record 19
+65288517018 mark end

@@ -1,0 +1,33 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788408027051769589, "offset": 0}
+{"name": "prompt_ready", "t_ns": 1788408027860232759, "offset": 1440}
+{"quiet_s": 3, "last_output_ns": 1788408032122812944, "name": "quiet", "t_ns": 1788408035125640153, "offset": 10176}
+{"name": "turn_0_ready", "t_ns": 1788408035125766085, "offset": 10176}
+{"quiet_s": 3, "last_output_ns": 1788408039188836686, "name": "quiet", "t_ns": 1788408042191628754, "offset": 19672}
+{"name": "turn_1_ready", "t_ns": 1788408042191693528, "offset": 19672}
+{"quiet_s": 3, "last_output_ns": 1788408046237123551, "name": "quiet", "t_ns": 1788408049239637575, "offset": 28303}
+{"name": "turn_2_ready", "t_ns": 1788408049239722946, "offset": 28303}
+{"quiet_s": 3, "last_output_ns": 1788408053456399287, "name": "quiet", "t_ns": 1788408056458629632, "offset": 37040}
+{"name": "turn_3_ready", "t_ns": 1788408056458691446, "offset": 37040}
+{"quiet_s": 3, "last_output_ns": 1788408060426469138, "name": "quiet", "t_ns": 1788408063428635889, "offset": 46478}
+{"name": "turn_4_ready", "t_ns": 1788408063428704766, "offset": 46478}
+{"quiet_s": 3, "last_output_ns": 1788408067541362003, "name": "quiet", "t_ns": 1788408070543640441, "offset": 56557}
+{"name": "turn_5_ready", "t_ns": 1788408070543721562, "offset": 56557}
+{"name": "compact_submitted", "t_ns": 1788408071044899658, "offset": 73431}
+{"name": "pre_compact_hook", "t_ns": 1788408071123384082, "offset": 76492}
+{"last_output_ns": 1788408072030349589, "name": "compacting_0", "t_ns": 1788408072123542100, "offset": 77158}
+{"last_output_ns": 1788408073053850166, "name": "compacting_1", "t_ns": 1788408073123729410, "offset": 78747}
+{"last_output_ns": 1788408073950489647, "name": "compacting_2", "t_ns": 1788408074123910882, "offset": 79656}
+{"last_output_ns": 1788408075100912801, "name": "compacting_3", "t_ns": 1788408075124072374, "offset": 81129}
+{"last_output_ns": 1788408076114107332, "name": "compacting_4", "t_ns": 1788408076124256436, "offset": 82330}
+{"last_output_ns": 1788408077078774065, "name": "compacting_5", "t_ns": 1788408077124452548, "offset": 83403}
+{"last_output_ns": 1788408077985028366, "name": "compacting_6", "t_ns": 1788408078124615479, "offset": 84884}
+{"last_output_ns": 1788408079124072234, "name": "compacting_7", "t_ns": 1788408079124757740, "offset": 85864}
+{"last_output_ns": 1788408079850127363, "name": "compacting_8", "t_ns": 1788408080124919562, "offset": 89241}
+{"last_output_ns": 1788408079850127363, "name": "compacting_9", "t_ns": 1788408081125089333, "offset": 89241}
+{"last_output_ns": 1788408079850127363, "name": "compacting_10", "t_ns": 1788408082125264950, "offset": 89241}
+{"last_output_ns": 1788408079850127363, "name": "compacting_11", "t_ns": 1788408083125452875, "offset": 89241}
+{"quiet_s": 3, "last_output_ns": 1788408079850127363, "name": "quiet", "t_ns": 1788408086127635111, "offset": 89241}
+{"name": "after_compact", "t_ns": 1788408086127713137, "offset": 89241}
+{"quiet_s": 3, "last_output_ns": 1788408088280082491, "name": "quiet", "t_ns": 1788408091282620770, "offset": 93409}
+{"name": "ready_after_compact", "t_ns": 1788408091282686504, "offset": 93409}
+{"name": "end", "t_ns": 1788408092339302230, "offset": 105370}

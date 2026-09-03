@@ -1,0 +1,12 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788407221240623058, "offset": 0}
+{"quiet_s": 2, "last_output_ns": 1788407229488097486, "name": "quiet", "t_ns": 1788407232865644857, "offset": 7039}
+{"name": "prompt_ready", "t_ns": 1788407232865714793, "offset": 7039}
+{"quiet_s": 1, "last_output_ns": 1788407232887631137, "name": "quiet", "t_ns": 1788407235366623458, "offset": 7989}
+{"name": "slash_popup", "t_ns": 1788407235366682680, "offset": 7989}
+{"quiet_s": 1, "last_output_ns": 1788407235387929835, "name": "quiet", "t_ns": 1788407237367633067, "offset": 8314}
+{"name": "slash_popup_filtered", "t_ns": 1788407237367707522, "offset": 8314}
+{"quiet_s": 1, "last_output_ns": 1788407237369138230, "name": "quiet", "t_ns": 1788407239368634951, "offset": 8504}
+{"name": "after_esc", "t_ns": 1788407239368724053, "offset": 8504}
+{"quiet_s": 1, "last_output_ns": 1788407239370159481, "name": "quiet", "t_ns": 1788407240869649257, "offset": 8616}
+{"name": "cleared", "t_ns": 1788407240869723842, "offset": 8616}
+{"name": "end", "t_ns": 1788407241399134568, "offset": 10403}

@@ -449,6 +449,100 @@ esc start new · ctrl+c quit · …` — with an empty title, before any
 session exists. Nine sessions listed for `~/proj`, including two from
 14 hours earlier.
 
+## Second run, 2026-09-03: the scenarios the first run could not reach
+
+Four gaps in the run above — Claude compaction and API error, Codex's `/`
+popup and compaction — plus the version accident that came with them. The
+driver and the environment are the same; only `DISABLE_AUTOUPDATER=1` was
+added, for the reason the accident gives below.
+
+**Version drift, and what it costs.** Claude Code updated itself between the
+two runs and again *during* the first attempt at C14: that attempt drew
+`Claude Code v2.1.258` and ended with `✔ Update installed · Restart to
+update`, and the next scenario drew `v2.1.259`. The 2.1.258 binary is gone —
+the installer keeps `2.1.252`, `2.1.257`, `2.1.259` and removed the one every
+scenario above was measured on. So **C13–C15 are evidence about 2.1.259 and
+nothing else**, the first run's C1–C12 remain evidence about 2.1.258, and
+2.1.258 can no longer be re-measured here. The captures below were taken with
+the updater disabled.
+
+### C13 — compaction, actually exercised — **pass**
+
+C8 reached `/compact` and was told "Not enough messages to compact"; six
+turns first, and it compacts.
+
+- `PreCompact` fires with `trigger: "manual"`, then the screen shows
+  `✻ Compacting conversation…` under a spinner glyph.
+- The **OSC title carries the working spinner throughout**: `◐`/`◑`
+  alternating for about 8 s, then back to `✳`.
+- **No `Stop` fires for the compaction.** Seven `UserPromptSubmit` and seven
+  `Stop` across the whole capture — six turns plus the one after — and the
+  compaction sits between them with neither.
+- A second **`SessionStart` fires with `source: "compact"`, carrying the same
+  `session_id`**. A mid-session `SessionStart` is a compaction marker, not a
+  new session, and must not mint one or reset identity.
+- After: `✻ Conversation compacted (ctrl+o for history)` above the prompt,
+  and the next turn behaves normally.
+
+### C14 — a turn the API refuses — **pass, and it looks Ready**
+
+`ANTHROPIC_BASE_URL` pointed at a local server answering every request `500`,
+so no account request was made.
+
+```text
+● API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment.
+  If it persists, check your inference gateway (127.0.0.1:8787).
+
+✻ Cogitated for 2m 55s · done 3:59 AM
+```
+
+- The prompt bar and the mode bar come back exactly as they do after a
+  successful turn: `⏸ manual mode on · ? for shortcuts · ← for agents`. **A
+  failed turn's screen is a Ready screen with an error line in the
+  transcript.**
+- **No `Stop`, no `Notification`.** The whole capture is `SessionStart`,
+  `UserPromptSubmit`, `SessionEnd`. A hook-driven state that entered Working
+  on `UserPromptSubmit` has nothing to leave it with, and 30 s later the
+  screen has not changed.
+- The title stays `✳ Claude Code` — no spinner, no attention glyph.
+
+### C15 — nothing answering at all — **pass, same shape**
+
+`ANTHROPIC_BASE_URL` at a closed port. `● API Error: Connection refused — a
+firewall or proxy may be blocking it (ConnectionRefused)`, the same Ready-
+shaped screen, the same three hooks and no `Stop`.
+
+### X9 — the popup `/` opens — **pass**
+
+X6 could not capture it. `/` lists this version's whole command inventory;
+`/com` filters to `/compact  summarize conversation to prevent hitting the
+context limit`, which is how X10 knew the command exists.
+
+The inventory contains **`/approve  approve one retry of a recent auto-review
+denial`** — the word a naive approval rule would match, drawn by a popup
+nobody is being asked to answer. It is in the noise catalog.
+
+### X10 — Codex compaction — **pass**
+
+X6's `/compact` was swallowed by a preceding paste; on its own line after
+five turns it runs.
+
+- During: `• Working (1s • esc to interrupt)` in the transcript and the `⠋`
+  spinner in the OSC title, for about 3 s.
+- After: `• Context compacted`, and the composer returns to
+  `› Ask Codex to do anything`.
+- **No `agent-turn-complete` notify for the compaction**: six notifies for six
+  turns, none for the compaction between them.
+
+### What the two compactions agree on
+
+Neither provider treats compaction as a turn: no `Stop`, no
+`agent-turn-complete`. While it runs, the only positive signal is the
+provider's own spinner — in the OSC title on both, and in the transcript on
+Codex. An engine that derived Working from turn events alone would read a
+compacting session as idle, and one that derived it from PTY activity or the
+title spinner reads it correctly.
+
 ## Session stores, as the providers left them
 
 Measured on the container's own stores after the runs, file names and
@@ -534,7 +628,7 @@ Not sealed, and why:
 |---|---|
 | ADR 0015: Claude `Notification` types, blocked vs idle | measured: `permission_prompt` (6 s after the request), `idle_prompt` (60 s after `Stop`) |
 | ADR 0015: `PermissionRequest` exists, payload | measured: yes; `tool_name`, `tool_input`, `permission_suggestions` |
-| ADR 0015: screen shapes for the Needs You / Ready / Working / negative inventory | measured for every scenario the driver reached; compaction and API error not induced |
+| ADR 0015: screen shapes for the Needs You / Ready / Working / negative inventory | measured for every scenario, compaction and API error included (second run, 2.1.259) |
 | ADR 0015: Codex approval announcement, in-band | measured: title `Action Required` (focused or not); `tui.notifications` adds a bare BEL when unfocused, no OSC 9/777 |
 | ADR 0015: redraw-after-turn-end window | measured: 31 ms (Claude); 4 s of title-thread spinner (Codex) |
 | ADR 0015: late lifecycle events after `Stop` | measured: `SubagentStop` 2–6 s after every titled turn; background-task turns |

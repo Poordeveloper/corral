@@ -1,0 +1,104 @@
+{
+ "hooks": {
+  "SessionStart": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c12_api_error_500/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "UserPromptSubmit": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c12_api_error_500/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "PreToolUse": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c12_api_error_500/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "PostToolUse": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c12_api_error_500/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "Notification": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c12_api_error_500/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "Stop": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c12_api_error_500/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "SubagentStop": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c12_api_error_500/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "PreCompact": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c12_api_error_500/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "SessionEnd": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c12_api_error_500/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "PermissionRequest": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c12_api_error_500/hooks.jsonl"
+     }
+    ]
+   }
+  ]
+ }
+}

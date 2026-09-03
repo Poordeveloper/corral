@@ -1,0 +1,21 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788407509650731254, "offset": 0}
+{"name": "prompt_ready", "t_ns": 1788407510427086557, "offset": 1390}
+{"name": "submitted", "t_ns": 1788407511283156811, "offset": 2098}
+{"last_output_ns": 1788407512111179109, "name": "after_submit_0", "t_ns": 1788407512283329676, "offset": 3816}
+{"last_output_ns": 1788407513243976935, "name": "after_submit_1", "t_ns": 1788407513283511030, "offset": 4015}
+{"last_output_ns": 1788407514204154202, "name": "after_submit_2", "t_ns": 1788407514283700590, "offset": 4111}
+{"last_output_ns": 1788407515164293131, "name": "after_submit_3", "t_ns": 1788407515283902959, "offset": 4207}
+{"last_output_ns": 1788407516124364277, "name": "after_submit_4", "t_ns": 1788407516284071153, "offset": 4386}
+{"last_output_ns": 1788407517084522919, "name": "after_submit_5", "t_ns": 1788407517284266153, "offset": 4482}
+{"last_output_ns": 1788407518044671506, "name": "after_submit_6", "t_ns": 1788407518284433941, "offset": 4578}
+{"last_output_ns": 1788407519004794796, "name": "after_submit_7", "t_ns": 1788407519284625824, "offset": 4718}
+{"last_output_ns": 1788407519964882797, "name": "after_submit_8", "t_ns": 1788407520284789974, "offset": 4897}
+{"last_output_ns": 1788407520925029164, "name": "after_submit_9", "t_ns": 1788407521284998325, "offset": 4993}
+{"last_output_ns": 1788407521885219502, "name": "after_submit_10", "t_ns": 1788407522285174849, "offset": 5089}
+{"last_output_ns": 1788407522845341721, "name": "after_submit_11", "t_ns": 1788407523285346583, "offset": 5185}
+{"last_output_ns": 1788407523805433270, "name": "after_submit_12", "t_ns": 1788407524285548658, "offset": 5281}
+{"last_output_ns": 1788407524765489906, "name": "after_submit_13", "t_ns": 1788407525285735660, "offset": 5377}
+{"last_output_ns": 1788407525725736332, "name": "after_submit_14", "t_ns": 1788407526285910127, "offset": 5473}
+{"quiet_s": 5, "last_output_ns": 1788407696339608403, "name": "quiet", "t_ns": 1788407701344630673, "offset": 23142}
+{"name": "error_settled", "t_ns": 1788407701344703554, "offset": 23142}
+{"name": "end", "t_ns": 1788407702389198357, "offset": 35143}

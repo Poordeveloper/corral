@@ -1,0 +1,26 @@
+1205313 mark resize
+1239300 started pid=1384958
+788366105 wait_for '❯|manual mode on|auto mode on' matched at +799
+788428760 mark prompt_ready
+3068448700 mark quiet
+3068469408 mark idle_before_error
+3921640681 mark submitted
+4921815999 mark after_submit_0
+5921978923 mark after_submit_1
+6922151699 mark after_submit_2
+7922313907 mark after_submit_3
+8922442265 mark after_submit_4
+9922615668 mark after_submit_5
+10922813527 mark after_submit_6
+11923007607 mark after_submit_7
+12923174253 mark after_submit_8
+13923332672 mark after_submit_9
+14923509660 mark after_submit_10
+15923687157 mark after_submit_11
+16923875425 mark after_submit_12
+17924095429 mark after_submit_13
+18924259569 mark after_submit_14
+183990467371 mark quiet
+183990500617 mark error_settled
+213990675818 mark thirty_s_after_error
+214778515671 mark end

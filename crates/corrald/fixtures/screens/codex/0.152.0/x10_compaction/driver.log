@@ -1,0 +1,44 @@
+1081718 mark resize
+1103385 started pid=1385641
+120097327662 wait_for 'gpt-\\S+ (low|medium|high|minimal|xhigh)' TIMEOUT
+120097439359 mark timeout
+123599203337 mark quiet
+123599241361 mark prompt_ready
+367464794510 wait_hook TIMEOUT
+367464860589 mark hook_timeout
+370467238677 mark quiet
+370467280900 mark turn_0_ready
+375896256088 wait_hook matched record 0
+379405251438 mark quiet
+379405284088 mark turn_1_ready
+381162397265 wait_hook matched record 1
+386379203262 mark quiet
+386379232457 mark turn_2_ready
+388136248939 wait_hook matched record 2
+393125189049 mark quiet
+393125218457 mark turn_3_ready
+394882286439 wait_hook matched record 3
+400695189556 mark quiet
+400695228572 mark turn_4_ready
+401196338659 mark compact_submitted
+402196483238 mark compacting_0
+403196625295 mark compacting_1
+404196787802 mark compacting_2
+405196964248 mark compacting_3
+406197170940 mark compacting_4
+407197351788 mark compacting_5
+408197535915 mark compacting_6
+409197731002 mark compacting_7
+410197916511 mark compacting_8
+411198109860 mark compacting_9
+412198313832 mark compacting_10
+413198531780 mark compacting_11
+414198757419 mark compacting_12
+415198957398 mark compacting_13
+416199143253 mark compacting_14
+419202204227 mark quiet
+419202235278 mark after_compact
+420055183268 wait_hook matched record 4
+424371213626 mark quiet
+424371247178 mark ready_after_compact
+424895089612 mark end

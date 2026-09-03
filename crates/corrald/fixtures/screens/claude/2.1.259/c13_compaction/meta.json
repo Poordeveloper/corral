@@ -1,0 +1,23 @@
+{
+ "argv": [
+  "claude",
+  "--model",
+  "haiku",
+  "--settings",
+  "/matrix/out/c11_compaction/settings.json"
+ ],
+ "cwd": "/root/proj",
+ "rows": 40,
+ "cols": 120,
+ "t0_ns": 1788408027050839369,
+ "env": {
+  "COLORTERM": "truecolor",
+  "DISABLE_AUTOUPDATER": "1",
+  "HOME": "/root",
+  "LANG": "C.UTF-8",
+  "PATH": "/root/.local/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
+  "SHELL": "/bin/bash",
+  "TERM": "xterm-256color",
+  "USER": "root"
+ }
+}

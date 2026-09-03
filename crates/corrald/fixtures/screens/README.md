@@ -28,3 +28,10 @@ cargo run -p corrald --example replay_capture -- <scenario dir>
 Paths, session ids, and prompts inside are the container's, not a
 person's; the payloads are exactly what the providers wrote. A capture is
 evidence about the version in its path and nothing later (grill Q13).
+
+`claude/2.1.258/` is the first run, 2026-09-02. `claude/2.1.259/` is the
+second, 2026-09-03: the provider updated itself between them and removed
+the 2.1.258 binary, so those scenarios cannot be re-measured on the version
+that produced them, and neither directory speaks for the other. The second
+run's driver sets `DISABLE_AUTOUPDATER=1` so a capture's version is a fact
+rather than a guess.

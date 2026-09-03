@@ -1,0 +1,24 @@
+{
+ "argv": [
+  "claude",
+  "--model",
+  "haiku",
+  "--settings",
+  "/matrix/out/c12_api_error_500/settings.json"
+ ],
+ "cwd": "/root/proj",
+ "rows": 40,
+ "cols": 120,
+ "t0_ns": 1788407803759235538,
+ "env": {
+  "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787",
+  "COLORTERM": "truecolor",
+  "DISABLE_AUTOUPDATER": "1",
+  "HOME": "/root",
+  "LANG": "C.UTF-8",
+  "PATH": "/root/.local/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
+  "SHELL": "/bin/bash",
+  "TERM": "xterm-256color",
+  "USER": "root"
+ }
+}
