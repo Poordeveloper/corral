@@ -523,3 +523,69 @@ async fn a_dispute_is_journaled_and_reported() {
     assert_eq!(today["disputes"], 2);
     assert_eq!(today["incomplete"], false);
 }
+
+/// A discovered runtime a delivery has identified is a Session like any
+/// other: the daemon derives its attention from the same ledger and counts
+/// it in the same summary, so the row it is shown on carries that state.
+/// Counting a session in the heading while its row says nothing is one
+/// surface contradicting the other over the same fact.
+#[tokio::test]
+async fn an_identified_external_row_carries_the_state_the_daemon_derived() {
+    let registry = Registry::new("external-attention");
+    let process = crate::platform::process::ProcessIdentity {
+        pid: 5150,
+        parent: 1,
+        group: 5150,
+        started: std::time::UNIX_EPOCH + std::time::Duration::from_secs(500),
+        executable: PathBuf::from("/usr/local/bin/claude"),
+    };
+    let provisional = crate::sweep::RuntimeCandidate::recognized(
+        crate::provider::KnownProvider::Claude,
+        process.clone(),
+    );
+    registry
+        .state
+        .seen_runtimes()
+        .absorb(crate::sweep::Pass::Read {
+            found: vec![provisional],
+            uninspected: Default::default(),
+        });
+    let session = corral_core::CorralSessionId::mint();
+    registry.state.seen_runtimes().identify(
+        crate::provider::KnownProvider::Claude,
+        &process,
+        crate::sweep::Identified {
+            session,
+            external_id: corral_core::ExternalId::new("session-abc").expect("an identity"),
+            run: corral_core::RunId::mint(),
+        },
+    );
+
+    let now = std::time::SystemTime::now();
+    registry.state.with_runtime(|runtime| {
+        runtime.attention.observe(
+            session,
+            corral_core::Claim {
+                channel: corral_core::Channel::ExternalRuntime,
+                association: corral_core::Assurance::Attested,
+                ..sealed_hook(corral_core::SemanticState::NeedsYou)
+            },
+            now,
+        );
+        runtime
+            .attention
+            .tick(now, |_| crate::runtime::ExecutionState::Running);
+    });
+
+    let summary =
+        result_value(dispatch(&request(method::ATTENTION_SUMMARY, None), &registry.state).await);
+    assert_eq!(summary["needs_you"]["total"], 1, "the daemon counts it");
+
+    let rows = session_rows(&registry.state).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["session_id"], session.to_string());
+    assert_eq!(
+        rows[0]["attention"]["state"], "needs_you",
+        "the row the count is about says what it is"
+    );
+}

@@ -473,8 +473,15 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
     // provider has reported are two halves of one row, and reading them
     // separately would let a row claim an identity for a session the other
     // half no longer holds.
-    let Some(described) = state.with_runtime(|runtime| {
-        runtime
+    //
+    // The runtimes outside Corral are read from the sweep first and judged
+    // under the same lock, because a row the daemon derived attention for and
+    // the count that includes it are one fact seen twice: a heading that says
+    // one session needs you, over a row that says nothing, is the daemon
+    // contradicting itself.
+    let external = state.seen_runtimes().snapshot();
+    let Some((described, externally)) = state.with_runtime(|runtime| {
+        let described = runtime
             .sessions
             .describe()
             .into_iter()
@@ -483,7 +490,16 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
                 let attention = attention_facts(&runtime.attention, session.session);
                 (session, reported, attention)
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        let externally: Vec<Option<method::AttentionFacts>> = external
+            .iter()
+            .map(|candidate| {
+                candidate
+                    .identified()
+                    .and_then(|identified| attention_facts(&runtime.attention, identified.session))
+            })
+            .collect();
+        (described, externally)
     }) else {
         return Frame::error(
             id,
@@ -501,7 +517,12 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
     // started reports through its own channel; these are the ones the
     // process table showed or a token-less delivery corroborated, which is
     // exactly the session a person most needs reminding of (ADR 0014 D2).
-    sessions.extend(state.seen_runtimes().snapshot().iter().map(encode_external));
+    sessions.extend(
+        external
+            .iter()
+            .zip(externally)
+            .map(|(candidate, attention)| encode_external(candidate, attention)),
+    );
     match serde_json::to_value(SessionListResult { sessions }) {
         Ok(value) => Frame::result(id, value),
         Err(source) => Frame::error(
@@ -847,7 +868,10 @@ fn encode_session(
 /// Until then its `session_id` is the Corral identity minted for this
 /// runtime's incarnation, so the row is stable across passes without the pid
 /// ever becoming an identity.
-fn encode_external(candidate: &crate::sweep::RuntimeCandidate) -> serde_json::Value {
+fn encode_external(
+    candidate: &crate::sweep::RuntimeCandidate,
+    attention: Option<method::AttentionFacts>,
+) -> serde_json::Value {
     let identified = candidate.identified();
     serde_json::to_value(SessionListItem {
         session_id: identified
@@ -868,7 +892,10 @@ fn encode_external(candidate: &crate::sweep::RuntimeCandidate) -> serde_json::Va
         agent_event: None,
         origin: Some(method::ORIGIN_DISCOVERED.to_owned()),
         location_hint: None,
-        attention: None,
+        // Present exactly when the ledger holds a derivation for the Session
+        // this runtime was found to be carrying. A runtime nothing has named
+        // yet is no Session, and has nothing to be in a state about.
+        attention,
     })
     .unwrap_or_else(|_| serde_json::json!({}))
 }
