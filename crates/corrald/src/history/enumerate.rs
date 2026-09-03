@@ -104,6 +104,19 @@ pub fn sealed_here(provider: KnownProvider) -> bool {
     sealed
 }
 
+/// `sealed_here`, asked off the reactor.
+///
+/// The one way a task on the reactor asks: `corrald` runs a single reactor
+/// thread, so a slow `PATH` entry answered inline would stall every client
+/// request, hook delivery and timer with it. A question this daemon could not
+/// put fails closed, because an unanswered sealing question is not a sealed
+/// one.
+pub async fn sealed_now(provider: KnownProvider, sealed: fn(KnownProvider) -> bool) -> bool {
+    tokio::task::spawn_blocking(move || sealed(provider))
+        .await
+        .unwrap_or(false)
+}
+
 /// The store's recent sessions, newest first, one per identity.
 #[must_use]
 pub fn enumerate(

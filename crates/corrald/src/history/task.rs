@@ -8,7 +8,7 @@ use corral_core::ProviderId;
 use tokio::sync::watch;
 use tracing::{debug, warn};
 
-use super::{HistoryEntry, Recent, enumerate, sealed_here, store_root};
+use super::{HistoryEntry, Recent, enumerate, sealed_here, sealed_now, store_root};
 use crate::provider::KnownProvider;
 use crate::state::DaemonState;
 
@@ -27,7 +27,7 @@ pub async fn enumerate_once(state: &Arc<DaemonState>, now: SystemTime) {
 /// The decision is a parameter because it is the whole of what makes a store
 /// readable, and a test that cannot change it can only ever exercise this
 /// machine's installation.
-async fn pass(state: &Arc<DaemonState>, now: SystemTime, sealed: impl Fn(KnownProvider) -> bool) {
+async fn pass(state: &Arc<DaemonState>, now: SystemTime, sealed: fn(KnownProvider) -> bool) {
     let Some(home) = state.provider_home() else {
         return;
     };
@@ -38,7 +38,7 @@ async fn pass(state: &Arc<DaemonState>, now: SystemTime, sealed: impl Fn(KnownPr
         // 0016 D1). An install Corral cannot version is unsealed for the
         // same reason — not knowing which layout is on disk is not a
         // licence to assume the measured one.
-        if !sealed(provider) {
+        if !sealed_now(provider, sealed).await {
             // Retracted, not merely skipped. What a previous pass learned was
             // supported by the layout sealed at the version installed then;
             // an install that is no longer sealed takes that support away, and

@@ -1,6 +1,8 @@
 //! What a pass does when the store it read stops being readable evidence.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::thread::ThreadId;
 
 use super::*;
 use crate::continuation;
@@ -143,6 +145,41 @@ async fn a_row_is_refused_the_moment_its_provider_stops_being_sealed() {
             .expect("the runtime")
             .is_empty(),
         "and the row it refused is not still offered"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Where the sealing question was answered, recorded by the predicate itself.
+/// A `fn` pointer carries no captures, so the answer comes back here.
+static PROBED_ON: Mutex<Option<ThreadId>> = Mutex::new(None);
+
+fn sealed_recording_its_thread(_: KnownProvider) -> bool {
+    *PROBED_ON.lock().expect("the recorder") = Some(std::thread::current().id());
+    true
+}
+
+/// `corrald` runs one reactor thread, and resolving the installed version
+/// walks `PATH`, stats what it finds, canonicalizes it, and reads package
+/// metadata. Asked inline, every cadence, one slow mount on `PATH` would
+/// stall client requests, hook delivery and timers along with the refresh.
+///
+/// Asserted structurally rather than by timing: the question must be answered
+/// somewhere other than the thread the pass is running on.
+#[tokio::test]
+async fn a_pass_asks_about_the_install_off_the_reactor() {
+    let (state, directory) = daemon("off-reactor");
+    *PROBED_ON.lock().expect("the recorder") = None;
+
+    pass(&state, now(), sealed_recording_its_thread).await;
+
+    let probed = PROBED_ON
+        .lock()
+        .expect("the recorder")
+        .expect("it was asked");
+    assert_ne!(
+        probed,
+        std::thread::current().id(),
+        "the reactor thread waited on the filesystem"
     );
     let _ = std::fs::remove_dir_all(&directory);
 }

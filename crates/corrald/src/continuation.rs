@@ -183,7 +183,7 @@ pub(crate) async fn decide_with(
         // (ADR 0016), so a row learned under a sealed version is not a licence
         // to start an unmeasured one for the length of a cadence. The working
         // directory is rechecked on this path for the same reason.
-        if !sealed_now(provider, sealed).await {
+        if !history::sealed_now(provider, sealed).await {
             // Just learned, so said once rather than left for the pass: a row
             // this daemon has refused to act on has no business still being
             // listed as one it might.
@@ -217,16 +217,6 @@ pub(crate) async fn decide_with(
 /// asked for — the store holds no location, and both providers resume an id
 /// from anywhere and carry on there (ADR 0016, measured), so the directory is
 /// Corral's to be told and never to guess (Q35).
-/// Whether the installed provider is sealed, asked off the reactor: version
-/// resolution walks `PATH` and reads package metadata. A question this daemon
-/// could not put fails closed, because an unanswered sealing question is not
-/// a sealed one.
-async fn sealed_now(provider: KnownProvider, sealed: fn(KnownProvider) -> bool) -> bool {
-    tokio::task::spawn_blocking(move || sealed(provider))
-        .await
-        .unwrap_or(false)
-}
-
 fn history_row(
     session: CorralSessionId,
     row: &history::HistoryRow,
