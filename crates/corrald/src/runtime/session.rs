@@ -929,8 +929,6 @@ struct ScreenRules {
     version: Option<String>,
 }
 
-/// Evaluate the manifest against the screen as it stands and publish the
-/// result, or its absence.
 /// Nothing has been drawn since the reading was evaluated, so the screen still
 /// says what it said. Dating it forward is what keeps a claim from rotting
 /// under a dialog that is still there, and doing it only here is what stops a
@@ -944,6 +942,8 @@ fn date_reading_forward(published: &Published) {
     }
 }
 
+/// Evaluate the manifest against the screen as it stands and publish the
+/// result, or its absence.
 fn read_screen(
     terminal: &super::terminal::AuthoritativeTerminal,
     detect: Option<&ScreenRules>,
