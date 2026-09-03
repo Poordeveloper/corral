@@ -539,18 +539,15 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
 }
 
 fn attention_summary(id: RequestId, state: &Arc<DaemonState>) -> Frame {
-    let summary = state
-        .with_runtime(|runtime| runtime.attention.summary())
-        .unwrap_or(method::AttentionSummaryResult {
-            needs_you: method::AttentionCount {
-                total: 0,
-                unacknowledged: 0,
-            },
-            ready: method::AttentionCount {
-                total: 0,
-                unacknowledged: 0,
-            },
-        });
+    // A runtime nobody can read is not a runtime with nothing to say. Zeroes
+    // here would be Corral telling a person that nothing needs them on the
+    // strength of state nobody finished writing.
+    let Some(summary) = state.with_runtime(|runtime| runtime.attention.summary()) else {
+        return Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::Busy, "the runtime could not be consulted"),
+        );
+    };
     match serde_json::to_value(summary) {
         Ok(value) => Frame::result(id, value),
         Err(source) => Frame::error(
@@ -736,14 +733,20 @@ async fn attention_dispute(request: &Request, state: &Arc<DaemonState>) -> Frame
             );
         }
     };
-    let (current, claims) = state
-        .with_runtime(|runtime| {
-            (
-                runtime.attention.state(session).and_then(|(_, item)| item),
-                runtime.attention.claims(session),
-            )
-        })
-        .unwrap_or_default();
+    // Without the ledger there is no current item to compare the dispute
+    // against, and recording one anyway would enter "not stale" as a fact
+    // about an item nobody looked at.
+    let Some((current, claims)) = state.with_runtime(|runtime| {
+        (
+            runtime.attention.state(session).and_then(|(_, item)| item),
+            runtime.attention.claims(session),
+        )
+    }) else {
+        return Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::Busy, "the runtime could not be consulted"),
+        );
+    };
     let current = current.map(|item| item.id());
     // What the disputed state rested on, for the person triaging the dispute
     // later: the journal record names the item, the log names the evidence.

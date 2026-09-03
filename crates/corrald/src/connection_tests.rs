@@ -589,3 +589,43 @@ async fn an_identified_external_row_carries_the_state_the_daemon_derived() {
         "the row the count is about says what it is"
     );
 }
+
+/// A runtime that cannot be consulted is not a runtime with nothing to say.
+/// `attention.summary` answering zeroes would be Corral telling a person that
+/// nothing needs them on the strength of state nobody finished writing, which
+/// is the one direction an attention surface must never fail in.
+#[tokio::test]
+async fn attention_verbs_refuse_a_runtime_that_cannot_be_consulted() {
+    let registry = Registry::new("attention-poisoned");
+    let session = corral_core::CorralSessionId::mint();
+    let poisoning = Arc::clone(&registry.state);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        poisoning.with_runtime(|_| panic!("poison the runtime lock"));
+    }));
+
+    assert_eq!(
+        error_code(dispatch(&request(method::ATTENTION_SUMMARY, None), &registry.state).await).0,
+        ErrorCode::Busy
+    );
+    assert_eq!(
+        error_code(
+            dispatch(
+                &request(
+                    method::ATTENTION_DISPUTE,
+                    Some(serde_json::json!({ "session_id": session.to_string() })),
+                ),
+                &registry.state,
+            )
+            .await
+        )
+        .0,
+        ErrorCode::Busy
+    );
+    let journalled = registry
+        .state
+        .journal_dir()
+        .and_then(|dir| crate::attention::report(&dir).ok())
+        .map(|report| report.days.iter().map(|day| day.disputes).sum::<u64>())
+        .unwrap_or(0);
+    assert_eq!(journalled, 0, "a refused dispute records nothing");
+}
