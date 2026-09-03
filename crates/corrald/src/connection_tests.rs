@@ -363,7 +363,7 @@ fn sealed_hook(asserts: corral_core::SemanticState) -> corral_core::Claim {
 async fn attention_summary_counts_the_ledgers_items() {
     let registry = Registry::new("attention-summary");
     let session = corral_core::CorralSessionId::mint();
-    let now = std::time::SystemTime::now();
+    let now = crate::clock::Reading::now();
     registry.state.with_runtime(|runtime| {
         runtime.attention.observe(
             session,
@@ -387,7 +387,7 @@ async fn attention_summary_counts_the_ledgers_items() {
 async fn acknowledging_a_stale_item_is_refused_and_changes_nothing() {
     let registry = Registry::new("attention-ack-stale");
     let session = corral_core::CorralSessionId::mint();
-    let now = std::time::SystemTime::now();
+    let now = crate::clock::Reading::now();
     registry.state.with_runtime(|runtime| {
         runtime.attention.observe(
             session,
@@ -421,7 +421,7 @@ async fn acknowledging_a_stale_item_is_refused_and_changes_nothing() {
 async fn acknowledging_the_current_item_clears_it_from_the_badge() {
     let registry = Registry::new("attention-ack");
     let session = corral_core::CorralSessionId::mint();
-    let now = std::time::SystemTime::now();
+    let now = crate::clock::Reading::now();
     let item = registry
         .state
         .with_runtime(|runtime| {
@@ -463,10 +463,14 @@ async fn acknowledging_the_current_item_clears_it_from_the_badge() {
 async fn a_dispute_is_journaled_and_reported() {
     let registry = Registry::new("attention-dispute");
     let diagnostics = registry.directory.join("diagnostics");
-    let now = std::time::SystemTime::now();
+    let now = crate::clock::Reading::now();
     registry.state.attach_journal(
-        crate::attention::Journal::open(&diagnostics, crate::attention::Budget::default(), now)
-            .expect("journal"),
+        crate::attention::Journal::open(
+            &diagnostics,
+            crate::attention::Budget::default(),
+            now.wall,
+        )
+        .expect("journal"),
     );
     let session = corral_core::CorralSessionId::mint();
     let item = registry
@@ -561,7 +565,7 @@ async fn an_identified_external_row_carries_the_state_the_daemon_derived() {
         },
     );
 
-    let now = std::time::SystemTime::now();
+    let now = crate::clock::Reading::now();
     registry.state.with_runtime(|runtime| {
         runtime.attention.observe(
             session,
@@ -628,4 +632,41 @@ async fn attention_verbs_refuse_a_runtime_that_cannot_be_consulted() {
         .map(|report| report.days.iter().map(|day| day.disputes).sum::<u64>())
         .unwrap_or(0);
     assert_eq!(journalled, 0, "a refused dispute records nothing");
+}
+
+/// `since` is documented as a day and compared against the journal's own day
+/// names. A value in another shape would order against something it does not
+/// mean and answer a report that looks valid — on the surface this PR offers
+/// as its dogfood evidence.
+#[tokio::test]
+async fn attention_report_refuses_a_since_that_is_not_a_day() {
+    let registry = Registry::new("attention-report-since");
+    for bad in ["not-a-date", "2026-99-99", "2026-9-9", "2026-09"] {
+        assert_eq!(
+            error_code(
+                dispatch(
+                    &request(
+                        method::ATTENTION_REPORT,
+                        Some(serde_json::json!({ "since": bad })),
+                    ),
+                    &registry.state,
+                )
+                .await
+            )
+            .0,
+            ErrorCode::InvalidParams,
+            "{bad} is not a day the journal names"
+        );
+    }
+    let value = result_value(
+        dispatch(
+            &request(
+                method::ATTENTION_REPORT,
+                Some(serde_json::json!({ "since": "2026-09-02" })),
+            ),
+            &registry.state,
+        )
+        .await,
+    );
+    assert!(value["days"].as_array().expect("days").is_empty());
 }

@@ -50,7 +50,7 @@ pub async fn discovered(
     provider: KnownProvider,
     identity: ExternalId,
     corroboration: Corroboration,
-    observed_at: SystemTime,
+    observed_at: crate::clock::Reading,
     fact: Option<crate::provider::AgentFactKind>,
 ) -> Result<Option<Discovered>, StateError> {
     let Corroboration::Reached { process, .. } = corroboration else {
@@ -112,10 +112,10 @@ pub async fn discovered(
     let evidence = Evidence::new(
         EvidenceSource::ProviderHook,
         Assurance::Attested,
-        observed_at,
+        observed_at.wall,
     );
     let resolution = state
-        .resolve_or_create_session(key, Provenance::Discovered, evidence, observed_at)
+        .resolve_or_create_session(key, Provenance::Discovered, evidence, observed_at.wall)
         .await?;
 
     match resolution {
@@ -128,7 +128,7 @@ pub async fn discovered(
                 "a session running outside Corral is now visible",
             );
             if let RuntimeRecord::Run(run) =
-                record_run(state, session.id(), named, &process, observed_at).await?
+                record_run(state, session.id(), named, &process, observed_at.wall).await?
             {
                 shown_under(state, provider, &process, session.id(), identity, run);
             }
@@ -154,7 +154,7 @@ pub async fn discovered(
                 );
                 return Ok(Some(Discovered::AlreadyKnown));
             }
-            match record_run(state, session.id(), named, &process, observed_at).await? {
+            match record_run(state, session.id(), named, &process, observed_at.wall).await? {
                 RuntimeRecord::Run(run) => {
                     shown_under(state, provider, &process, session.id(), identity, run);
                     Ok(Some(Discovered::Run))
@@ -176,7 +176,7 @@ fn observe_fact(
     provider: KnownProvider,
     session: corral_core::CorralSessionId,
     fact: Option<crate::provider::AgentFactKind>,
-    observed_at: SystemTime,
+    observed_at: crate::clock::Reading,
     process: &crate::platform::process::ProcessIdentity,
 ) {
     // The version the observed executable's installation carries, bound to

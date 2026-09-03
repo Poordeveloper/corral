@@ -11,8 +11,13 @@ use crate::runtime::ExecutionState;
 
 const T0: SystemTime = SystemTime::UNIX_EPOCH;
 
-fn later(seconds: u64) -> SystemTime {
-    T0 + Duration::from_secs(seconds)
+/// Both clocks advanced together, which is the only case a wall clock that
+/// never jumps produces.
+fn later(seconds: u64) -> crate::clock::Reading {
+    crate::clock::Reading {
+        mono: crate::clock::Monotonic::from_millis(seconds * 1_000),
+        wall: T0 + Duration::from_secs(seconds),
+    }
 }
 
 fn hook(asserts: SemanticState) -> Claim {
@@ -54,7 +59,7 @@ fn a_tick_derives_the_state_and_reports_the_transition() {
     assert!(matches!(changes[0].transition, Transition::ItemBorn(_)));
     let (state, item) = ledger.state(session).expect("tracked");
     assert_eq!(state.main(), MainState::NeedsYou);
-    assert_eq!(state.since(), later(2));
+    assert_eq!(state.since(), later(2).wall);
     assert!(item.is_some());
 
     assert!(ledger.tick(later(3), running).is_empty(), "nothing changed");

@@ -9,6 +9,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
+use crate::clock::Reading;
+
 use corral_core::{
     AttentionItemId, AttentionReason, AttentionState, Claim, CorralSessionId, MainState,
 };
@@ -70,12 +72,13 @@ impl Ledger {
 
     /// Record one claim about a Session, as the next observation in the
     /// daemon's sequence.
-    pub fn observe(&mut self, session: CorralSessionId, claim: Claim, observed_at: SystemTime) {
+    pub fn observe(&mut self, session: CorralSessionId, claim: Claim, at: Reading) {
+        let observed_at = at.mono;
         let ordinal = self.ordinal + 1;
         let tracked = self
             .sessions
             .entry(session)
-            .or_insert_with(|| Tracked::new(observed_at));
+            .or_insert_with(|| Tracked::new(at.wall));
         // A claim presented again without having been established again is the
         // same fact, not a later one. The daemon polls its sources on a clock,
         // and an unchanged reading taking a newer place in the sequence would
@@ -102,14 +105,14 @@ impl Ledger {
     /// Re-derive every Session at `now` and report what changed.
     pub fn tick(
         &mut self,
-        now: SystemTime,
+        now: Reading,
         execution: impl Fn(CorralSessionId) -> ExecutionState,
     ) -> Vec<Change> {
         let mut changes = Vec::new();
         for (session, tracked) in &mut self.sessions {
             let derived = derive(execution(*session), &tracked.claims, &self.horizons, now);
             let from = tracked.attention.state().main();
-            let transition = tracked.attention.apply(derived, now);
+            let transition = tracked.attention.apply(derived, now.wall);
             if transition == Transition::Unchanged {
                 continue;
             }
@@ -121,8 +124,8 @@ impl Ledger {
             // so it is the one that has a distance past the horizon to report.
             let expired_after = match (derived.main, derived.rests_on, horizon) {
                 (MainState::Unknown, Some(observed), Some(horizon)) => now
-                    .duration_since(observed.observed_at)
-                    .ok()
+                    .mono
+                    .since(observed.observed_at)
                     .and_then(|age| age.checked_sub(horizon)),
                 _ => None,
             };
@@ -134,7 +137,7 @@ impl Ledger {
                 decided_by: derived.rests_on.map(|observed| observed.claim),
                 horizon,
                 expired_after,
-                at: now,
+                at: now.wall,
             });
         }
         changes

@@ -16,6 +16,7 @@
 /// Walking from a relay to the provider process that ran it (ADR 0014 D2).
 mod ancestry;
 mod attention;
+pub mod clock;
 mod connection;
 mod detection;
 /// Sessions Corral found rather than started (ADR 0014).

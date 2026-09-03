@@ -139,9 +139,11 @@ struct Published {
     poisoned: Arc<AtomicBool>,
     /// Set once, as that thread's last act (ADR 0007 L2).
     screen: Arc<OnceLock<FinalScreen>>,
-    /// When the child last drew, in milliseconds since the Unix epoch, or 0
-    /// before it has. Output within the echo window after a keystroke Corral
-    /// wrote is not the child drawing; it is the person typing.
+    /// When the child last drew, on the daemon's monotonic clock in
+    /// milliseconds, or 0 before it has. Both are ages the daemon acts on, so
+    /// neither is dated on a clock an NTP step can move (ADR 0015 D5). Output
+    /// within the echo window after a keystroke Corral wrote is not the child
+    /// drawing; it is the person typing.
     last_output_ms: Arc<AtomicU64>,
     last_input_ms: Arc<AtomicU64>,
     /// What the screen matched once its output settled, dated by the
@@ -156,7 +158,8 @@ pub struct PublishedReading {
     pub asserts: corral_core::SemanticState,
     pub sealing: corral_core::Sealing,
     pub manifest_version: String,
-    pub at: std::time::SystemTime,
+    /// The last moment the screen was known to support this reading.
+    pub at: crate::clock::Monotonic,
 }
 
 /// How long output must have been quiet before the screen is read. Rules
@@ -168,10 +171,8 @@ const SCREEN_SETTLE: std::time::Duration = std::time::Duration::from_millis(200)
 /// tuning rather than contract (plan A2).
 const ECHO_WINDOW_MS: u64 = 150;
 
-fn unix_ms(at: std::time::SystemTime) -> u64 {
-    at.duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
+fn monotonic_ms() -> u64 {
+    crate::clock::Monotonic::now().as_millis()
 }
 
 /// The screen a run left behind, published when its screen thread ends.
@@ -354,7 +355,7 @@ impl SessionHandle {
     pub fn write_input(&self, bytes: Vec<u8>) -> Result<(), InputRefused> {
         self.published
             .last_input_ms
-            .store(unix_ms(std::time::SystemTime::now()), Ordering::Release);
+            .store(monotonic_ms(), Ordering::Release);
         match self.ask(Ask::Input(bytes)) {
             Ok(()) => Ok(()),
             Err(SessionGone) if self.recorded().is_ok() => Err(InputRefused::RunEnded),
@@ -373,10 +374,10 @@ impl SessionHandle {
 
     /// When the child last drew, without asking the screen — `None` before it
     /// has, and never advanced by the echo of a keystroke Corral wrote.
-    pub fn last_output_at(&self) -> Option<std::time::SystemTime> {
+    pub fn last_output_at(&self) -> Option<crate::clock::Monotonic> {
         match self.published.last_output_ms.load(Ordering::Acquire) {
             0 => None,
-            ms => Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(ms)),
+            ms => Some(crate::clock::Monotonic::from_millis(ms)),
         }
     }
 
@@ -938,7 +939,7 @@ fn date_reading_forward(published: &Published) {
     if let Ok(mut slot) = published.reading.lock()
         && let Some(reading) = slot.as_mut()
     {
-        reading.at = std::time::SystemTime::now();
+        reading.at = crate::clock::Monotonic::now();
     }
 }
 
@@ -963,7 +964,7 @@ fn read_screen(
                 asserts: reading.asserts,
                 sealing: reading.sealing,
                 manifest_version: reading.manifest_version,
-                at: std::time::SystemTime::now(),
+                at: crate::clock::Monotonic::now(),
             },
         )
     });
@@ -1017,7 +1018,7 @@ fn serve_screen(
         match ask {
             Ask::Output(chunk) => {
                 unread = detect.is_some();
-                let now_ms = unix_ms(std::time::SystemTime::now());
+                let now_ms = monotonic_ms();
                 if now_ms.saturating_sub(published.last_input_ms.load(Ordering::Acquire))
                     > ECHO_WINDOW_MS
                 {

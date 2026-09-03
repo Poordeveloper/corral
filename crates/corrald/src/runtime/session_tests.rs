@@ -640,7 +640,7 @@ fn the_last_output_instant_is_published_once_the_child_draws() {
         std::thread::sleep(Duration::from_millis(10));
     }
     let drawn = handle.last_output_at().expect("the child drew");
-    assert!(drawn <= std::time::SystemTime::now());
+    assert!(drawn <= crate::clock::Monotonic::now());
 }
 
 /// A session running `script` under a manifest whose one rule matches the word
@@ -659,7 +659,7 @@ fn detecting_session(script: &str) -> super::SessionHandle {
 }
 
 /// Wait for the first reading and answer when it was evaluated.
-fn settled_reading(handle: &super::SessionHandle) -> std::time::SystemTime {
+fn settled_reading(handle: &super::SessionHandle) -> crate::clock::Monotonic {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while handle.reading().is_none() && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));

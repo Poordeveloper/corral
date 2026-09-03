@@ -54,7 +54,7 @@ fn a_sealed_screen_reading_becomes_the_sessions_main_state() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut main = MainState::Unknown;
     while main != MainState::Ready && std::time::Instant::now() < deadline {
-        tick_once(&state, SystemTime::now());
+        tick_once(&state, crate::clock::Reading::now());
         main = state
             .with_runtime(|runtime| {
                 runtime

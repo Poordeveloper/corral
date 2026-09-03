@@ -5,12 +5,13 @@
 //! claims it holds and applies the result; this function only says what those
 //! claims, taken together at this instant, entitle Corral to assert.
 
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use corral_core::{
     AttentionState, Claim, Entitlement, EvidenceSource, LastKnown, MainState, SemanticState,
 };
 
+use crate::clock::{Monotonic, Reading};
 use crate::runtime::ExecutionState;
 
 /// One claim as the engine holds it: what was claimed, when the daemon saw
@@ -21,7 +22,9 @@ use crate::runtime::ExecutionState;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Observed {
     pub claim: Claim,
-    pub observed_at: SystemTime,
+    /// Measured on the clock that only moves forward, because every use of it
+    /// is an age (ADR 0015 D5).
+    pub observed_at: Monotonic,
     pub ordinal: u64,
 }
 
@@ -46,7 +49,7 @@ pub struct Derived {
 impl Derived {
     /// The state a client reads, entered at `since`.
     #[must_use]
-    pub fn into_state(self, since: SystemTime) -> AttentionState {
+    pub fn into_state(self, since: std::time::SystemTime) -> AttentionState {
         match self.main {
             MainState::Unknown => AttentionState::unknown(since, self.last_known),
             main => AttentionState::asserted(main, since),
@@ -111,7 +114,7 @@ pub fn derive(
     execution: ExecutionState,
     claims: &[Observed],
     horizons: &Horizons,
-    now: SystemTime,
+    now: Reading,
 ) -> Derived {
     // Execution gates semantics (D2): an ended runtime has nothing left to
     // be Needs You about, and a runtime Corral cannot place is not one it
@@ -133,7 +136,12 @@ pub fn derive(
     let last_known = entitled
         .iter()
         .max_by_key(|observed| observed.ordinal)
-        .map(|observed| LastKnown::new(observed.claim.asserts.into(), observed.observed_at));
+        .map(|observed| {
+            LastKnown::new(
+                observed.claim.asserts.into(),
+                now.at(observed.observed_at).wall,
+            )
+        });
 
     if execution == ExecutionState::Unknown {
         // Not a rot: the claims may be perfectly fresh. What cannot be
@@ -168,8 +176,9 @@ pub fn derive(
         .copied()
         .filter(|observed| {
             let horizon = horizons.of(observed.claim.source, observed.claim.asserts);
-            now.duration_since(observed.observed_at)
-                .is_ok_and(|age| age <= horizon)
+            now.mono
+                .since(observed.observed_at)
+                .is_some_and(|age| age <= horizon)
         })
         .collect();
 

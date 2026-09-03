@@ -2,7 +2,7 @@
 //! screen, every Session is re-derived, and what changed is journaled.
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use corral_core::{
     Assurance, Channel, Claim, CorralSessionId, EvidenceSource, MainState, Sealing, SemanticState,
@@ -11,6 +11,7 @@ use tokio::sync::watch;
 use tracing::debug;
 
 use super::{Change, Record, Transition, TransitionRecord};
+use crate::clock::Reading;
 use crate::runtime::ExecutionState;
 use crate::state::DaemonState;
 
@@ -19,7 +20,7 @@ use crate::state::DaemonState;
 pub const FRESHNESS_TICK: Duration = Duration::from_secs(1);
 
 /// One tick: observe activity, derive every Session, journal the changes.
-pub fn tick_once(state: &Arc<DaemonState>, now: SystemTime) -> Vec<Change> {
+pub fn tick_once(state: &Arc<DaemonState>, now: Reading) -> Vec<Change> {
     let changes = state
         .with_runtime(|runtime| {
             let mut activity = Vec::new();
@@ -62,7 +63,7 @@ pub fn tick_once(state: &Arc<DaemonState>, now: SystemTime) -> Vec<Change> {
                     // reading is only as current as the last moment the screen
                     // was known to support it, and a screen being redrawn
                     // faster than it settles supports nothing.
-                    reading.at,
+                    now.at(reading.at),
                 );
             }
             for (session, drawn) in activity {
@@ -77,7 +78,7 @@ pub fn tick_once(state: &Arc<DaemonState>, now: SystemTime) -> Vec<Change> {
                         sealing: Sealing::Sealed,
                         asserts: SemanticState::Working,
                     },
-                    drawn,
+                    now.at(drawn),
                 );
             }
             let managed: std::collections::HashMap<CorralSessionId, ExecutionState> = runtime
@@ -120,7 +121,7 @@ pub fn tick_once(state: &Arc<DaemonState>, now: SystemTime) -> Vec<Change> {
         .unwrap_or_default();
     if !changes.is_empty() {
         state.journal_append(
-            now,
+            now.wall,
             changes
                 .iter()
                 .map(|(change, version)| record(change, version.clone()))
@@ -181,7 +182,7 @@ pub async fn tick_until_shutdown(state: Arc<DaemonState>, mut shutdown: watch::R
         // Off the reactor: the ledger lock is brief, the journal write is a
         // file append, and neither belongs on the one thread every connection
         // shares.
-        let changes = tokio::task::spawn_blocking(move || tick_once(&ticking, SystemTime::now()))
+        let changes = tokio::task::spawn_blocking(move || tick_once(&ticking, Reading::now()))
             .await
             .unwrap_or_default();
         for change in changes {

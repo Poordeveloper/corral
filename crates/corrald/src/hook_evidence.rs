@@ -402,7 +402,10 @@ async fn ingest_external(
         provider,
         identity,
         corroboration,
-        delivered.observed_at,
+        crate::clock::Reading {
+            mono: crate::clock::Monotonic::of(delivered.arrived),
+            wall: delivered.observed_at,
+        },
         Some(report.fact),
     )
     .await?;
@@ -438,7 +441,16 @@ async fn apply(
             corral_core::Assurance::Deterministic,
             corral_core::Channel::CorralOwnedPty,
         ) {
-            runtime.attention.observe(session, claim, observed_at);
+            // Both halves of the delivery's own moment: the arrival instant
+            // the age is measured from, and the wall time it is called by.
+            runtime.attention.observe(
+                session,
+                claim,
+                crate::clock::Reading {
+                    mono: crate::clock::Monotonic::of(arrived),
+                    wall: observed_at,
+                },
+            );
         }
     });
 

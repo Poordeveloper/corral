@@ -6,12 +6,27 @@ use corral_core::{
 };
 
 use super::*;
+use crate::clock::{Monotonic, Reading};
 use crate::runtime::ExecutionState;
 
-const NOW: SystemTime = SystemTime::UNIX_EPOCH;
+/// Far enough past the daemon's origin that every age in these tests is
+/// representable on the monotonic clock.
+const BASE_SECS: u64 = 100_000;
 
-fn at(seconds_ago: u64) -> SystemTime {
-    NOW - Duration::from_secs(seconds_ago)
+fn now() -> Reading {
+    Reading {
+        mono: Monotonic::from_millis(BASE_SECS * 1_000),
+        wall: SystemTime::UNIX_EPOCH + Duration::from_secs(BASE_SECS),
+    }
+}
+
+fn at(seconds_ago: u64) -> Monotonic {
+    Monotonic::from_millis((BASE_SECS - seconds_ago) * 1_000)
+}
+
+/// The wall time the same moment is called by.
+fn wall_at(seconds_ago: u64) -> SystemTime {
+    now().wall - Duration::from_secs(seconds_ago)
 }
 
 fn observed(
@@ -34,7 +49,7 @@ fn observed(
 }
 
 fn derive_running(claims: &[Observed]) -> Derived {
-    derive(ExecutionState::Running, claims, &Horizons::default(), NOW)
+    derive(ExecutionState::Running, claims, &Horizons::default(), now())
 }
 
 /// Execution gates semantics (ADR 0015 D2): a runtime that ended has nothing
@@ -46,7 +61,7 @@ fn exited_execution_is_exited_whatever_the_claims_say() {
         ExecutionState::Exited,
         &[blocked],
         &Horizons::default(),
-        NOW,
+        now(),
     );
     assert_eq!(derived.main, MainState::Exited);
     assert_eq!(derived.last_known, None);
@@ -61,12 +76,12 @@ fn unknown_execution_is_unknown_with_the_newest_entitled_claim_as_last_known() {
         ExecutionState::Unknown,
         &[blocked],
         &Horizons::default(),
-        NOW,
+        now(),
     );
     assert_eq!(derived.main, MainState::Unknown);
     assert_eq!(
         derived.last_known,
-        Some(LastKnown::new(MainState::NeedsYou, at(1)))
+        Some(LastKnown::new(MainState::NeedsYou, wall_at(1)))
     );
 }
 
@@ -128,7 +143,7 @@ fn activity_alone_is_working_until_the_quiet_horizon() {
     assert_eq!(derived.main, MainState::Unknown);
     assert_eq!(
         derived.last_known,
-        Some(LastKnown::new(MainState::Working, at(4)))
+        Some(LastKnown::new(MainState::Working, wall_at(4)))
     );
 }
 
@@ -146,7 +161,7 @@ fn a_claim_past_its_horizon_rots_to_unknown_with_last_known() {
     assert_eq!(derived.main, MainState::Unknown);
     assert_eq!(
         derived.last_known,
-        Some(LastKnown::new(MainState::NeedsYou, at(6 * 60)))
+        Some(LastKnown::new(MainState::NeedsYou, wall_at(6 * 60)))
     );
 
     let fresh = observed(
@@ -209,8 +224,8 @@ fn a_derivation_becomes_an_attention_state_at_an_instant() {
         1,
     )]);
     assert_eq!(
-        derived.into_state(NOW),
-        AttentionState::asserted(MainState::Ready, NOW)
+        derived.into_state(now().wall),
+        AttentionState::asserted(MainState::Ready, now().wall)
     );
     let rotted = derive_running(&[observed(
         EvidenceSource::ProviderHook,
@@ -219,8 +234,11 @@ fn a_derivation_becomes_an_attention_state_at_an_instant() {
         3 * 60 * 60,
     )]);
     assert_eq!(
-        rotted.into_state(NOW),
-        AttentionState::unknown(NOW, Some(LastKnown::new(MainState::Ready, at(3 * 60 * 60))))
+        rotted.into_state(now().wall),
+        AttentionState::unknown(
+            now().wall,
+            Some(LastKnown::new(MainState::Ready, wall_at(3 * 60 * 60)))
+        )
     );
 }
 
@@ -270,4 +288,34 @@ fn a_blocker_stands_when_a_later_claim_agreed_and_then_rotted() {
         derive_running(&[hook_blocker, screen_blocker, activity]).main,
         MainState::NeedsYou
     );
+}
+
+/// Freshness is an age on the clock that only moves forward, so what the wall
+/// clock says at the moment of derivation cannot change it. An NTP step
+/// backwards used to make every fresh claim stale at once, and make them all
+/// fresh again as wall time caught up — a state revived with no new evidence,
+/// which is what D4 forbids and D5 names the clock to prevent.
+#[test]
+fn the_wall_clock_at_derivation_does_not_age_a_claim() {
+    let blocker = observed(EvidenceSource::ProviderHook, SemanticState::NeedsYou, 1, 60);
+    let stepped_back = Reading {
+        wall: SystemTime::UNIX_EPOCH,
+        ..now()
+    };
+    let stepped_forward = Reading {
+        wall: now().wall + Duration::from_secs(3 * 60 * 60),
+        ..now()
+    };
+    for reading in [now(), stepped_back, stepped_forward] {
+        assert_eq!(
+            derive(
+                ExecutionState::Running,
+                &[blocker],
+                &Horizons::default(),
+                reading
+            )
+            .main,
+            MainState::NeedsYou
+        );
+    }
 }

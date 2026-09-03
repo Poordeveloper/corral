@@ -43,6 +43,14 @@ fn at(seconds: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
 }
 
+/// The same moment as the daemon observes it: both clocks, advanced together.
+fn observed(seconds: u64) -> crate::clock::Reading {
+    crate::clock::Reading {
+        mono: crate::clock::Monotonic::from_millis(seconds * 1_000),
+        wall: at(seconds),
+    }
+}
+
 fn identity(raw: &str) -> ExternalId {
     ExternalId::new(raw).expect("a usable identity")
 }
@@ -71,7 +79,7 @@ async fn a_corroborated_delivery_makes_a_session_visible() {
         KnownProvider::Claude,
         identity("session-abc"),
         reached(4321, at(500)),
-        at(900),
+        observed(900),
         None,
     )
     .await
@@ -91,7 +99,7 @@ async fn the_run_starts_when_the_runtime_started_not_when_corral_looked() {
         KnownProvider::Claude,
         identity("session-abc"),
         reached(4321, at(500)),
-        at(900),
+        observed(900),
         None,
     )
     .await
@@ -122,7 +130,7 @@ async fn an_uncorroborated_delivery_mints_nothing() {
             KnownProvider::Codex,
             identity("thread-title-generation"),
             corroboration,
-            at(900),
+            observed(900),
             None,
         )
         .await
@@ -152,7 +160,7 @@ async fn a_second_delivery_of_one_identity_confirms_rather_than_duplicates() {
         KnownProvider::Claude,
         identity("session-abc"),
         reached(4321, at(500)),
-        at(900),
+        observed(900),
         None,
     )
     .await
@@ -163,7 +171,7 @@ async fn a_second_delivery_of_one_identity_confirms_rather_than_duplicates() {
         KnownProvider::Claude,
         identity("session-abc"),
         reached(4321, at(500)),
-        at(901),
+        observed(901),
         None,
     )
     .await
@@ -211,7 +219,7 @@ async fn a_session_left_without_a_run_gets_one_on_the_next_delivery() {
         KnownProvider::Claude,
         identity("session-abc"),
         reached(4321, at(500)),
-        at(901),
+        observed(901),
         None,
     )
     .await
@@ -297,7 +305,7 @@ async fn a_discovery_shows_the_runtime_under_its_session() {
         KnownProvider::Claude,
         identity("session-abc"),
         reached(4321, at(500)),
-        at(900),
+        observed(900),
         None,
     )
     .await
@@ -328,7 +336,7 @@ async fn a_runtime_seen_gone_ends_the_run_it_was_in() {
         KnownProvider::Claude,
         identity("session-abc"),
         reached(4321, at(500)),
-        at(900),
+        observed(900),
         None,
     )
     .await
@@ -356,7 +364,7 @@ async fn two_identities_are_two_sessions_even_from_one_process() {
             KnownProvider::Claude,
             identity(name),
             reached(4321, at(500)),
-            at(900),
+            observed(900),
             None,
         )
         .await
@@ -397,7 +405,7 @@ async fn a_discovered_runtime_never_becomes_a_control_capable_binding() {
         KnownProvider::Claude,
         identity("session-abc"),
         reached(4321, at(500)),
-        at(900),
+        observed(900),
         None,
     )
     .await
@@ -426,7 +434,7 @@ async fn a_restart_resolves_every_external_run_it_recorded() {
         KnownProvider::Claude,
         identity("session-abc"),
         reached(u32::MAX - 1, at(500)),
-        at(900),
+        observed(900),
         None,
     )
     .await
@@ -492,7 +500,7 @@ async fn a_corroborated_fact_is_claimed_for_the_discovered_session() {
         KnownProvider::Claude,
         identity("session-abc"),
         reached(4321, at(500)),
-        at(900),
+        observed(900),
         Some(crate::provider::AgentFactKind::TurnEnded),
     )
     .await
