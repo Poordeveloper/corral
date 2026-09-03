@@ -45,3 +45,17 @@ fn an_instant_later_than_the_reading_is_named_by_the_reading() {
     let now = reading(1_000, 5);
     assert_eq!(now.at(Monotonic::from_millis(4_000)).wall, now.wall);
 }
+
+/// Zero is the atomic's "nothing yet", and the daemon's origin is a real
+/// reading, so the two must not be the same value. Publishing shifts by one
+/// and only here, so an accessor cannot disagree with a publisher about
+/// which is which.
+#[test]
+fn the_origin_and_nothing_at_all_are_different_published_values() {
+    assert_eq!(Monotonic::from_millis(0).as_published(), 1);
+    assert_eq!(Monotonic::published(1), Some(Monotonic::from_millis(0)));
+    assert_eq!(Monotonic::published(0), None);
+
+    let instant = Monotonic::from_millis(1_234);
+    assert_eq!(Monotonic::published(instant.as_published()), Some(instant));
+}

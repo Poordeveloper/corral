@@ -139,8 +139,8 @@ struct Published {
     poisoned: Arc<AtomicBool>,
     /// Set once, as that thread's last act (ADR 0007 L2).
     screen: Arc<OnceLock<FinalScreen>>,
-    /// When the child last drew, on the daemon's monotonic clock in
-    /// milliseconds, or 0 before it has. Both are ages the daemon acts on, so
+    /// When the child last drew, as `Monotonic::as_published` encodes it —
+    /// zero means it has not. Both are ages the daemon acts on, so
     /// neither is dated on a clock an NTP step can move (ADR 0015 D5). Output
     /// within the echo window after a keystroke Corral wrote is not the child
     /// drawing; it is the person typing.
@@ -169,11 +169,7 @@ const SCREEN_SETTLE: std::time::Duration = std::time::Duration::from_millis(200)
 /// How long after a keystroke Corral wrote its echo may arrive without being
 /// read as the agent drawing. A false Working, never a false Needs You, and
 /// tuning rather than contract (plan A2).
-const ECHO_WINDOW_MS: u64 = 150;
-
-fn monotonic_ms() -> u64 {
-    crate::clock::Monotonic::now().as_millis()
-}
+const ECHO_WINDOW: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// The screen a run left behind, published when its screen thread ends.
 ///
@@ -353,9 +349,10 @@ impl SessionHandle {
     /// because only it knows its replica's live mode bits (`ARCHITECTURE.md`
     /// §3).
     pub fn write_input(&self, bytes: Vec<u8>) -> Result<(), InputRefused> {
-        self.published
-            .last_input_ms
-            .store(monotonic_ms(), Ordering::Release);
+        self.published.last_input_ms.store(
+            crate::clock::Monotonic::now().as_published(),
+            Ordering::Release,
+        );
         match self.ask(Ask::Input(bytes)) {
             Ok(()) => Ok(()),
             Err(SessionGone) if self.recorded().is_ok() => Err(InputRefused::RunEnded),
@@ -375,10 +372,7 @@ impl SessionHandle {
     /// When the child last drew, without asking the screen — `None` before it
     /// has, and never advanced by the echo of a keystroke Corral wrote.
     pub fn last_output_at(&self) -> Option<crate::clock::Monotonic> {
-        match self.published.last_output_ms.load(Ordering::Acquire) {
-            0 => None,
-            ms => Some(crate::clock::Monotonic::from_millis(ms)),
-        }
+        crate::clock::Monotonic::published(self.published.last_output_ms.load(Ordering::Acquire))
     }
 
     /// The last size the screen published, without asking it.
@@ -1018,11 +1012,16 @@ fn serve_screen(
         match ask {
             Ask::Output(chunk) => {
                 unread = detect.is_some();
-                let now_ms = monotonic_ms();
-                if now_ms.saturating_sub(published.last_input_ms.load(Ordering::Acquire))
-                    > ECHO_WINDOW_MS
-                {
-                    published.last_output_ms.store(now_ms, Ordering::Release);
+                let drawn = crate::clock::Monotonic::now();
+                let echoing = crate::clock::Monotonic::published(
+                    published.last_input_ms.load(Ordering::Acquire),
+                )
+                .and_then(|input| drawn.since(input))
+                .is_some_and(|gap| gap <= ECHO_WINDOW);
+                if !echoing {
+                    published
+                        .last_output_ms
+                        .store(drawn.as_published(), Ordering::Release);
                 }
                 let reply = terminal.consume(&chunk);
                 let sequence = stream.advance();

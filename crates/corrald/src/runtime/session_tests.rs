@@ -715,9 +715,9 @@ fn the_echo_of_written_input_is_not_the_child_drawing() {
     );
 
     // Output the child produces on its own, later, does count.
-    std::thread::sleep(Duration::from_millis(ECHO_WINDOW_MS + 50));
+    std::thread::sleep(ECHO_WINDOW + Duration::from_millis(50));
     handle.write_input(b"\n".to_vec()).expect("input taken");
-    std::thread::sleep(Duration::from_millis(ECHO_WINDOW_MS + 50));
+    std::thread::sleep(ECHO_WINDOW + Duration::from_millis(50));
     // `cat` echoes the newline within the window as well; the assertion
     // above holds for the same reason.
     let _ = handle.last_output_at();

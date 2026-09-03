@@ -39,7 +39,7 @@ impl Monotonic {
         Self(self.0.saturating_add(elapsed))
     }
 
-    /// Milliseconds since the origin, for publication through an atomic.
+    /// Milliseconds since the origin.
     #[must_use]
     pub fn as_millis(self) -> u64 {
         u64::try_from(self.0.as_millis()).unwrap_or(u64::MAX)
@@ -48,6 +48,29 @@ impl Monotonic {
     #[must_use]
     pub fn from_millis(millis: u64) -> Self {
         Self(Duration::from_millis(millis))
+    }
+
+    /// This instant as an atomic holds it, where zero is reserved for "no
+    /// such instant".
+    ///
+    /// The origin is a real reading, so the encoding shifts by one rather
+    /// than letting `0ms` mean both the first millisecond of the daemon's
+    /// life and nothing having happened. Encoding and decoding live here so
+    /// no publisher writes the rule out again.
+    #[must_use]
+    pub fn as_published(self) -> u64 {
+        let millis = self.as_millis();
+        // A shift by one collides at the top of the range, and this is why it
+        // cannot happen: `u64` milliseconds is some 584 million years, so no
+        // uptime reaches the last value.
+        debug_assert!(millis < u64::MAX);
+        millis.saturating_add(1)
+    }
+
+    /// The instant an atomic holds, or `None` where nothing was published.
+    #[must_use]
+    pub fn published(value: u64) -> Option<Self> {
+        value.checked_sub(1).map(Self::from_millis)
     }
 
     /// The same instant, for a caller that already holds one the platform
