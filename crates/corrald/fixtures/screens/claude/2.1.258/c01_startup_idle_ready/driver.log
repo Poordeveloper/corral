@@ -1,0 +1,19 @@
+963726 mark resize
+985697 started pid=1309349
+1232089834 wait_for '❯|manual mode on|auto mode on' matched at +1045
+1232145298 mark prompt_ready
+4300952053 mark quiet
+4300977813 mark idle_prompt
+4301043560 mark typed_prompt
+4301102544 mark submitted
+4465274732 wait_hook matched record 1
+5806029289 wait_hook matched record 2
+5806082799 mark stop_hook
+8811939908 mark quiet
+8811979254 mark ready_after_stop
+65867164576 wait_hook matched record 4
+65867213664 mark notification
+67868900198 mark quiet
+67868936859 mark idle_after_notification
+69297198028 wait_hook matched record 5
+EXCEPTION ChildProcessError(10, 'No child processes')

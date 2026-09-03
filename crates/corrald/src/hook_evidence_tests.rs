@@ -181,7 +181,8 @@ async fn a_managed_runtimes_global_entry_never_mints_a_session_whichever_arrives
                         executable: std::path::PathBuf::from("/usr/local/bin/claude"),
                     }),
                 },
-                at(900),
+                observed(900),
+                None,
             )
         };
         let injected = || establish(&registry.state, &scope, identity.clone(), at(900));
@@ -250,6 +251,14 @@ fn registry(name: &str) -> Registry {
 
 fn at(seconds: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+}
+
+/// The same moment as the daemon observes it: both clocks, advanced together.
+fn observed(seconds: u64) -> crate::clock::Reading {
+    crate::clock::Reading {
+        mono: crate::clock::Monotonic::from_millis(seconds * 1_000),
+        wall: at(seconds),
+    }
 }
 
 fn command(id: &str) -> corral_core::Command {

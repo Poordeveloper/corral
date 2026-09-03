@@ -1,0 +1,24 @@
+953514 mark resize
+980925 started pid=1311386
+1172546862 wait_for '❯|manual mode on|auto mode on' matched at +1328
+1172611127 mark prompt_ready_plan_mode
+4008967817 mark quiet
+4009008618 mark plan_mode_idle
+4409309197 mark submitted
+8452588516 wait_hook matched record 2
+12059022867 wait_hook matched record 7
+12059089202 mark plan_permission_request_hook
+14059257706 mark plan_approval_visible
+16060981474 mark quiet
+16061023228 mark plan_approval_settled
+19079431401 wait_hook TIMEOUT
+19079481914 mark hook_timeout
+19079527375 mark permission_request_hook
+19079597806 mark plan_rejected_esc
+141128032532 wait_hook TIMEOUT
+141128122983 mark hook_timeout
+141128148704 mark stop_hook
+144131006790 mark quiet
+144131042442 mark ready_after
+144961481863 wait_hook matched record 9
+145269530407 mark end

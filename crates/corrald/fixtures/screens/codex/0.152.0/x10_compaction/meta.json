@@ -1,0 +1,21 @@
+{
+ "argv": [
+  "codex",
+  "-c",
+  "notify=[\"python3\",\"/matrix/hookcap.py\",\"/matrix/out/x10_compaction/notify.jsonl\"]"
+ ],
+ "cwd": "/root/proj",
+ "rows": 40,
+ "cols": 120,
+ "t0_ns": 1788408133785479063,
+ "env": {
+  "COLORTERM": "truecolor",
+  "DISABLE_AUTOUPDATER": "1",
+  "HOME": "/root",
+  "LANG": "C.UTF-8",
+  "PATH": "/root/.local/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
+  "SHELL": "/bin/bash",
+  "TERM": "xterm-256color",
+  "USER": "root"
+ }
+}

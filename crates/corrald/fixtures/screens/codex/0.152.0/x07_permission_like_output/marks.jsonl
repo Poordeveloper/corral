@@ -1,0 +1,8 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788355010351956384, "offset": 0}
+{"quiet_s": 2, "last_output_ns": 1788355018910451204, "name": "quiet", "t_ns": 1788355020911628423, "offset": 8469}
+{"name": "prompt_ready", "t_ns": 1788355020911714217, "offset": 8469}
+{"name": "submitted", "t_ns": 1788355024301845514, "offset": 17169}
+{"name": "notify_turn_complete", "t_ns": 1788355028760077509, "offset": 33132}
+{"quiet_s": 3, "last_output_ns": 1788355049624042598, "name": "quiet", "t_ns": 1788355052626626015, "offset": 110603}
+{"name": "ready_with_approval_like_output", "t_ns": 1788355052626704440, "offset": 110603}
+{"name": "end", "t_ns": 1788355053224024672, "offset": 112480}

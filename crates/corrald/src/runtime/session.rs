@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::{Instant, SystemTime};
 
@@ -139,7 +139,37 @@ struct Published {
     poisoned: Arc<AtomicBool>,
     /// Set once, as that thread's last act (ADR 0007 L2).
     screen: Arc<OnceLock<FinalScreen>>,
+    /// When the child last drew, as `Monotonic::as_published` encodes it —
+    /// zero means it has not. Both are ages the daemon acts on, so
+    /// neither is dated on a clock an NTP step can move (ADR 0015 D5). Output
+    /// within the echo window after a keystroke Corral wrote is not the child
+    /// drawing; it is the person typing.
+    last_output_ms: Arc<AtomicU64>,
+    last_input_ms: Arc<AtomicU64>,
+    /// What the screen matched once its output settled, dated by the
+    /// evaluation. `None` when nothing matched or nothing was asked to look.
+    reading: Arc<std::sync::Mutex<Option<PublishedReading>>>,
 }
+
+/// One screen reading, as the tick will turn it into a claim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishedReading {
+    pub rule: String,
+    pub asserts: corral_core::SemanticState,
+    pub sealing: corral_core::Sealing,
+    pub manifest_version: String,
+    /// The last moment the screen was known to support this reading.
+    pub at: crate::clock::Monotonic,
+}
+
+/// How long output must have been quiet before the screen is read. Rules
+/// evaluated mid-redraw would see half a dialog (ADR 0015 D6).
+const SCREEN_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long after a keystroke Corral wrote its echo may arrive without being
+/// read as the agent drawing. A false Working, never a false Needs You, and
+/// tuning rather than contract (plan A2).
+const ECHO_WINDOW: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// The screen a run left behind, published when its screen thread ends.
 ///
@@ -319,11 +349,30 @@ impl SessionHandle {
     /// because only it knows its replica's live mode bits (`ARCHITECTURE.md`
     /// §3).
     pub fn write_input(&self, bytes: Vec<u8>) -> Result<(), InputRefused> {
+        self.published.last_input_ms.store(
+            crate::clock::Monotonic::now().as_published(),
+            Ordering::Release,
+        );
         match self.ask(Ask::Input(bytes)) {
             Ok(()) => Ok(()),
             Err(SessionGone) if self.recorded().is_ok() => Err(InputRefused::RunEnded),
             Err(SessionGone) => Err(InputRefused::RuntimeGone),
         }
+    }
+
+    /// What the screen last matched, without asking it.
+    pub fn reading(&self) -> Option<PublishedReading> {
+        self.published
+            .reading
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+    }
+
+    /// When the child last drew, without asking the screen — `None` before it
+    /// has, and never advanced by the echo of a keystroke Corral wrote.
+    pub fn last_output_at(&self) -> Option<crate::clock::Monotonic> {
+        crate::clock::Monotonic::published(self.published.last_output_ms.load(Ordering::Acquire))
     }
 
     /// The last size the screen published, without asking it.
@@ -521,6 +570,9 @@ impl SessionHandle {
 /// exists. What is left is starting threads, which cannot fail, so a Run whose
 /// start committed is always served.
 pub struct PendingSession {
+    /// What this session's screen is read against, when its provider has a
+    /// manifest.
+    detect: Option<ScreenRules>,
     /// Taken by whichever of `serve` and the destructor gets there first.
     ///
     /// The obligation lives in the type rather than in every caller: this owns
@@ -578,6 +630,7 @@ pub fn spawn_session(
     };
 
     Ok(PendingSession {
+        detect: None,
         runtime: Some(PendingRuntime {
             screen,
             reaper,
@@ -593,6 +646,22 @@ pub fn spawn_session(
 }
 
 impl PendingSession {
+    /// Read this session's screen against a provider manifest once output
+    /// settles, at the version the runtime is running.
+    ///
+    /// The version is half of what seals a reading, so it travels with the
+    /// manifest rather than being looked up later from a runtime that may
+    /// have been upgraded underneath.
+    #[must_use]
+    pub fn detect_with(
+        mut self,
+        manifest: Arc<crate::detection::Manifest>,
+        version: Option<String>,
+    ) -> Self {
+        self.detect = Some(ScreenRules { manifest, version });
+        self
+    }
+
     pub fn title(&self) -> &str {
         &self.title
     }
@@ -661,7 +730,11 @@ impl PendingSession {
             geometry: Arc::new(AtomicU32::new(pack_geometry(geometry))),
             poisoned: Arc::new(AtomicBool::new(false)),
             screen: Arc::new(OnceLock::new()),
+            last_output_ms: Arc::new(AtomicU64::new(0)),
+            last_input_ms: Arc::new(AtomicU64::new(0)),
+            reading: Arc::new(std::sync::Mutex::new(None)),
         };
+        let detect = self.detect.take();
 
         // Writing to a PTY blocks when the child stops reading, and the child
         // stops reading when its output is not drained — so a write on the
@@ -700,7 +773,15 @@ impl PendingSession {
         let serving = published.clone();
         std::thread::spawn(move || {
             let _alive = held;
-            serve_screen(screen, &teardown, to_child, geometry, questions, &serving)
+            serve_screen(
+                screen,
+                &teardown,
+                to_child,
+                geometry,
+                questions,
+                &serving,
+                detect.as_ref(),
+            )
         });
 
         SessionHandle {
@@ -831,6 +912,61 @@ fn read_pty(
     }
 }
 
+/// What a session's screen is read against: the provider's manifest, and the
+/// provider version the runtime is running.
+///
+/// One value rather than two, because a rule seals only where both agree —
+/// a manifest measured on one build asserts nothing about another — and
+/// carrying them apart invites a caller to have one and not the other
+/// (ADR 0015 D6, grill Q13).
+struct ScreenRules {
+    manifest: Arc<crate::detection::Manifest>,
+    version: Option<String>,
+}
+
+/// Nothing has been drawn since the reading was evaluated, so the screen still
+/// says what it said. Dating it forward is what keeps a claim from rotting
+/// under a dialog that is still there, and doing it only here is what stops a
+/// screen nobody could read from re-stamping a reading it may have outlived
+/// (ADR 0015 D4).
+fn date_reading_forward(published: &Published) {
+    if let Ok(mut slot) = published.reading.lock()
+        && let Some(reading) = slot.as_mut()
+    {
+        reading.at = crate::clock::Monotonic::now();
+    }
+}
+
+/// Evaluate the manifest against the screen as it stands and publish the
+/// result, or its absence.
+fn read_screen(
+    terminal: &super::terminal::AuthoritativeTerminal,
+    detect: Option<&ScreenRules>,
+    published: &Published,
+) {
+    let Some(rules) = detect else {
+        return;
+    };
+    let reading = terminal.terminal().and_then(|emulator| {
+        let screen = crate::detection::Screen {
+            rows: emulator.plain_string().lines().map(str::to_owned).collect(),
+            title: String::from_utf8_lossy(&emulator.title).into_owned(),
+        };
+        crate::detection::evaluate(&rules.manifest, &screen, rules.version.as_deref()).map(
+            |reading| PublishedReading {
+                rule: reading.rule,
+                asserts: reading.asserts,
+                sealing: reading.sealing,
+                manifest_version: reading.manifest_version,
+                at: crate::clock::Monotonic::now(),
+            },
+        )
+    });
+    if let Ok(mut slot) = published.reading.lock() {
+        *slot = reading;
+    }
+}
+
 /// The thread that owns one session's screen for the life of its runtime.
 ///
 /// Everything reaches it as an `Ask` on one channel, so it blocks until there
@@ -845,9 +981,13 @@ fn serve_screen(
     geometry: PtyGeometry,
     questions: Receiver<Ask>,
     published: &Published,
+    detect: Option<&ScreenRules>,
 ) {
     let mut terminal = super::terminal::AuthoritativeTerminal::new(geometry);
     let mut stream = super::stream::TerminalStream::new();
+    // Output since the screen was last read. Read when it has been quiet for
+    // the settle interval, so a rule never sees half a redraw.
+    let mut unread = false;
 
     // Runs until the runtime ends, and no longer. Everything this thread
     // exists for — consuming output, answering device queries with nobody
@@ -855,9 +995,34 @@ fn serve_screen(
     // arrive. When they cannot, the screen it holds is published as a value
     // and this returns, releasing the emulator, the stream, and the pty
     // (ADR 0007 L2). The registry keeps the record; nothing keeps the thread.
-    while let Ok(ask) = questions.recv() {
+    loop {
+        let ask = match questions.recv_timeout(SCREEN_SETTLE) {
+            Ok(ask) => ask,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if unread {
+                    unread = false;
+                    read_screen(&terminal, detect, published);
+                } else {
+                    date_reading_forward(published);
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         match ask {
             Ask::Output(chunk) => {
+                unread = detect.is_some();
+                let drawn = crate::clock::Monotonic::now();
+                let echoing = crate::clock::Monotonic::published(
+                    published.last_input_ms.load(Ordering::Acquire),
+                )
+                .and_then(|input| drawn.since(input))
+                .is_some_and(|gap| gap <= ECHO_WINDOW);
+                if !echoing {
+                    published
+                        .last_output_ms
+                        .store(drawn.as_published(), Ordering::Release);
+                }
                 let reply = terminal.consume(&chunk);
                 let sequence = stream.advance();
                 // Not delivered once the screen is poisoned: the daemon can no

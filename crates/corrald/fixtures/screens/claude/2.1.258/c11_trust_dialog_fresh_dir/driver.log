@@ -1,0 +1,13 @@
+1352044 mark resize
+1386551 started pid=1314737
+559999480 wait_for '(?i)trust' matched at +647
+2060248222 mark trust_dialog_visible
+4062335638 mark quiet
+4062365111 mark trust_dialog_settled
+4062451979 mark trusted
+4062741283 wait_for '❯|manual mode on|auto mode on' matched at +1093
+4616732184 mark quiet_timeout
+4616766524 mark prompt_ready
+4617618648 wait_hook TIMEOUT
+4617655023 mark hook_timeout
+4617819761 mark end

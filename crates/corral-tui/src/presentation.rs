@@ -13,11 +13,20 @@
 
 use std::time::{Duration, SystemTime};
 
-use corral_protocol::method::{AgentEvent, AgentEventKind, SessionListItem, TerminalAccess};
+use corral_protocol::method::{
+    AgentEvent, AgentEventKind, AttentionWireState, SessionListItem, TerminalAccess,
+};
 
-/// The main state, spelled as `PRODUCT.md` §4 spells it.
+/// The main states, spelled as `PRODUCT.md` §4 spells them.
+const WORKING: &str = "Working";
+const NEEDS_YOU: &str = "Needs You";
+const READY: &str = "Ready";
 const UNKNOWN: &str = "Status unknown";
 const EXITED: &str = "Exited";
+
+/// The request was pending when the runtime ended: neither shown live nor
+/// faked as answered (`PRODUCT.md` §4).
+const EXITED_BEFORE_RESPONSE: &str = "Exited before you responded";
 
 /// The runtime fact that may sit beside the main state.
 const RUNNING: &str = "Running";
@@ -53,15 +62,25 @@ const OUTSIDE_CORRAL: &str = "Running outside Corral";
 /// status, no heuristic pre-fill.
 const WARMING_UP: &str = "Status is limited until new activity arrives from this session.";
 
-/// The strongest main state Corral may claim for a session today.
+/// The main state, as the daemon claimed it (`PRODUCT.md` §4).
 ///
-/// Two of the five (`PRODUCT.md` §4). Working, Needs You and Ready need
-/// semantic evidence nothing produces before PR8, and no execution fact
-/// stands in for it.
+/// Working, Needs You and Ready arrive only in the daemon's attention field;
+/// execution state may establish Exited or leave Unknown, and manufactures
+/// none of the three (grill Q2 of PR4, still the law).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MainState {
+    Working,
+    NeedsYou,
+    Ready,
     Unknown,
     Exited,
+}
+
+impl MainState {
+    /// The three states that begin with "runtime alive".
+    fn is_live(self) -> bool {
+        matches!(self, Self::Working | Self::NeedsYou | Self::Ready)
+    }
 }
 
 /// One session as every surface should show it.
@@ -94,6 +113,12 @@ pub struct SessionPresentation {
     /// Present when Corral has found a session but nothing it did has reached
     /// Corral yet. It goes away on its own, when the session acts.
     pub warming_up: Option<&'static str>,
+    /// The last reliable fact, beneath Unknown — "Last known: Needed input
+    /// 45m ago" — or the pending request beneath Exited.
+    pub last_known: Option<String>,
+    /// The current item's id when it is still unacknowledged: what an
+    /// acknowledgement names (grill Q18).
+    acknowledgeable: Option<String>,
 }
 
 /// What a surface may say about one listed session.
@@ -108,7 +133,7 @@ pub fn present(item: &SessionListItem) -> SessionPresentation {
 /// something reached for — otherwise the only way to check the wording would
 /// be to wait.
 pub fn present_at(item: &SessionListItem, now: SystemTime) -> SessionPresentation {
-    let (state, runtime) = match item.execution_state.as_str() {
+    let (mut state, runtime) = match item.execution_state.as_str() {
         // Reliably knowing the runtime ended is enough for Exited, and nothing
         // else about the session's status is claimed alongside it.
         "exited" => (MainState::Exited, None),
@@ -120,6 +145,49 @@ pub fn present_at(item: &SessionListItem, now: SystemTime) -> SessionPresentatio
         // at, so the two arrive at the same place on purpose.
         _ => (MainState::Unknown, Some(UNVERIFIED)),
     };
+    // The daemon's claim, when it made one this build can name. Absent is an
+    // older daemon, and an unrecognized spelling is no claim: either way the
+    // row reads from execution state alone (ADR 0015 D1).
+    let attention = item.attention.as_ref();
+    if let Some(claimed) = attention.and_then(|facts| facts.state.as_claim()) {
+        state = match claimed {
+            AttentionWireState::Working => MainState::Working,
+            AttentionWireState::NeedsYou => MainState::NeedsYou,
+            AttentionWireState::Ready => MainState::Ready,
+            AttentionWireState::Unknown => MainState::Unknown,
+            AttentionWireState::Exited => MainState::Exited,
+            AttentionWireState::Unrecognized(_) => state,
+        };
+    }
+    let last_known = attention
+        .and_then(|facts| facts.last_known.as_ref())
+        .and_then(|known| match (state, &known.state) {
+            (MainState::Exited, AttentionWireState::NeedsYou) => {
+                Some(EXITED_BEFORE_RESPONSE.to_owned())
+            }
+            (MainState::Unknown, known_state) => {
+                let phrase = match known_state {
+                    AttentionWireState::Working => "Working",
+                    AttentionWireState::NeedsYou => "Needed input",
+                    AttentionWireState::Ready => "Ready",
+                    AttentionWireState::Unknown
+                    | AttentionWireState::Exited
+                    | AttentionWireState::Unrecognized(_) => return None,
+                };
+                Some(format!(
+                    "Last known: {phrase} {} ago",
+                    age_of(known.at_unix_ms, now)
+                ))
+            }
+            _ => None,
+        });
+    let acknowledgeable = attention.and_then(|facts| {
+        facts
+            .items
+            .iter()
+            .find(|item| !item.acknowledged)
+            .map(|item| item.attention_item_id.clone())
+    });
 
     SessionPresentation {
         state,
@@ -155,7 +223,20 @@ pub fn present_at(item: &SessionListItem, now: SystemTime) -> SessionPresentatio
             }
             _ => None,
         },
+        last_known,
+        acknowledgeable,
     }
+}
+
+/// How long ago an instant on the daemon's clock was, at the coarseness a
+/// person reads. A future instant reads as no time at all.
+fn age_of(at_unix_ms: i64, now: SystemTime) -> String {
+    let at = if at_unix_ms < 0 {
+        SystemTime::UNIX_EPOCH - Duration::from_millis(at_unix_ms.unsigned_abs())
+    } else {
+        SystemTime::UNIX_EPOCH + Duration::from_millis(at_unix_ms.unsigned_abs())
+    };
+    coarse_age(now.duration_since(at).unwrap_or(Duration::ZERO))
 }
 
 /// What the agent reported, as a person reads it.
@@ -214,9 +295,13 @@ fn product(name: &str) -> String {
 /// than as a negative age: the two clocks disagree, which says nothing about
 /// the fact.
 fn age(event: &AgentEvent, now: SystemTime) -> String {
-    let elapsed = now
-        .duration_since(event.observed_at())
-        .unwrap_or(Duration::ZERO);
+    coarse_age(
+        now.duration_since(event.observed_at())
+            .unwrap_or(Duration::ZERO),
+    )
+}
+
+fn coarse_age(elapsed: Duration) -> String {
     let seconds = elapsed.as_secs();
     match seconds {
         ..60 => format!("{seconds}s"),
@@ -231,6 +316,11 @@ impl SessionPresentation {
     /// order `PRODUCT.md` §4 fixed — "Running · Status unknown".
     pub fn state_line(&self) -> String {
         match (self.state, self.runtime) {
+            // A semantic claim stands alone: the runtime fact sits beside
+            // Unknown only (`PRODUCT.md` §4).
+            (MainState::Working, _) => WORKING.to_owned(),
+            (MainState::NeedsYou, _) => NEEDS_YOU.to_owned(),
+            (MainState::Ready, _) => READY.to_owned(),
             // Never "Exited · Status unknown". Once the runtime is reliably
             // over, historical attention is not a current main state, and
             // there is nothing left to be unknown about.
@@ -238,6 +328,11 @@ impl SessionPresentation {
             (MainState::Unknown, Some(fact)) => format!("{fact} · {UNKNOWN}"),
             (MainState::Unknown, None) => UNKNOWN.to_owned(),
         }
+    }
+
+    /// The unacknowledged current item, by the id an acknowledgement names.
+    pub fn acknowledgeable(&self) -> Option<&str> {
+        self.acknowledgeable.as_deref()
     }
 
     /// The lines beneath the state, in the order every surface prints them.
@@ -251,6 +346,7 @@ impl SessionPresentation {
         // Origin first: it is the most durable thing about the row and the
         // one that explains the rest of what it does and does not say.
         lines.extend(self.origin.map(str::to_owned));
+        lines.extend(self.last_known.clone());
         lines.extend(self.warming_up.map(str::to_owned));
         lines.extend(self.screen.map(str::to_owned));
         lines.extend(self.agent.clone());
@@ -276,7 +372,7 @@ impl SessionPresentation {
     /// not launch it — rests on facts only the daemon holds, and it states
     /// those in words this surface shows unchanged.
     pub fn refuses_continue(&self) -> Option<&'static str> {
-        (self.runtime == Some(RUNNING)).then_some(RUNNING)
+        (self.runtime == Some(RUNNING) || self.state.is_live()).then_some(RUNNING)
     }
 }
 

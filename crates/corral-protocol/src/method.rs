@@ -27,6 +27,18 @@ pub const SESSION_RESUME: &str = "session.resume";
 /// Obtain a one-time token for a terminal data channel.
 pub const TERMINAL_ATTACH: &str = "terminal.attach";
 
+/// How many sessions need the user, per class, as the daemon counts them.
+pub const ATTENTION_SUMMARY: &str = "attention.summary";
+
+/// Acknowledge one attention item — the one the client saw, by id.
+pub const ATTENTION_ACKNOWLEDGE: &str = "attention.acknowledge";
+
+/// The attention journal read back per day, for the dogfood evidence.
+pub const ATTENTION_REPORT: &str = "attention.report";
+
+/// Record that a person disputes the current item — it was wrong.
+pub const ATTENTION_DISPUTE: &str = "attention.dispute";
+
 /// Report what Corral's integration with a provider looks like, without
 /// changing it.
 pub const INTEGRATION_STATUS: &str = "integration.status";
@@ -294,6 +306,215 @@ pub struct ProviderFacts {
     pub external_id: Option<String>,
 }
 
+/// The daemon's main-state claim for a session (`PRODUCT.md` §4), as the
+/// wire spells it.
+///
+/// Open on the decode side: a state a newer daemon named decodes as
+/// `Unrecognized` and is rendered as no claim, so a row is never lost to a
+/// word this build lacks (`AGENTS.md` §Protocol).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AttentionWireState {
+    Working,
+    NeedsYou,
+    Ready,
+    Unknown,
+    Exited,
+    Unrecognized(String),
+}
+
+impl AttentionWireState {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Working => "working",
+            Self::NeedsYou => "needs_you",
+            Self::Ready => "ready",
+            Self::Unknown => "unknown",
+            Self::Exited => "exited",
+            Self::Unrecognized(raw) => raw,
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "working" => Self::Working,
+            "needs_you" => Self::NeedsYou,
+            "ready" => Self::Ready,
+            "unknown" => Self::Unknown,
+            "exited" => Self::Exited,
+            _ => Self::Unrecognized(value.to_owned()),
+        }
+    }
+
+    /// The claim this build can render, or `None` for a spelling it cannot
+    /// name — which is no claim, never a guess at one.
+    pub fn as_claim(&self) -> Option<&Self> {
+        match self {
+            Self::Unrecognized(_) => None,
+            known => Some(known),
+        }
+    }
+}
+
+impl Serialize for AttentionWireState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for AttentionWireState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_wire(&String::deserialize(deserializer)?))
+    }
+}
+
+/// Why a session needs the user. Two reasons in this phase; an unknown one
+/// decodes as itself so a diagnostic can name it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AttentionReasonWire {
+    NeedsInput,
+    TurnComplete,
+    Unrecognized(String),
+}
+
+impl AttentionReasonWire {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::NeedsInput => "needs_input",
+            Self::TurnComplete => "turn_complete",
+            Self::Unrecognized(raw) => raw,
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "needs_input" => Self::NeedsInput,
+            "turn_complete" => Self::TurnComplete,
+            _ => Self::Unrecognized(value.to_owned()),
+        }
+    }
+}
+
+impl Serialize for AttentionReasonWire {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for AttentionReasonWire {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_wire(&String::deserialize(deserializer)?))
+    }
+}
+
+/// What was last reliably known, shown beneath Unknown.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastKnownFacts {
+    pub state: AttentionWireState,
+    pub at_unix_ms: i64,
+}
+
+/// One current attention item, by the id an acknowledgement must name.
+///
+/// At most one per session in this phase; the list is extensible and is
+/// never a history of items (grill Q23).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionItemFacts {
+    pub attention_item_id: String,
+    pub reason: AttentionReasonWire,
+    pub since_unix_ms: i64,
+    pub acknowledged: bool,
+}
+
+/// The attention projection for one session.
+///
+/// Instants are named `_unix_ms` and durations `age_ms`; nothing is named
+/// ambiguously (grill Q23).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionFacts {
+    pub state: AttentionWireState,
+    /// When the main state was entered, on the daemon's clock.
+    pub since_unix_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_known: Option<LastKnownFacts>,
+    #[serde(default)]
+    pub items: Vec<AttentionItemFacts>,
+}
+
+/// Sessions in one attention class: all of them, and those whose current
+/// item nobody has acknowledged. `0 <= unacknowledged <= total`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionCount {
+    pub total: u32,
+    pub unacknowledged: u32,
+}
+
+/// `attention.summary`'s result: a projection of the current items, never
+/// a state of its own. A header shows totals; a badge shows unacknowledged;
+/// no client recomputes either from a filtered list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionSummaryResult {
+    pub needs_you: AttentionCount,
+    pub ready: AttentionCount,
+}
+
+/// `attention.acknowledge`'s parameters.
+///
+/// The item id is required: an acknowledgement of "whatever is current"
+/// would let a delayed one eat the next real blocker (grill Q18). No command
+/// id, because nothing durable is recorded and the same id acknowledged twice
+/// is the same result.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AttentionAcknowledgeParams {
+    pub session_id: String,
+    pub attention_item_id: String,
+}
+
+/// `attention.report`'s parameters: from which day, inclusive, as
+/// `YYYY-MM-DD`; absent means every day the journal still holds.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AttentionReportParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
+/// One day of the attention journal, counted.
+///
+/// `incomplete` means the day's budget ran out: its counts are a floor and
+/// the day cannot stand as a complete evidence day (grill Q26).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionDayFacts {
+    pub date: String,
+    pub transitions: u64,
+    pub into_needs_you: u64,
+    pub into_ready: u64,
+    pub disputes: u64,
+    pub incomplete: bool,
+}
+
+/// `attention.report`'s result. Diagnostics read back, never product state.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionReportResult {
+    #[serde(default)]
+    pub days: Vec<AttentionDayFacts>,
+}
+
+/// `attention.dispute`'s parameters. The item is named when the client has
+/// one, so a dispute of the item that just resolved is not attributed to the
+/// one that replaced it (grill Q34).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AttentionDisputeParams {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_item_id: Option<String>,
+}
+
+/// `attention.dispute`'s result: whether the item named was already stale
+/// when the dispute arrived. Recorded either way; the journal is diagnostic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionDisputeResult {
+    pub stale: bool,
+}
+
 /// One session in a listing.
 ///
 /// The first concrete shape the wire commits to. Every field is a promise
@@ -366,6 +587,18 @@ pub struct SessionListItem {
     /// (`ARCHITECTURE.md` §1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location_hint: Option<String>,
+    /// The daemon's attention claim, when this daemon makes one.
+    ///
+    /// Absent is an older daemon, and the client renders what it rendered
+    /// before this field existed — Exited or Unknown from execution state —
+    /// rather than a claim of its own (ADR 0015 D1). A shape this build
+    /// cannot read degrades to the same, never losing the row.
+    #[serde(
+        default,
+        deserialize_with = "secondary_or_unknown",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub attention: Option<AttentionFacts>,
 }
 
 /// The origins this build names. Open on the decode side; see

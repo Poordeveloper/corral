@@ -91,6 +91,17 @@ corral_id!(
     "a needs-input request id"
 );
 
+corral_id!(
+    /// One attention item, for the life of the daemon that minted it.
+    ///
+    /// Ephemeral by decision (grill Q19): never persisted, never rebuilt across
+    /// a restart, and never guessed to be the same as an earlier one. It exists
+    /// so an acknowledgement names the item it saw rather than whatever item is
+    /// current when the acknowledgement arrives.
+    AttentionItemId,
+    "an attention item id"
+);
+
 /// Text that was expected to be a Corral-minted identity and is not.
 ///
 /// Reaching this from durable state means the store holds something Corral

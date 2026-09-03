@@ -1,0 +1,13 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788354513523285838, "offset": 0}
+{"quiet_s": 2, "last_output_ns": 1788354523066271201, "name": "quiet", "t_ns": 1788354525067630818, "offset": 11610}
+{"name": "prompt_ready", "t_ns": 1788354525067701673, "offset": 11610}
+{"name": "submitted", "t_ns": 1788354525920746197, "offset": 13006}
+{"last_output_ns": 1788354526396210639, "name": "working_0", "t_ns": 1788354526420947240, "offset": 14741}
+{"last_output_ns": 1788354526482908187, "name": "working_1", "t_ns": 1788354526987517477, "offset": 14942}
+{"last_output_ns": 1788354527481048419, "name": "working_2", "t_ns": 1788354527487714918, "offset": 16522}
+{"last_output_ns": 1788354527972658924, "name": "working_3", "t_ns": 1788354527987923670, "offset": 17084}
+{"t_ns": 1788354530595543633, "name": "notify_turn_complete", "offset": 25898}
+{"quiet_s": 3, "last_output_ns": 1788354534603629739, "name": "quiet", "t_ns": 1788354537606626512, "offset": 40479}
+{"name": "ready_after_turn", "t_ns": 1788354537606706780, "offset": 40479}
+{"name": "idle_65s", "t_ns": 1788354602606852479, "offset": 40479}
+{"name": "end", "t_ns": 1788354603160452737, "offset": 42395}

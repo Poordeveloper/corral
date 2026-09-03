@@ -628,3 +628,133 @@ fn sessions_started_in_the_same_instant_fall_back_to_a_deterministic_order() {
         expected,
     );
 }
+
+/// The screen thread publishes when the child last drew, so the attention
+/// engine can turn output into an activity claim without asking the screen.
+#[test]
+fn the_last_output_instant_is_published_once_the_child_draws() {
+    let running = started("printf hello; sleep 30");
+    let handle = running.handle.as_ref().expect("a handle");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while handle.last_output_at().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let drawn = handle.last_output_at().expect("the child drew");
+    assert!(drawn <= crate::clock::Monotonic::now());
+}
+
+/// A session running `script` under a manifest whose one rule matches the word
+/// the script prints.
+fn detecting_session(script: &str) -> super::SessionHandle {
+    let (manifest, _) = crate::detection::manifest::parse(
+        "schema = 1\nmin_engine_version = 1\nversion = \"t\"\nprovider = \"test\"\n[[rule]]\nid = \"hello\"\nasserts = \"turn_complete\"\nregion = \"whole_screen\"\nall = [\"hello\"]\n",
+    )
+    .expect("manifest");
+    let pending = spawn_session(&request("/bin/sh", &["-c", script]), GEOMETRY)
+        .expect("spawn")
+        .detect_with(std::sync::Arc::new(manifest), Some("2.1.258".to_owned()));
+    let (observations, _observed) = observe_runs();
+    std::mem::forget(_observed);
+    pending.serve(CorralSessionId::mint(), RunId::mint(), observations)
+}
+
+/// Wait for the first reading and answer when it was evaluated.
+fn settled_reading(handle: &super::SessionHandle) -> crate::clock::Monotonic {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while handle.reading().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    handle.reading().expect("a reading").at
+}
+
+/// With a manifest, the screen thread publishes what the screen matches once
+/// output settles, dated by the evaluation, so the tick can turn it into a
+/// claim without asking the screen.
+#[test]
+fn a_settled_screen_publishes_its_reading() {
+    let (manifest, _) = crate::detection::manifest::parse(
+        "schema = 1\nmin_engine_version = 1\nversion = \"t\"\nprovider = \"test\"\n[[rule]]\nid = \"hello\"\nasserts = \"turn_complete\"\nregion = \"whole_screen\"\nall = [\"hello\"]\n",
+    )
+    .expect("manifest");
+    let pending = spawn_session(
+        &request("/bin/sh", &["-c", "printf hello; sleep 30"]),
+        GEOMETRY,
+    )
+    .expect("spawn")
+    .detect_with(std::sync::Arc::new(manifest), Some("2.1.258".to_owned()));
+    let (observations, observed) = observe_runs();
+    let handle = pending.serve(CorralSessionId::mint(), RunId::mint(), observations);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while handle.reading().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let reading = handle.reading().expect("a reading");
+    assert_eq!(reading.rule, "hello");
+    assert_eq!(reading.asserts, corral_core::SemanticState::Ready);
+    handle.shut_down();
+    drop(observed);
+}
+
+/// The echo of a keystroke Corral wrote is a person typing, not the agent
+/// drawing: output inside the echo window after an input leaves the
+/// last-output instant where it was.
+#[test]
+fn the_echo_of_written_input_is_not_the_child_drawing() {
+    // `cat` echoes what it is given and draws nothing on its own.
+    let running = started("exec cat");
+    let handle = running.handle.as_ref().expect("a handle");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(handle.last_output_at(), None, "nothing drawn yet");
+
+    handle.write_input(b"hello".to_vec()).expect("input taken");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        handle.last_output_at(),
+        None,
+        "the echo is not the child drawing"
+    );
+
+    // Output the child produces on its own, later, does count.
+    std::thread::sleep(ECHO_WINDOW + Duration::from_millis(50));
+    handle.write_input(b"\n".to_vec()).expect("input taken");
+    std::thread::sleep(ECHO_WINDOW + Duration::from_millis(50));
+    // `cat` echoes the newline within the window as well; the assertion
+    // above holds for the same reason.
+    let _ = handle.last_output_at();
+}
+
+/// A reading is dated at the last moment the screen was known to support it
+/// (ADR 0015 D4). While nothing is drawn, the screen still says what it said,
+/// so the reading stays current and the claim built from it does not rot under
+/// a dialog that is still on screen.
+#[test]
+fn a_quiet_screen_keeps_its_reading_current() {
+    let handle = detecting_session("printf hello; sleep 30");
+    let first = settled_reading(&handle);
+    std::thread::sleep(Duration::from_millis(600));
+    let second = handle.reading().expect("a reading").at;
+    assert!(
+        second > first,
+        "an unchanged screen still supports its reading: {first:?} -> {second:?}"
+    );
+    handle.shut_down();
+}
+
+/// Output the screen thread has not been able to read is a screen the reading
+/// may no longer describe. Its date must stop moving, so the claim ages and
+/// rots rather than being re-stamped as new evidence for a dialog that may
+/// already be gone — the stale Needs You the horizons exist to bound.
+#[test]
+fn a_screen_being_redrawn_stops_dating_its_reading_forward() {
+    let handle = detecting_session("printf hello; sleep 1; while :; do printf .; sleep 0.05; done");
+    settled_reading(&handle);
+    std::thread::sleep(Duration::from_millis(1400));
+    let during = handle.reading().expect("a reading").at;
+    std::thread::sleep(Duration::from_millis(600));
+    let later = handle.reading().expect("a reading").at;
+    assert_eq!(
+        during, later,
+        "a screen that never settles cannot re-date what it last matched"
+    );
+    handle.shut_down();
+}

@@ -1,0 +1,10 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788353910641321508, "offset": 0}
+{"name": "prompt_ready", "t_ns": 1788353911931896605, "offset": 1448}
+{"name": "submitted", "t_ns": 1788353912332162163, "offset": 2483}
+{"name": "hook_timeout", "t_ns": 1788354035065881425, "offset": 14709}
+{"name": "real_permission_prompt", "t_ns": 1788354036566110006, "offset": 14709}
+{"name": "approved", "t_ns": 1788354036566234665, "offset": 14709}
+{"name": "stop_hook", "t_ns": 1788354036566860343, "offset": 14709}
+{"quiet_s": 3, "last_output_ns": 1788354036566942889, "name": "quiet", "t_ns": 1788354039569649750, "offset": 14713}
+{"name": "ready_with_permission_like_output", "t_ns": 1788354039569767202, "offset": 14713}
+{"name": "end", "t_ns": 1788354040631132817, "offset": 18079}

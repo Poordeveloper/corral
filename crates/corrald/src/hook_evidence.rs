@@ -402,7 +402,11 @@ async fn ingest_external(
         provider,
         identity,
         corroboration,
-        delivered.observed_at,
+        crate::clock::Reading {
+            mono: crate::clock::Monotonic::of(delivered.arrived),
+            wall: delivered.observed_at,
+        },
+        Some(report.fact),
     )
     .await?;
     Ok(())
@@ -421,7 +425,34 @@ async fn apply(
         kind: report.fact,
         observed_at,
     };
-    state.with_runtime(|runtime| runtime.reported.reported(session, provider, fact, arrived));
+    state.with_runtime(|runtime| {
+        runtime.reported.reported(session, provider, fact, arrived);
+        // The same fact as a claim: this launch's token puts the event on a
+        // runtime Corral constructed, and whether the event is version-sealed
+        // is the sealing table's answer, not this path's (ADR 0015 D3).
+        let version = runtime
+            .reported
+            .get(session)
+            .and_then(|reported| reported.provider_version.clone());
+        if let Some(claim) = crate::attention::hook_fact_claim(
+            provider,
+            fact.kind,
+            version.as_deref(),
+            corral_core::Assurance::Deterministic,
+            corral_core::Channel::CorralOwnedPty,
+        ) {
+            // Both halves of the delivery's own moment: the arrival instant
+            // the age is measured from, and the wall time it is called by.
+            runtime.attention.observe(
+                session,
+                claim,
+                crate::clock::Reading {
+                    mono: crate::clock::Monotonic::of(arrived),
+                    wall: observed_at,
+                },
+            );
+        }
+    });
 
     let Some(reported_id) = report.identity.clone() else {
         return Ok(());

@@ -109,6 +109,14 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
                 list.notice = continue_into(&mut daemon, &session, &mut keys).await;
                 returned(&mut screen, &mut list)?;
             }
+            // Nothing leaves the list for this one: the daemon answers, the
+            // notice says what it said, and the next poll shows the badge.
+            Chosen::Acknowledge { session, item } => {
+                list.notice = Some(match daemon.acknowledge(&session, &item).await {
+                    Ok(()) => "Acknowledged.".to_owned(),
+                    Err(unanswered) => unanswered.line(),
+                });
+            }
         }
         // Returning here re-enters `show`, whose first poll fires immediately:
         // the list a person comes back to is current, not a second stale
@@ -124,6 +132,12 @@ enum Chosen {
     New(crate::launch::Requested),
     /// Continue a Session as a new Run, and go straight into it.
     Continue(String),
+    /// Acknowledge the selected row's current item, by the id this surface
+    /// saw — never "whatever is current" (grill Q18).
+    Acknowledge {
+        session: String,
+        item: String,
+    },
 }
 
 /// One row: a session the daemon reported, and what this surface may say.
@@ -164,6 +178,10 @@ struct SessionList {
     notice: Option<String>,
     /// The command being typed, when the person is starting a session.
     typing: Option<String>,
+    /// The daemon's counts, when its last answer carried them. Never
+    /// computed here: a header that counted rows would disagree with the
+    /// badge the daemon serves elsewhere (grill Q23).
+    summary: Option<corral_protocol::method::AttentionSummaryResult>,
     /// Whether the daemon has answered at all yet, so an empty list before the
     /// first answer does not claim there are no sessions.
     answered: bool,
@@ -213,38 +231,53 @@ async fn show(
             }
         }
 
-        // The question, which a keystroke does not cancel. Abandoning one
+        // A question, which a keystroke does not cancel. Abandoning one
         // leaves the socket where its next read is the answer to a question
         // nobody is holding, and the connection has to be thrown away with it
         // — so the keys are answered while it is out, and it is waited for
-        // even by someone on their way to a session.
-        let mut question = std::pin::pin!(daemon.sessions());
-        let answered = loop {
-            tokio::select! {
-                answered = &mut question => break answered,
-                typed = keys.next() => match arriving(typed, &mut keyboard, keys, list) {
-                    Typed::Chose(chosen) => {
-                        // Waited out only when what comes next needs this
-                        // connection. Somebody leaving the surface does not,
-                        // and making them wait for an answer nobody will read
-                        // is the opposite of the point.
-                        if !matches!(chosen, Chosen::Quit) {
-                            let _ = question.await;
+        // even by someone on their way to a session. A macro rather than a
+        // helper because it returns from `show` on the person's behalf.
+        macro_rules! answered_while_typing {
+            ($question:expr) => {{
+                let mut question = std::pin::pin!($question);
+                loop {
+                    tokio::select! {
+                        answered = &mut question => break answered,
+                        typed = keys.next() => match arriving(typed, &mut keyboard, keys, list) {
+                            Typed::Chose(chosen) => {
+                                // Waited out only when what comes next needs
+                                // this connection. Somebody leaving the surface
+                                // does not, and making them wait for an answer
+                                // nobody will read is the opposite of the point.
+                                if !matches!(chosen, Chosen::Quit) {
+                                    let _ = question.await;
+                                }
+                                return Ok(chosen);
+                            }
+                            Typed::Closed => return Ok(Chosen::Quit),
+                            Typed::Handled => draw(screen, list)?,
+                        },
+                        () = tokio::time::sleep(ESCAPE_GRACE), if keyboard.undecided() => {
+                            settle(&mut keyboard, list);
+                            draw(screen, list)?;
                         }
-                        return Ok(chosen);
                     }
-                    Typed::Closed => return Ok(Chosen::Quit),
-                    Typed::Handled => draw(screen, list)?,
-                },
-                () = tokio::time::sleep(ESCAPE_GRACE), if keyboard.undecided() => {
-                    settle(&mut keyboard, list);
-                    draw(screen, list)?;
                 }
-            }
-        };
+            }};
+        }
 
+        let answered = answered_while_typing!(daemon.sessions());
         list.take(answered.map(decode));
         draw(screen, list)?;
+        // The counts, asked only of a daemon that just answered: one that did
+        // not will not answer this either, and a person must not wait out a
+        // second silence to be told about the first. Its own failure costs the
+        // counts and nothing else — the rows are already current.
+        if list.unanswered.is_none() {
+            let summary = answered_while_typing!(daemon.summary()).ok();
+            list.take_summary(summary);
+            draw(screen, list)?;
+        }
     }
 }
 
@@ -442,6 +475,11 @@ fn decode(listed: SessionListResult) -> Listed {
 }
 
 impl SessionList {
+    /// Accept the daemon's counts, or their absence.
+    fn take_summary(&mut self, summary: Option<corral_protocol::method::AttentionSummaryResult>) {
+        self.summary = summary;
+    }
+
     /// Accept what the last poll produced.
     fn take(&mut self, answered: Result<Listed, Unanswered>) {
         match answered {
@@ -500,6 +538,7 @@ impl SessionList {
             }
             Key::Enter => self.open_selected(),
             Key::Typed('c') => self.continue_selected(),
+            Key::Typed('a') => self.acknowledge_selected(),
             Key::Typed('n') => {
                 self.notice = None;
                 self.typing = Some(String::new());
@@ -549,6 +588,24 @@ impl SessionList {
 
         self.notice = None;
         Some(Chosen::Continue(row.session_id.clone()))
+    }
+
+    /// Acknowledge the selected row's current item.
+    ///
+    /// Only an unacknowledged current item is something to acknowledge; a row
+    /// without one is told so here rather than sent to the daemon to be told
+    /// the same thing.
+    fn acknowledge_selected(&mut self) -> Option<Chosen> {
+        let row = self.rows.get(self.selected)?;
+        let Some(item) = row.presentation.acknowledgeable() else {
+            self.notice = Some("Nothing to acknowledge.".to_owned());
+            return None;
+        };
+        self.notice = None;
+        Some(Chosen::Acknowledge {
+            session: row.session_id.clone(),
+            item: item.to_owned(),
+        })
     }
 
     fn type_command(&mut self, key: Key) -> Option<Chosen> {
@@ -764,13 +821,25 @@ fn heading(list: &SessionList) -> String {
     // What the daemon reported, which is not what this build could draw: a
     // heading counting only the rows would disagree with the line under them
     // saying there are more.
-    match list.rows.len() + list.unrenderable {
+    let mut heading = match list.rows.len() + list.unrenderable {
         // The body already says "No sessions.", and a heading counting them
         // again is the same frame saying it twice.
         0 => "Corral".to_owned(),
         1 => "Corral — 1 session".to_owned(),
         other => format!("Corral — {other} sessions"),
+    };
+    // Totals, not the badge: a header that said two over three Needs You rows
+    // because one was acknowledged would be the surface contradicting itself
+    // (grill Q23). Nothing needing anyone says nothing.
+    if let Some(summary) = &list.summary {
+        if summary.needs_you.total > 0 {
+            heading.push_str(&format!(" · Needs You {}", summary.needs_you.total));
+        }
+        if summary.ready.total > 0 {
+            heading.push_str(&format!(" · Ready {}", summary.ready.total));
+        }
     }
+    heading
 }
 
 fn draw_row(frame: &mut Frame, row: &Row, selected: bool, geometry: Geometry) {

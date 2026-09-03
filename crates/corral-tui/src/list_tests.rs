@@ -587,3 +587,78 @@ fn the_footer_names_every_action_the_list_has() {
         assert!(FOOTER.contains(action), "{FOOTER} omits {action}");
     }
 }
+
+// ---------------------------------------------------------------- attention
+
+fn attended(id: &str, state: &str, item: Option<(&str, bool)>) -> Value {
+    let items: Vec<Value> = item
+        .map(|(item_id, acknowledged)| {
+            json!({"attention_item_id": item_id, "reason": "needs_input", "since_unix_ms": 0, "acknowledged": acknowledged})
+        })
+        .into_iter()
+        .collect();
+    json!({
+        "session_id": id, "title": "claude", "execution_state": "running",
+        "attention": {"state": state, "since_unix_ms": 0, "items": items}
+    })
+}
+
+fn summary(
+    needs_you: (u32, u32),
+    ready: (u32, u32),
+) -> corral_protocol::method::AttentionSummaryResult {
+    corral_protocol::method::AttentionSummaryResult {
+        needs_you: corral_protocol::method::AttentionCount {
+            total: needs_you.0,
+            unacknowledged: needs_you.1,
+        },
+        ready: corral_protocol::method::AttentionCount {
+            total: ready.0,
+            unacknowledged: ready.1,
+        },
+    }
+}
+
+/// The heading shows the daemon's totals — a header reads totals, a badge
+/// reads unacknowledged (grill Q23) — and only while the daemon answers.
+#[test]
+fn the_heading_shows_the_daemons_counts_when_it_has_them() {
+    let mut list = SessionList::default();
+    list.take(answered(running(2)));
+    list.take_summary(Some(summary((1, 1), (1, 0))));
+    assert_eq!(
+        heading(&list),
+        "Corral — 2 sessions · Needs You 1 · Ready 1"
+    );
+
+    list.take_summary(Some(summary((0, 0), (0, 0))));
+    assert_eq!(heading(&list), "Corral — 2 sessions");
+
+    list.take_summary(None);
+    assert_eq!(heading(&list), "Corral — 2 sessions");
+}
+
+/// `a` acknowledges the selected row's current item by its id, and says so
+/// when there is nothing to acknowledge.
+#[test]
+fn a_acknowledges_the_selected_rows_current_item_by_id() {
+    let mut list = SessionList::default();
+    list.take(answered(vec![
+        attended("s0-rest", "needs_you", Some(("item-0", false))),
+        attended("s1-rest", "ready", Some(("item-1", true))),
+        attended("s2-rest", "working", None),
+    ]));
+
+    assert!(matches!(
+        list.act(Key::Typed('a')),
+        Some(Chosen::Acknowledge { session, item }) if session == "s0-rest" && item == "item-0"
+    ));
+
+    list.act(Key::Down);
+    assert!(list.act(Key::Typed('a')).is_none());
+    assert_eq!(list.notice.as_deref(), Some("Nothing to acknowledge."));
+
+    list.act(Key::Down);
+    assert!(list.act(Key::Typed('a')).is_none());
+    assert_eq!(list.notice.as_deref(), Some("Nothing to acknowledge."));
+}

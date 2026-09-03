@@ -22,6 +22,10 @@ fn derives_every_artifact_from_the_account_home() {
         paths.registry(),
         Path::new("/home/example/.corral/state/registry.sqlite3")
     );
+    assert_eq!(
+        paths.diagnostics_dir(),
+        Path::new("/home/example/.corral/diagnostics")
+    );
 }
 
 /// The account home only supplies the root; the layout under it is one

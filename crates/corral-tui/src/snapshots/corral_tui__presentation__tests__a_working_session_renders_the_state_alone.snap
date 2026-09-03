@@ -1,0 +1,5 @@
+---
+source: crates/corral-tui/src/presentation_tests.rs
+expression: "rendered(&attended(AttentionWireState::Working, Vec::new()))"
+---
+Working

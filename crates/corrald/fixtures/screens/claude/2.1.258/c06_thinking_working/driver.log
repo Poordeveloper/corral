@@ -1,0 +1,18 @@
+1021503 mark resize
+1056643 started pid=1311757
+1221835440 wait_for '❯|manual mode on|auto mode on' matched at +1056
+1221905384 mark prompt_ready
+1622233597 mark submitted
+1820451283 wait_hook matched record 1
+2320641887 mark working_0
+2820816079 mark working_1
+3321005143 mark working_2
+3821178307 mark working_3
+4321374847 mark working_4
+4821574998 mark working_5
+4822046716 wait_hook matched record 2
+4822077584 mark stop_hook
+7824380814 mark quiet
+7824403706 mark ready_after_stop
+8646766436 wait_hook matched record 3
+9134128344 mark end

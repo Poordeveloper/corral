@@ -1,0 +1,321 @@
+use std::time::{Duration, SystemTime};
+
+use corral_core::{
+    Assurance, AttentionState, Channel, Claim, EvidenceSource, LastKnown, MainState, Sealing,
+    SemanticState,
+};
+
+use super::*;
+use crate::clock::{Monotonic, Reading};
+use crate::runtime::ExecutionState;
+
+/// Far enough past the daemon's origin that every age in these tests is
+/// representable on the monotonic clock.
+const BASE_SECS: u64 = 100_000;
+
+fn now() -> Reading {
+    Reading {
+        mono: Monotonic::from_millis(BASE_SECS * 1_000),
+        wall: SystemTime::UNIX_EPOCH + Duration::from_secs(BASE_SECS),
+    }
+}
+
+fn at(seconds_ago: u64) -> Monotonic {
+    Monotonic::from_millis((BASE_SECS - seconds_ago) * 1_000)
+}
+
+/// The wall time the same moment is called by.
+fn wall_at(seconds_ago: u64) -> SystemTime {
+    now().wall - Duration::from_secs(seconds_ago)
+}
+
+fn observed(
+    source: EvidenceSource,
+    asserts: SemanticState,
+    ordinal: u64,
+    seconds_ago: u64,
+) -> Observed {
+    Observed {
+        claim: Claim {
+            source,
+            association: Assurance::Deterministic,
+            channel: Channel::CorralOwnedPty,
+            sealing: Sealing::Sealed,
+            asserts,
+        },
+        observed_at: at(seconds_ago),
+        ordinal,
+    }
+}
+
+fn derive_running(claims: &[Observed]) -> Derived {
+    derive(ExecutionState::Running, claims, &Horizons::default(), now())
+}
+
+/// Execution gates semantics (ADR 0015 D2): a runtime that ended has nothing
+/// left to be Needs You about.
+#[test]
+fn exited_execution_is_exited_whatever_the_claims_say() {
+    let blocked = observed(EvidenceSource::ProviderHook, SemanticState::NeedsYou, 1, 1);
+    let derived = derive(
+        ExecutionState::Exited,
+        &[blocked],
+        &Horizons::default(),
+        now(),
+    );
+    assert_eq!(derived.main, MainState::Exited);
+    assert_eq!(derived.last_known, None);
+}
+
+/// A runtime Corral cannot place makes no semantic claim, but keeps the last
+/// reliable fact for the secondary line.
+#[test]
+fn unknown_execution_is_unknown_with_the_newest_entitled_claim_as_last_known() {
+    let blocked = observed(EvidenceSource::ProviderHook, SemanticState::NeedsYou, 1, 1);
+    let derived = derive(
+        ExecutionState::Unknown,
+        &[blocked],
+        &Horizons::default(),
+        now(),
+    );
+    assert_eq!(derived.main, MainState::Unknown);
+    assert_eq!(
+        derived.last_known,
+        Some(LastKnown::new(MainState::NeedsYou, wall_at(1)))
+    );
+}
+
+#[test]
+fn no_claims_is_unknown_with_nothing_last_known() {
+    let derived = derive_running(&[]);
+    assert_eq!(derived.main, MainState::Unknown);
+    assert_eq!(derived.last_known, None);
+}
+
+/// Among fresh entitled claims the causally newest wins, however much more
+/// authoritative the older one was (grill Q3).
+#[test]
+fn the_causally_newest_fresh_claim_wins_over_authority() {
+    let older_hook = observed(EvidenceSource::ProviderHook, SemanticState::NeedsYou, 1, 10);
+    let newer_screen = observed(EvidenceSource::ScreenDetection, SemanticState::Ready, 2, 1);
+    assert_eq!(
+        derive_running(&[older_hook, newer_screen]).main,
+        MainState::Ready
+    );
+}
+
+/// Ordering is Corral's observation sequence, never a comparison of wall
+/// clocks: a clock that stepped back must not make the later fact older.
+#[test]
+fn ordering_is_by_observation_sequence_not_wall_clock() {
+    let later_by_sequence = observed(EvidenceSource::ProviderHook, SemanticState::Ready, 2, 5);
+    let earlier_by_sequence = observed(EvidenceSource::ProviderHook, SemanticState::Working, 1, 1);
+    assert_eq!(
+        derive_running(&[earlier_by_sequence, later_by_sequence]).main,
+        MainState::Ready
+    );
+}
+
+/// Activity is the default and a blocker is the exception: the prompt that
+/// blocks the agent is drawn by the same output flow (ADR 0015 D4).
+#[test]
+fn a_fresh_blocker_beats_fresh_activity() {
+    let blocker = observed(
+        EvidenceSource::ScreenDetection,
+        SemanticState::NeedsYou,
+        2,
+        1,
+    );
+    let activity = observed(EvidenceSource::PtyActivity, SemanticState::Working, 3, 0);
+    assert_eq!(
+        derive_running(&[blocker, activity]).main,
+        MainState::NeedsYou
+    );
+}
+
+#[test]
+fn activity_alone_is_working_until_the_quiet_horizon() {
+    let recent = observed(EvidenceSource::PtyActivity, SemanticState::Working, 1, 2);
+    assert_eq!(derive_running(&[recent]).main, MainState::Working);
+
+    let quiet = observed(EvidenceSource::PtyActivity, SemanticState::Working, 1, 4);
+    let derived = derive_running(&[quiet]);
+    assert_eq!(derived.main, MainState::Unknown);
+    assert_eq!(
+        derived.last_known,
+        Some(LastKnown::new(MainState::Working, wall_at(4)))
+    );
+}
+
+/// Every semantic claim rots (ADR 0015 D4): past its horizon the main state
+/// is Unknown and the claim survives only as the last known fact.
+#[test]
+fn a_claim_past_its_horizon_rots_to_unknown_with_last_known() {
+    let stale = observed(
+        EvidenceSource::ProviderHook,
+        SemanticState::NeedsYou,
+        1,
+        6 * 60,
+    );
+    let derived = derive_running(&[stale]);
+    assert_eq!(derived.main, MainState::Unknown);
+    assert_eq!(
+        derived.last_known,
+        Some(LastKnown::new(MainState::NeedsYou, wall_at(6 * 60)))
+    );
+
+    let fresh = observed(
+        EvidenceSource::ProviderHook,
+        SemanticState::NeedsYou,
+        1,
+        4 * 60,
+    );
+    assert_eq!(derive_running(&[fresh]).main, MainState::NeedsYou);
+}
+
+/// A claim nobody is entitled to make is not a fact that rotted; it never
+/// was one, so it is not even last known.
+#[test]
+fn unentitled_claims_are_ignored_entirely() {
+    let mut heuristic = observed(EvidenceSource::ProviderHook, SemanticState::NeedsYou, 1, 1);
+    heuristic.claim.association = Assurance::Heuristic;
+    let mut unsealed = observed(
+        EvidenceSource::ScreenDetection,
+        SemanticState::NeedsYou,
+        2,
+        1,
+    );
+    unsealed.claim.sealing = Sealing::Unsealed;
+    let derived = derive_running(&[heuristic, unsealed]);
+    assert_eq!(derived.main, MainState::Unknown);
+    assert_eq!(derived.last_known, None);
+}
+
+/// The ruled initial horizons (grill Q15), stated so a change to one is a
+/// change someone made on purpose.
+#[test]
+fn the_default_horizons_are_the_ruled_initial_values() {
+    let horizons = Horizons::default();
+    assert_eq!(
+        horizons.of(EvidenceSource::PtyActivity, SemanticState::Working),
+        Duration::from_secs(3)
+    );
+    assert_eq!(
+        horizons.of(EvidenceSource::ProviderHook, SemanticState::Working),
+        Duration::from_secs(15 * 60)
+    );
+    assert_eq!(
+        horizons.of(EvidenceSource::ProviderHook, SemanticState::NeedsYou),
+        Duration::from_secs(5 * 60)
+    );
+    assert_eq!(
+        horizons.of(EvidenceSource::ProviderHook, SemanticState::Ready),
+        Duration::from_secs(2 * 60 * 60)
+    );
+}
+
+/// The derived shape converts into the state a client reads.
+#[test]
+fn a_derivation_becomes_an_attention_state_at_an_instant() {
+    let derived = derive_running(&[observed(
+        EvidenceSource::ProviderHook,
+        SemanticState::Ready,
+        1,
+        1,
+    )]);
+    assert_eq!(
+        derived.into_state(now().wall),
+        AttentionState::asserted(MainState::Ready, now().wall)
+    );
+    let rotted = derive_running(&[observed(
+        EvidenceSource::ProviderHook,
+        SemanticState::Ready,
+        1,
+        3 * 60 * 60,
+    )]);
+    assert_eq!(
+        rotted.into_state(now().wall),
+        AttentionState::unknown(
+            now().wall,
+            Some(LastKnown::new(MainState::Ready, wall_at(3 * 60 * 60)))
+        )
+    );
+}
+
+/// A blocker beats activity only while it is still the newest thing any
+/// source other than the PTY said. Once the turn is reported done, the output
+/// that follows is work: reviving the cleared blocker would be the stale
+/// Needs You D4 forbids — "older evidence never revives a state".
+#[test]
+fn activity_does_not_revive_a_blocker_a_later_claim_cleared() {
+    let blocker = observed(EvidenceSource::ProviderHook, SemanticState::NeedsYou, 1, 30);
+    let cleared = observed(EvidenceSource::ProviderHook, SemanticState::Ready, 2, 20);
+    let activity = observed(EvidenceSource::PtyActivity, SemanticState::Working, 3, 0);
+    assert_eq!(
+        derive_running(&[blocker, cleared, activity]).main,
+        MainState::Working
+    );
+}
+
+/// Contradiction is an ordering fact, not a freshness one. A blocker a later
+/// claim cleared stays cleared once that later claim rots: rot means the newer
+/// fact expired, never that the older one became true again (ADR 0015 D4).
+#[test]
+fn a_blocker_stays_cleared_after_the_claim_that_cleared_it_rots() {
+    let blocker = observed(EvidenceSource::ProviderHook, SemanticState::NeedsYou, 1, 60);
+    let cleared = observed(EvidenceSource::InBandSignal, SemanticState::Working, 2, 30);
+    let activity = observed(EvidenceSource::PtyActivity, SemanticState::Working, 3, 0);
+    assert_eq!(
+        derive_running(&[blocker, cleared, activity]).main,
+        MainState::Working
+    );
+}
+
+/// A later claim asserting the same state is agreement, not contradiction:
+/// when the screen's reading of the blocker rots, the hook's identical blocker
+/// still stands until its own horizon.
+#[test]
+fn a_blocker_stands_when_a_later_claim_agreed_and_then_rotted() {
+    let hook_blocker = observed(EvidenceSource::ProviderHook, SemanticState::NeedsYou, 1, 60);
+    let screen_blocker = observed(
+        EvidenceSource::ScreenDetection,
+        SemanticState::NeedsYou,
+        2,
+        30,
+    );
+    let activity = observed(EvidenceSource::PtyActivity, SemanticState::Working, 3, 0);
+    assert_eq!(
+        derive_running(&[hook_blocker, screen_blocker, activity]).main,
+        MainState::NeedsYou
+    );
+}
+
+/// Freshness is an age on the clock that only moves forward, so what the wall
+/// clock says at the moment of derivation cannot change it. An NTP step
+/// backwards used to make every fresh claim stale at once, and make them all
+/// fresh again as wall time caught up — a state revived with no new evidence,
+/// which is what D4 forbids and D5 names the clock to prevent.
+#[test]
+fn the_wall_clock_at_derivation_does_not_age_a_claim() {
+    let blocker = observed(EvidenceSource::ProviderHook, SemanticState::NeedsYou, 1, 60);
+    let stepped_back = Reading {
+        wall: SystemTime::UNIX_EPOCH,
+        ..now()
+    };
+    let stepped_forward = Reading {
+        wall: now().wall + Duration::from_secs(3 * 60 * 60),
+        ..now()
+    };
+    for reading in [now(), stepped_back, stepped_forward] {
+        assert_eq!(
+            derive(
+                ExecutionState::Running,
+                &[blocker],
+                &Horizons::default(),
+                reading
+            )
+            .main,
+            MainState::NeedsYou
+        );
+    }
+}

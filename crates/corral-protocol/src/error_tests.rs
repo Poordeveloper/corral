@@ -23,6 +23,7 @@ fn every_known_code() -> Vec<ErrorCode> {
         ErrorCode::CommandIdConflict,
         ErrorCode::UnknownProvider,
         ErrorCode::SessionNotContinuable,
+        ErrorCode::StaleAttentionItem,
     ];
     for code in &codes {
         match code {
@@ -33,7 +34,8 @@ fn every_known_code() -> Vec<ErrorCode> {
             | ErrorCode::Busy
             | ErrorCode::CommandIdConflict
             | ErrorCode::UnknownProvider
-            | ErrorCode::SessionNotContinuable => {}
+            | ErrorCode::SessionNotContinuable
+            | ErrorCode::StaleAttentionItem => {}
             // Not a spelling this build owns: it is whatever a peer sent.
             ErrorCode::Unknown(_) => unreachable!("the list above names no unknown code"),
         }

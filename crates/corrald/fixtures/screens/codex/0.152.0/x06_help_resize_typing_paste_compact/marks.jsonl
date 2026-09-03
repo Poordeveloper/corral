@@ -1,0 +1,29 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788354441384727891, "offset": 0}
+{"quiet_s": 2, "last_output_ns": 1788354450617332915, "name": "quiet", "t_ns": 1788354452618633431, "offset": 4835}
+{"name": "prompt_ready", "t_ns": 1788354452618732700, "offset": 4835}
+{"quiet_s": 3, "last_output_ns": 1788354457565214682, "name": "quiet", "t_ns": 1788354460568626034, "offset": 20330}
+{"name": "ready", "t_ns": 1788354460568700640, "offset": 20330}
+{"quiet_s": 1, "last_output_ns": 1788354460996676818, "name": "quiet", "t_ns": 1788354462995636254, "offset": 22228}
+{"name": "help", "t_ns": 1788354462995697200, "offset": 22228}
+{"quiet_s": 1, "last_output_ns": 1788354462997269505, "name": "quiet", "t_ns": 1788354464996642587, "offset": 22305}
+{"name": "after_help", "t_ns": 1788354464996751325, "offset": 22305}
+{"rows": 30, "cols": 100, "name": "resize", "t_ns": 1788354464996807653, "offset": 22305}
+{"quiet_s": 1, "last_output_ns": 1788354465149792709, "name": "quiet", "t_ns": 1788354466997639417, "offset": 24996}
+{"name": "after_resize_small", "t_ns": 1788354466997724550, "offset": 24996}
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788354466997776831, "offset": 24996}
+{"quiet_s": 1, "last_output_ns": 1788354467149778759, "name": "quiet", "t_ns": 1788354468998632886, "offset": 27687}
+{"name": "after_resize_back", "t_ns": 1788354468998704367, "offset": 27687}
+{"name": "typed_no_enter", "t_ns": 1788354471945723619, "offset": 32182}
+{"quiet_s": 1, "last_output_ns": 1788354471906473445, "name": "quiet", "t_ns": 1788354472946631452, "offset": 32182}
+{"name": "typed_settled", "t_ns": 1788354472946709345, "offset": 32182}
+{"quiet_s": 1, "last_output_ns": 1788354472948324425, "name": "quiet", "t_ns": 1788354474447624646, "offset": 32296}
+{"name": "cleared", "t_ns": 1788354474447672744, "offset": 32296}
+{"name": "pasted", "t_ns": 1788354474447712576, "offset": 32296}
+{"quiet_s": 1, "last_output_ns": 1788354474450728003, "name": "quiet", "t_ns": 1788354475451624463, "offset": 34017}
+{"name": "paste_settled", "t_ns": 1788354475451703660, "offset": 34017}
+{"quiet_s": 1, "last_output_ns": 1788354475453684520, "name": "quiet", "t_ns": 1788354476952621307, "offset": 34123}
+{"name": "cleared_2", "t_ns": 1788354476952690151, "offset": 34123}
+{"name": "compact_submitted", "t_ns": 1788354477453791420, "offset": 34842}
+{"quiet_s": 3, "last_output_ns": 1788354491417841292, "name": "quiet", "t_ns": 1788354494420636968, "offset": 91334}
+{"name": "after_compact", "t_ns": 1788354494420709433, "offset": 91334}
+{"name": "end", "t_ns": 1788354495020585145, "offset": 93199}

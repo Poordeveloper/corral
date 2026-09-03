@@ -1,0 +1,17 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788353571086482161, "offset": 0}
+{"name": "prompt_ready_plan_mode", "t_ns": 1788353572258285895, "offset": 1976}
+{"quiet_s": 2, "last_output_ns": 1788353573092965646, "name": "quiet", "t_ns": 1788353575094625221, "offset": 2458}
+{"name": "plan_mode_idle", "t_ns": 1788353575094699569, "offset": 2458}
+{"name": "submitted", "t_ns": 1788353575494959439, "offset": 2648}
+{"present": true, "name": "plan_permission_request_hook", "t_ns": 1788353583144767256, "offset": 16947}
+{"name": "plan_approval_visible", "t_ns": 1788353585144927092, "offset": 16947}
+{"quiet_s": 2, "last_output_ns": 1788353583043271531, "name": "quiet", "t_ns": 1788353587146634135, "offset": 16947}
+{"name": "plan_approval_settled", "t_ns": 1788353587146719058, "offset": 16947}
+{"name": "hook_timeout", "t_ns": 1788353590165173115, "offset": 16947}
+{"present": false, "name": "permission_request_hook", "t_ns": 1788353590165213569, "offset": 16947}
+{"name": "plan_rejected_esc", "t_ns": 1788353590165300787, "offset": 16947}
+{"name": "hook_timeout", "t_ns": 1788353712213799600, "offset": 19357}
+{"name": "stop_hook", "t_ns": 1788353712213856296, "offset": 19357}
+{"quiet_s": 3, "last_output_ns": 1788353590267216225, "name": "quiet", "t_ns": 1788353715216647257, "offset": 19357}
+{"name": "ready_after", "t_ns": 1788353715216742644, "offset": 19357}
+{"name": "end", "t_ns": 1788353716355189979, "offset": 22727}

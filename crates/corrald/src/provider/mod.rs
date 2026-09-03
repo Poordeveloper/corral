@@ -42,6 +42,7 @@ pub mod launch;
 pub mod recognition;
 pub mod relay_grammar;
 pub mod reported;
+pub mod version;
 
 use std::ffi::OsString;
 use std::path::Path;

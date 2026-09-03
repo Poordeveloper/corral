@@ -195,10 +195,16 @@ async fn bootstrap(
         // for the life of the process. Serving the method is not the question
         // a capability answers; whether the offer leads anywhere is. The bind
         // is attempted before the first hello, so the answer is known here.
-        capabilities: if state.hook_endpoint_was_bound() {
-            BTreeSet::from([capability::MANAGED_SESSIONS.to_owned()])
-        } else {
-            BTreeSet::new()
+        capabilities: {
+            // Unconditional: every session this daemon can see is derived
+            // over, whether or not it can start one, and a client that must
+            // decide whether to show a state at all asks here rather than
+            // discovering `method_not_found` in front of a person.
+            let mut capabilities = BTreeSet::from([capability::ATTENTION.to_owned()]);
+            if state.hook_endpoint_was_bound() {
+                capabilities.insert(capability::MANAGED_SESSIONS.to_owned());
+            }
+            capabilities
         },
         compatibility_result: verdict,
     };
@@ -429,6 +435,16 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
             )),
             Err(error) => Dispatch::FailClosed(error),
         },
+        // Live state only: nothing durable is read or written, so neither
+        // takes the registry gate. The summary is the daemon's projection of
+        // its current items; an acknowledgement names the item it saw.
+        method::ATTENTION_SUMMARY => match no_params(request) {
+            Ok(()) => Dispatch::Reply(attention_summary(id, state)),
+            Err(error) => Dispatch::Reply(Frame::error(id, error)),
+        },
+        method::ATTENTION_ACKNOWLEDGE => Dispatch::Reply(attention_acknowledge(request, state)),
+        method::ATTENTION_REPORT => Dispatch::Reply(attention_report(request, state).await),
+        method::ATTENTION_DISPUTE => Dispatch::Reply(attention_dispute(request, state).await),
         // Status reads a file rather than the registry, but it is still a
         // claim made in the daemon's name and the two mutations write durable
         // intent, so all three take the same gate as any other request.
@@ -463,16 +479,33 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
     // provider has reported are two halves of one row, and reading them
     // separately would let a row claim an identity for a session the other
     // half no longer holds.
-    let Some(described) = state.with_runtime(|runtime| {
-        runtime
+    //
+    // The runtimes outside Corral are read from the sweep first and judged
+    // under the same lock, because a row the daemon derived attention for and
+    // the count that includes it are one fact seen twice: a heading that says
+    // one session needs you, over a row that says nothing, is the daemon
+    // contradicting itself.
+    let external = state.seen_runtimes().snapshot();
+    let Some((described, externally)) = state.with_runtime(|runtime| {
+        let described = runtime
             .sessions
             .describe()
             .into_iter()
             .map(|session| {
                 let reported = runtime.reported.get(session.session).cloned();
-                (session, reported)
+                let attention = attention_facts(&runtime.attention, session.session);
+                (session, reported, attention)
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        let externally: Vec<Option<method::AttentionFacts>> = external
+            .iter()
+            .map(|candidate| {
+                candidate
+                    .identified()
+                    .and_then(|identified| attention_facts(&runtime.attention, identified.session))
+            })
+            .collect();
+        (described, externally)
     }) else {
         return Frame::error(
             id,
@@ -481,14 +514,21 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
     };
 
     let mut sessions: Vec<serde_json::Value> = described
-        .iter()
-        .map(|(session, reported)| encode_session(session, reported.as_ref()))
+        .into_iter()
+        .map(|(session, reported, attention)| {
+            encode_session(&session, reported.as_ref(), attention)
+        })
         .collect();
     // After the managed rows: the runtimes outside Corral. A session Corral
     // started reports through its own channel; these are the ones the
     // process table showed or a token-less delivery corroborated, which is
     // exactly the session a person most needs reminding of (ADR 0014 D2).
-    sessions.extend(state.seen_runtimes().snapshot().iter().map(encode_external));
+    sessions.extend(
+        external
+            .iter()
+            .zip(externally)
+            .map(|(candidate, attention)| encode_external(candidate, attention)),
+    );
     match serde_json::to_value(SessionListResult { sessions }) {
         Ok(value) => Frame::result(id, value),
         Err(source) => Frame::error(
@@ -498,9 +538,332 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
     }
 }
 
+fn attention_summary(id: RequestId, state: &Arc<DaemonState>) -> Frame {
+    // A runtime nobody can read is not a runtime with nothing to say. Zeroes
+    // here would be Corral telling a person that nothing needs them on the
+    // strength of state nobody finished writing.
+    let Some(summary) = state.with_runtime(|runtime| runtime.attention.summary()) else {
+        return Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::Busy, "the runtime could not be consulted"),
+        );
+    };
+    match serde_json::to_value(summary) {
+        Ok(value) => Frame::result(id, value),
+        Err(source) => Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+        ),
+    }
+}
+
+fn attention_acknowledge(request: &Request, state: &Arc<DaemonState>) -> Frame {
+    let id = request.id;
+    let params: method::AttentionAcknowledgeParams = match request
+        .params
+        .clone()
+        .map(serde_json::from_value)
+        .transpose()
+    {
+        Ok(Some(params)) => params,
+        Ok(None) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(
+                    ErrorCode::InvalidParams,
+                    "attention.acknowledge needs params",
+                ),
+            );
+        }
+        Err(source) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+            );
+        }
+    };
+    let (session, item) = match (
+        params.session_id.parse::<CorralSessionId>(),
+        params
+            .attention_item_id
+            .parse::<corral_core::AttentionItemId>(),
+    ) {
+        (Ok(session), Ok(item)) => (session, item),
+        (Err(source), _) | (_, Err(source)) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+            );
+        }
+    };
+    let outcome = state.with_runtime(|runtime| runtime.attention.acknowledge(session, item));
+    match outcome {
+        Some(crate::attention::Acknowledgement::Acknowledged) => {
+            Frame::result(id, serde_json::json!({}))
+        }
+        // Both mean the same thing to a client: reload the row. The item that
+        // replaced a stale one stays unacknowledged either way (grill Q18).
+        Some(crate::attention::Acknowledgement::StaleAttentionItem) => Frame::error(
+            id,
+            ProtocolError::new(
+                ErrorCode::StaleAttentionItem,
+                "that attention item is no longer the session's current one",
+            ),
+        ),
+        Some(crate::attention::Acknowledgement::NoCurrentItem) => Frame::error(
+            id,
+            ProtocolError::new(
+                ErrorCode::StaleAttentionItem,
+                "the session has no current attention item",
+            ),
+        ),
+        None => Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::Busy, "the runtime could not be consulted"),
+        ),
+    }
+}
+
+/// The journal read back per day. Diagnostics: a daemon without a journal
+/// answers an empty report, which is the truth about what it can report.
+async fn attention_report(request: &Request, state: &Arc<DaemonState>) -> Frame {
+    let id = request.id;
+    let params: method::AttentionReportParams = match request
+        .params
+        .clone()
+        .map(serde_json::from_value)
+        .transpose()
+    {
+        Ok(params) => params.unwrap_or_default(),
+        Err(source) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+            );
+        }
+    };
+    // The filter compares `since` against the journal's own day names, so a
+    // value in another shape would answer a report that looks valid and
+    // means nothing.
+    if let Some(since) = params.since.as_deref()
+        && !crate::attention::names_a_day(since)
+    {
+        return Frame::error(
+            id,
+            ProtocolError::new(
+                ErrorCode::InvalidParams,
+                "attention.report since must be a day as YYYY-MM-DD",
+            ),
+        );
+    }
+    // A journal that lost a record with nothing on disk to say so can no
+    // longer answer for any day: the smaller count it would give is exactly
+    // the silent incompleteness D8 forbids.
+    if state.journal_unreportable() {
+        return Frame::error(
+            id,
+            ProtocolError::new(
+                ErrorCode::Busy,
+                "the attention journal lost a record it could not mark; reporting is refused",
+            ),
+        );
+    }
+    let Some(dir) = state.journal_dir() else {
+        return Frame::result(
+            id,
+            serde_json::to_value(method::AttentionReportResult::default()).unwrap_or_default(),
+        );
+    };
+    // A reader that failed is not a journal with nothing in it. Answering
+    // zero days would present incomplete evidence as a quiet period, which
+    // is the one thing D8 says the journal must never do silently.
+    let report = match tokio::task::spawn_blocking(move || crate::attention::report(&dir)).await {
+        Ok(Ok(report)) => report,
+        Ok(Err(source)) => {
+            return Frame::error(id, ProtocolError::new(ErrorCode::Busy, source.to_string()));
+        }
+        Err(_) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::Busy, "the attention journal could not be read"),
+            );
+        }
+    };
+    let days = report
+        .days
+        .into_iter()
+        .filter(|day| {
+            params
+                .since
+                .as_ref()
+                .is_none_or(|since| day.date.as_str() >= since.as_str())
+        })
+        .map(|day| method::AttentionDayFacts {
+            date: day.date,
+            transitions: day.transitions,
+            into_needs_you: day.into_needs_you,
+            into_ready: day.into_ready,
+            disputes: day.disputes,
+            incomplete: day.incomplete,
+        })
+        .collect();
+    match serde_json::to_value(method::AttentionReportResult { days }) {
+        Ok(value) => Frame::result(id, value),
+        Err(source) => Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+        ),
+    }
+}
+
+/// A person says the current item was wrong. Recorded against the item they
+/// named, and stale when that item is no longer current — a dispute of the
+/// one that just resolved is never attributed to its replacement
+/// (grill Q34).
+async fn attention_dispute(request: &Request, state: &Arc<DaemonState>) -> Frame {
+    let id = request.id;
+    let params: method::AttentionDisputeParams = match request
+        .params
+        .clone()
+        .map(serde_json::from_value)
+        .transpose()
+    {
+        Ok(Some(params)) => params,
+        Ok(None) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, "attention.dispute needs params"),
+            );
+        }
+        Err(source) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+            );
+        }
+    };
+    let session = match params.session_id.parse::<CorralSessionId>() {
+        Ok(session) => session,
+        Err(source) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+            );
+        }
+    };
+    let named = match params
+        .attention_item_id
+        .as_deref()
+        .map(str::parse::<corral_core::AttentionItemId>)
+        .transpose()
+    {
+        Ok(named) => named,
+        Err(source) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+            );
+        }
+    };
+    // Without the ledger there is no current item to compare the dispute
+    // against, and recording one anyway would enter "not stale" as a fact
+    // about an item nobody looked at.
+    let Some((current, claims)) = state.with_runtime(|runtime| {
+        (
+            runtime.attention.state(session).and_then(|(_, item)| item),
+            runtime.attention.claims(session),
+        )
+    }) else {
+        return Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::Busy, "the runtime could not be consulted"),
+        );
+    };
+    let current = current.map(|item| item.id());
+    // What the disputed state rested on, for the person triaging the dispute
+    // later: the journal record names the item, the log names the evidence.
+    tracing::debug!(%session, ?claims, "an attention item was disputed");
+    let (item, stale) = match (named, current) {
+        (Some(named), Some(current)) => (Some(named), named != current),
+        (Some(named), None) => (Some(named), true),
+        (None, current) => (current, false),
+    };
+    let recording = Arc::clone(state);
+    let now = std::time::SystemTime::now();
+    let _ = tokio::task::spawn_blocking(move || {
+        recording.journal_append(
+            now,
+            vec![crate::attention::Record::Dispute(
+                crate::attention::DisputeRecord {
+                    session,
+                    item,
+                    stale,
+                },
+            )],
+        );
+    })
+    .await;
+    match serde_json::to_value(method::AttentionDisputeResult { stale }) {
+        Ok(value) => Frame::result(id, value),
+        Err(source) => Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+        ),
+    }
+}
+
+/// The attention projection for one row, as the ledger holds it.
+fn attention_facts(
+    attention: &crate::attention::Ledger,
+    session: CorralSessionId,
+) -> Option<method::AttentionFacts> {
+    let (state, item) = attention.state(session)?;
+    let wire_state = |main: corral_core::MainState| match main {
+        corral_core::MainState::Working => method::AttentionWireState::Working,
+        corral_core::MainState::NeedsYou => method::AttentionWireState::NeedsYou,
+        corral_core::MainState::Ready => method::AttentionWireState::Ready,
+        corral_core::MainState::Unknown => method::AttentionWireState::Unknown,
+        corral_core::MainState::Exited => method::AttentionWireState::Exited,
+    };
+    let unix_ms = |at: std::time::SystemTime| {
+        at.duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_millis()).ok())
+            .unwrap_or(0)
+    };
+    Some(method::AttentionFacts {
+        state: wire_state(state.main()),
+        since_unix_ms: unix_ms(state.since()),
+        last_known: state.last_known().map(|known| method::LastKnownFacts {
+            state: wire_state(known.state()),
+            at_unix_ms: unix_ms(known.at()),
+        }),
+        items: item
+            .map(|item| method::AttentionItemFacts {
+                attention_item_id: item.id().to_string(),
+                reason: match item.reason() {
+                    corral_core::AttentionReason::NeedsInput => {
+                        method::AttentionReasonWire::NeedsInput
+                    }
+                    corral_core::AttentionReason::TurnComplete => {
+                        method::AttentionReasonWire::TurnComplete
+                    }
+                    corral_core::AttentionReason::RuntimeEnded => {
+                        method::AttentionReasonWire::Unrecognized("runtime_ended".to_owned())
+                    }
+                },
+                since_unix_ms: unix_ms(item.since()),
+                acknowledged: item.acknowledged(),
+            })
+            .into_iter()
+            .collect(),
+    })
+}
+
 fn encode_session(
     session: &ManagedSession,
     reported: Option<&ReportedSession>,
+    attention: Option<method::AttentionFacts>,
 ) -> serde_json::Value {
     serde_json::to_value(SessionListItem {
         session_id: session.session.to_string(),
@@ -528,6 +891,7 @@ fn encode_session(
         // Known by construction: this daemon started it.
         origin: Some(method::ORIGIN_MANAGED.to_owned()),
         location_hint: None,
+        attention,
     })
     .unwrap_or_else(|_| serde_json::json!({}))
 }
@@ -545,7 +909,10 @@ fn encode_session(
 /// Until then its `session_id` is the Corral identity minted for this
 /// runtime's incarnation, so the row is stable across passes without the pid
 /// ever becoming an identity.
-fn encode_external(candidate: &crate::sweep::RuntimeCandidate) -> serde_json::Value {
+fn encode_external(
+    candidate: &crate::sweep::RuntimeCandidate,
+    attention: Option<method::AttentionFacts>,
+) -> serde_json::Value {
     let identified = candidate.identified();
     serde_json::to_value(SessionListItem {
         session_id: identified
@@ -566,6 +933,10 @@ fn encode_external(candidate: &crate::sweep::RuntimeCandidate) -> serde_json::Va
         agent_event: None,
         origin: Some(method::ORIGIN_DISCOVERED.to_owned()),
         location_hint: None,
+        // Present exactly when the ledger holds a derivation for the Session
+        // this runtime was found to be carrying. A runtime nothing has named
+        // yet is no Session, and has nothing to be in a state about.
+        attention,
     })
     .unwrap_or_else(|_| serde_json::json!({}))
 }

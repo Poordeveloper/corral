@@ -1,0 +1,12 @@
+{"name": "resize", "t_ns": 1788352828307571345, "offset": 0, "rows": 40, "cols": 120}
+{"name": "prompt_ready", "t_ns": 1788352829538887990, "offset": 1681}
+{"name": "quiet", "t_ns": 1788352832607643867, "offset": 2059, "quiet_s": 2, "last_output_ns": 1788352830606464900}
+{"name": "idle_prompt", "t_ns": 1788352832607742106, "offset": 2059}
+{"name": "typed_prompt", "t_ns": 1788352832607808636, "offset": 2059}
+{"name": "submitted", "t_ns": 1788352832607859619, "offset": 2059}
+{"name": "stop_hook", "t_ns": 1788352834112827783, "offset": 5465, "stop_t_ns": 1788352834084765740}
+{"name": "quiet", "t_ns": 1788352837118634844, "offset": 5654, "quiet_s": 3, "last_output_ns": 1788352834115827920}
+{"name": "ready_after_stop", "t_ns": 1788352837118734270, "offset": 5654}
+{"name": "notification", "t_ns": 1788352894173964194, "offset": 5770, "rec": "{\"session_id\":\"7c174719-77ee-43ce-9356-21fcc568a7dc\",\"transcript_path\":\"/root/.claude/projects/-root-proj/7c174719-77ee-43ce-9356-21fcc568a7dc.jsonl\",\"cwd\":\"/root/proj\",\"scratchpad_dir\":\"/tmp/claude-0/-root-proj/7c174719-77ee-43ce-9356-21fcc568a7dc/scratchpad\",\"prompt_id\":\"9a6352f7-d521-49a5-974c-05192ecbb094\",\"hook_event_name\":\"Notification\",\"message\":\"Claude is waiting for your input\",\"notification_type\":\"idle_prompt\"}\n"}
+{"name": "quiet", "t_ns": 1788352896175624182, "offset": 5770, "quiet_s": 2, "last_output_ns": 1788352837560730710}
+{"name": "idle_after_notification", "t_ns": 1788352896175697599, "offset": 5770}

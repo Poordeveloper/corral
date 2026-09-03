@@ -1,4 +1,7 @@
 use super::*;
+use corral_protocol::method::{
+    AttentionFacts, AttentionItemFacts, AttentionReasonWire, AttentionWireState, LastKnownFacts,
+};
 
 fn listed(execution_state: &str, terminal_access: Option<TerminalAccess>) -> SessionListItem {
     SessionListItem {
@@ -10,6 +13,7 @@ fn listed(execution_state: &str, terminal_access: Option<TerminalAccess>) -> Ses
         agent_event: None,
         origin: None,
         location_hint: None,
+        attention: None,
     }
 }
 
@@ -385,6 +389,7 @@ fn external(execution_state: &str, external_id: Option<&str>) -> SessionListItem
         agent_event: None,
         origin: Some(corral_protocol::method::ORIGIN_DISCOVERED.to_owned()),
         location_hint: None,
+        attention: None,
     }
 }
 
@@ -430,5 +435,153 @@ fn an_origin_from_a_later_build_renders_as_no_origin_at_all() {
     let mut item = external("running", Some("session-abc"));
     item.origin = Some("from-a-later-corral".to_owned());
 
+    insta::assert_snapshot!(rendered(&item));
+}
+
+// ---------------------------------------------------------------- attention
+
+fn attended(state: AttentionWireState, items: Vec<AttentionItemFacts>) -> SessionListItem {
+    SessionListItem {
+        session_id: "s".into(),
+        title: "t".into(),
+        execution_state: "running".into(),
+        terminal_access: None,
+        provider: None,
+        agent_event: None,
+        origin: None,
+        location_hint: None,
+        attention: Some(AttentionFacts {
+            state,
+            since_unix_ms: 0,
+            last_known: None,
+            items,
+        }),
+    }
+}
+
+/// The three semantic states are the main state, alone: the runtime fact
+/// sits beside Unknown only (`PRODUCT.md` §4).
+#[test]
+fn the_daemons_semantic_claim_is_the_main_state() {
+    for (state, line) in [
+        (AttentionWireState::Working, "Working"),
+        (AttentionWireState::NeedsYou, "Needs You"),
+        (AttentionWireState::Ready, "Ready"),
+    ] {
+        let presented = present_at(&attended(state, Vec::new()), SystemTime::UNIX_EPOCH);
+        assert_eq!(presented.state_line(), line);
+    }
+}
+
+/// Unknown from the daemon reads as it always has, with the last reliable
+/// fact beneath it in the past tense with its age.
+#[test]
+fn unknown_keeps_runtime_truth_beside_it_and_the_last_known_fact_beneath() {
+    let mut item = attended(AttentionWireState::Unknown, Vec::new());
+    item.attention.as_mut().expect("attention").last_known = Some(LastKnownFacts {
+        state: AttentionWireState::NeedsYou,
+        at_unix_ms: 0,
+    });
+    let presented = present_at(&item, SystemTime::UNIX_EPOCH + Duration::from_secs(45 * 60));
+    assert_eq!(presented.state_line(), "Running · Status unknown");
+    assert!(
+        presented
+            .beneath()
+            .contains(&"Last known: Needed input 45m ago".to_owned())
+    );
+}
+
+/// Exited overrides a cached Needs You: the label is Exited, and the request
+/// is neither shown live nor faked as answered.
+#[test]
+fn exited_before_a_response_says_so() {
+    let mut item = attended(AttentionWireState::Exited, Vec::new());
+    item.execution_state = "exited".into();
+    item.attention.as_mut().expect("attention").last_known = Some(LastKnownFacts {
+        state: AttentionWireState::NeedsYou,
+        at_unix_ms: 0,
+    });
+    let presented = present_at(&item, SystemTime::UNIX_EPOCH);
+    assert_eq!(presented.state_line(), "Exited");
+    assert!(
+        presented
+            .beneath()
+            .contains(&"Exited before you responded".to_owned())
+    );
+}
+
+/// A state this build cannot name is no claim: the row renders from
+/// execution state, as it did before the field existed.
+#[test]
+fn an_unrecognized_attention_state_renders_no_claim() {
+    let item = attended(
+        AttentionWireState::Unrecognized("meditating".into()),
+        Vec::new(),
+    );
+    let presented = present_at(&item, SystemTime::UNIX_EPOCH);
+    assert_eq!(presented.state_line(), "Running · Status unknown");
+}
+
+/// The current item's id is what an acknowledgement will name.
+#[test]
+fn the_current_item_is_carried_for_acknowledgement() {
+    let item = attended(
+        AttentionWireState::NeedsYou,
+        vec![AttentionItemFacts {
+            attention_item_id: "item-1".into(),
+            reason: AttentionReasonWire::NeedsInput,
+            since_unix_ms: 0,
+            acknowledged: false,
+        }],
+    );
+    let presented = present_at(&item, SystemTime::UNIX_EPOCH);
+    assert_eq!(presented.acknowledgeable(), Some("item-1"));
+    let mut acknowledged = item.clone();
+    acknowledged.attention.as_mut().expect("attention").items[0].acknowledged = true;
+    assert_eq!(
+        present_at(&acknowledged, SystemTime::UNIX_EPOCH).acknowledgeable(),
+        None
+    );
+}
+
+/// The five states as a person sees them, with the lines beneath. Rendered
+/// rows are a contract with the reader, so every state is held to a
+/// snapshot (workflow §6).
+#[test]
+fn a_working_session_renders_the_state_alone() {
+    insta::assert_snapshot!(rendered(&attended(AttentionWireState::Working, Vec::new())));
+}
+
+#[test]
+fn a_session_that_needs_you_renders_the_state_alone() {
+    insta::assert_snapshot!(rendered(&attended(
+        AttentionWireState::NeedsYou,
+        Vec::new()
+    )));
+}
+
+#[test]
+fn a_ready_session_renders_the_state_alone() {
+    insta::assert_snapshot!(rendered(&attended(AttentionWireState::Ready, Vec::new())));
+}
+
+#[test]
+fn a_rotted_claim_renders_unknown_with_the_last_known_fact() {
+    let mut item = attended(AttentionWireState::Unknown, Vec::new());
+    item.attention.as_mut().expect("attention").last_known = Some(LastKnownFacts {
+        state: AttentionWireState::NeedsYou,
+        at_unix_ms: 0,
+    });
+    insta::assert_snapshot!(rendered(&item));
+}
+
+#[test]
+fn an_exit_under_a_pending_request_renders_the_disclosure() {
+    let mut item = attended(AttentionWireState::Exited, Vec::new());
+    item.execution_state = "exited".into();
+    item.attention.as_mut().expect("attention").last_known = Some(LastKnownFacts {
+        state: AttentionWireState::NeedsYou,
+        at_unix_ms: 0,
+    });
     insta::assert_snapshot!(rendered(&item));
 }

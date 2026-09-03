@@ -69,6 +69,23 @@ enum Command {
         /// The session's id, or enough of its start to be unambiguous.
         session: String,
     },
+    /// List the sessions that need you, and the ones ready for you.
+    Needs,
+    /// Acknowledge a session's current attention item.
+    ///
+    /// The daemon is told which item this command saw, never "whatever is
+    /// current": a delayed acknowledgement must not clear the next real
+    /// blocker (grill Q18).
+    Ack {
+        /// The session's id, or enough of its start to be unambiguous.
+        session: String,
+    },
+    /// Read or annotate the attention journal — diagnostic evidence, never
+    /// product state.
+    Attention {
+        #[command(subcommand)]
+        action: AttentionAction,
+    },
     /// Open the session list.
     Tui,
     /// See or change how Corral integrates with a provider.
@@ -78,6 +95,21 @@ enum Command {
     Integration {
         #[command(subcommand)]
         action: IntegrationAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AttentionAction {
+    /// Count the journal's transitions per day, naming incomplete days.
+    Report {
+        /// From this day, inclusive (YYYY-MM-DD).
+        #[arg(long)]
+        since: Option<String>,
+    },
+    /// Record that a session's current attention item was wrong.
+    Dispute {
+        /// The session's id, or enough of its start to be unambiguous.
+        session: String,
     },
 }
 
@@ -160,8 +192,143 @@ async fn serve(cli: Cli) -> ExitCode {
         Command::New { provider, rest } => new_session(&mut connection, provider, rest).await,
         Command::Continue { session } => continue_session(&mut connection, &session).await,
         Command::Attach { session } => attach(&mut connection, &session).await,
+        Command::Needs => needs(&mut connection).await,
+        Command::Ack { session } => acknowledge(&mut connection, &session).await,
+        Command::Attention { action } => attention(&mut connection, action).await,
         Command::Tui => session_list(&policy, connection).await,
         Command::Integration { action } => integration(&mut connection, action).await,
+    }
+}
+
+/// The rows that need the person, then the ones ready for them, as the
+/// daemon claims them. Nothing is derived here: a row is in this list
+/// because the daemon's attention field says so (ADR 0015 D1).
+async fn needs(connection: &mut Connection) -> ExitCode {
+    let sessions = match connection.session_list().await {
+        Ok(sessions) => sessions,
+        Err(error) => return report_request_failure(&error),
+    };
+    let now = SystemTime::now();
+    let mut needing = Vec::new();
+    let mut ready = Vec::new();
+    for session in &sessions.sessions {
+        let Ok(item) = serde_json::from_value::<SessionListItem>(session.clone()) else {
+            continue;
+        };
+        match item.attention.as_ref().map(|facts| &facts.state) {
+            Some(corral_protocol::method::AttentionWireState::NeedsYou) => needing.push(item),
+            Some(corral_protocol::method::AttentionWireState::Ready) => ready.push(item),
+            _ => {}
+        }
+    }
+    if needing.is_empty() && ready.is_empty() {
+        println!("Nothing needs you.");
+        return ExitCode::SUCCESS;
+    }
+    for item in needing.iter().chain(ready.iter()) {
+        for row in session_rows(item, now) {
+            println!("{row}");
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// The session's current unacknowledged item, by the id this command saw.
+async fn current_item(
+    connection: &mut Connection,
+    session: &str,
+) -> Result<Option<String>, ExitCode> {
+    let listed = match connection.session_list().await {
+        Ok(listed) => listed,
+        Err(error) => return Err(report_request_failure(&error)),
+    };
+    Ok(listed
+        .sessions
+        .iter()
+        .filter_map(|value| serde_json::from_value::<SessionListItem>(value.clone()).ok())
+        .find(|item| item.session_id == session)
+        .and_then(|item| {
+            corral_tui::present_at(&item, SystemTime::now())
+                .acknowledgeable()
+                .map(str::to_owned)
+        }))
+}
+
+async fn acknowledge(connection: &mut Connection, session: &str) -> ExitCode {
+    let resolved = match resolve_session(connection, session).await {
+        Ok(resolved) => resolved,
+        Err(code) => return code,
+    };
+    let Some(item) = (match current_item(connection, &resolved).await {
+        Ok(item) => item,
+        Err(code) => return code,
+    }) else {
+        println!("Nothing to acknowledge.");
+        return ExitCode::SUCCESS;
+    };
+    match connection.attention_acknowledge(&resolved, &item).await {
+        Ok(()) => {
+            println!("Acknowledged.");
+            ExitCode::SUCCESS
+        }
+        Err(error) => report_request_failure(&error),
+    }
+}
+
+async fn attention(connection: &mut Connection, action: AttentionAction) -> ExitCode {
+    match action {
+        AttentionAction::Report { since } => {
+            let report = match connection.attention_report(since.as_deref()).await {
+                Ok(report) => report,
+                Err(error) => return report_request_failure(&error),
+            };
+            if report.days.is_empty() {
+                println!("No attention journal days.");
+                return ExitCode::SUCCESS;
+            }
+            println!(
+                "{:<12}{:>12}{:>12}{:>8}{:>10}",
+                "day", "transitions", "needs you", "ready", "disputes"
+            );
+            for day in &report.days {
+                println!(
+                    "{:<12}{:>12}{:>12}{:>8}{:>10}  {}",
+                    day.date,
+                    day.transitions,
+                    day.into_needs_you,
+                    day.into_ready,
+                    day.disputes,
+                    if day.incomplete { "INCOMPLETE" } else { "" }
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        AttentionAction::Dispute { session } => {
+            let resolved = match resolve_session(connection, &session).await {
+                Ok(resolved) => resolved,
+                Err(code) => return code,
+            };
+            let item = match current_item(connection, &resolved).await {
+                Ok(item) => item,
+                Err(code) => return code,
+            };
+            match connection
+                .attention_dispute(&resolved, item.as_deref())
+                .await
+            {
+                Ok(answer) if answer.stale => {
+                    println!(
+                        "Recorded; that item was already gone by the time the dispute arrived."
+                    );
+                    ExitCode::SUCCESS
+                }
+                Ok(_) => {
+                    println!("Recorded.");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => report_request_failure(&error),
+            }
+        }
     }
 }
 

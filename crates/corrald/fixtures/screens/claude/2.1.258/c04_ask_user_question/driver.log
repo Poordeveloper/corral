@@ -1,0 +1,20 @@
+1123971 mark resize
+1142752 started pid=1311236
+1193571675 wait_for '❯|manual mode on|auto mode on' matched at +1328
+1193647814 mark prompt_ready
+1593935629 mark submitted
+4677522925 wait_hook matched record 2
+4677704811 wait_for '(?i)red' matched at +2332
+6677951882 mark question_prompt_visible
+8679935825 mark quiet
+8679980898 mark question_settled
+8680413668 wait_hook matched record 3
+8680449559 mark permission_request_hook
+8680519234 mark answered
+9680727469 mark after_answer
+9872146201 wait_hook matched record 5
+9872188913 mark stop_hook
+12876960417 mark quiet
+12876990335 mark ready_after_stop
+13698572746 wait_hook matched record 6
+14143001129 mark end

@@ -1,0 +1,13 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788353553765694658, "offset": 0}
+{"name": "prompt_ready", "t_ns": 1788353554958345780, "offset": 1984}
+{"name": "submitted", "t_ns": 1788353555358611325, "offset": 3020}
+{"name": "question_prompt_visible", "t_ns": 1788353560442606208, "offset": 8867}
+{"quiet_s": 2, "last_output_ns": 1788353558451366733, "name": "quiet", "t_ns": 1788353562444621679, "offset": 8867}
+{"name": "question_settled", "t_ns": 1788353562444684800, "offset": 8867}
+{"present": true, "name": "permission_request_hook", "t_ns": 1788353562445164057, "offset": 8867}
+{"name": "answered", "t_ns": 1788353562445229345, "offset": 8867}
+{"name": "after_answer", "t_ns": 1788353563445397124, "offset": 12377}
+{"name": "stop_hook", "t_ns": 1788353563636901512, "offset": 13479}
+{"quiet_s": 3, "last_output_ns": 1788353563639486273, "name": "quiet", "t_ns": 1788353566641643720, "offset": 13663}
+{"name": "ready_after_stop", "t_ns": 1788353566641709176, "offset": 13663}
+{"name": "end", "t_ns": 1788353567907686144, "offset": 17029}

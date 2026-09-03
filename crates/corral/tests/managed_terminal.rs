@@ -75,11 +75,17 @@ fn read_frame(channel: &mut Channel) -> Option<(u8, Vec<u8>)> {
 /// For asserting that nothing arrives, where the settle budget is the cost of
 /// the assertion rather than headroom against a slow machine.
 fn read_frame_within(channel: &mut Channel, budget: Duration) -> Option<(u8, Vec<u8>)> {
-    channel
-        .reader
-        .get_ref()
-        .set_read_timeout(Some(budget))
-        .expect("a read deadline");
+    // The deadline is headroom against a slow machine, never part of an
+    // assertion. macOS refuses `setsockopt` outright once both directions of
+    // a socket are shut, which is what a peer closing an `AF_UNIX` stream
+    // does — `soisdisconnected` sets `SS_CANTRCVMORE | SS_CANTSENDMORE`, and
+    // `sosetopt` answers EINVAL — and a daemon that closed the channel is
+    // what several of these tests arrange on purpose. A socket that cannot
+    // take a deadline cannot block on a read either: it answers with what it
+    // still holds, or with the end of the stream. So it is read as it stands,
+    // rather than turning the daemon's own tidy shutdown into a failure that
+    // depends on which side won the race.
+    let _ = channel.reader.get_ref().set_read_timeout(Some(budget));
     let stream = &mut channel.reader;
     let mut header = [0_u8; HEADER_BYTES];
     stream.read_exact(&mut header).ok()?;
@@ -87,6 +93,38 @@ fn read_frame_within(channel: &mut Channel, budget: Duration) -> Option<(u8, Vec
     let mut payload = vec![0_u8; length];
     stream.read_exact(&mut payload).ok()?;
     Some((header[0], payload))
+}
+
+/// A daemon that has finished with a channel closes it, and several of these
+/// tests arrange exactly that. On macOS a closed peer also makes the socket
+/// refuse a read deadline — `soisdisconnected` shuts both directions and
+/// `sosetopt` answers EINVAL — so a helper that insisted on setting one
+/// turned the daemon's own tidy shutdown into a failure whenever it won the
+/// race. It cost one red run in twenty-six on the same tree.
+///
+/// The frame the peer left behind is still there to be read, so reading it is
+/// what the helper has to do.
+#[test]
+fn a_frame_left_by_a_peer_that_closed_is_still_read() {
+    let (mine, mut theirs) = UnixStream::pair().expect("a socket pair");
+    let payload = b"left behind".to_vec();
+    let mut frame = vec![0_u8; HEADER_BYTES];
+    frame[0] = 2;
+    frame[17..21].copy_from_slice(
+        &u32::try_from(payload.len())
+            .expect("a length")
+            .to_be_bytes(),
+    );
+    frame.extend_from_slice(&payload);
+    theirs.write_all(&frame).expect("the frame was sent");
+    drop(theirs);
+
+    let mut channel = Channel {
+        writer: mine.try_clone().expect("a writer"),
+        reader: BufReader::new(mine),
+    };
+    assert_eq!(read_frame(&mut channel), Some((2, payload)));
+    assert_eq!(read_frame(&mut channel), None, "and then the end of it");
 }
 
 /// Open a terminal data channel by redeeming a token.

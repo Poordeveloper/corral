@@ -1,0 +1,24 @@
+{
+ "argv": [
+  "claude",
+  "--model",
+  "haiku",
+  "--settings",
+  "/matrix/out/c05_plan_mode_approval/settings.json",
+  "--permission-mode",
+  "plan"
+ ],
+ "cwd": "/root/proj",
+ "rows": 40,
+ "cols": 120,
+ "t0_ns": 1788353571085719944,
+ "env": {
+  "COLORTERM": "truecolor",
+  "HOME": "/root",
+  "LANG": "C.UTF-8",
+  "PATH": "/root/.local/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
+  "SHELL": "/bin/bash",
+  "TERM": "xterm-256color",
+  "USER": "root"
+ }
+}

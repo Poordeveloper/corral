@@ -1,0 +1,12 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788354233619943611, "offset": 0}
+{"name": "prompt_ready", "t_ns": 1788354234888316397, "offset": 1462}
+{"name": "submitted", "t_ns": 1788354236804453135, "offset": 3907}
+{"name": "permission_prompt_visible", "t_ns": 1788354240445631846, "offset": 9978}
+{"name": "quiet_timeout", "t_ns": 1788354270771884201, "offset": 13928}
+{"name": "permission_prompt_settled", "t_ns": 1788354270771964312, "offset": 13928}
+{"name": "approved", "t_ns": 1788354270772010322, "offset": 13928}
+{"name": "after_post_tool_use", "t_ns": 1788354271518083732, "offset": 15886}
+{"name": "stop_hook", "t_ns": 1788354274816523845, "offset": 24486}
+{"quiet_s": 3, "last_output_ns": 1788354274819409136, "name": "quiet", "t_ns": 1788354277821634769, "offset": 24676}
+{"name": "ready_after_stop", "t_ns": 1788354277821717935, "offset": 24676}
+{"name": "end", "t_ns": 1788354279513020473, "offset": 36641}

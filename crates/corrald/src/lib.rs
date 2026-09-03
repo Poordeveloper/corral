@@ -15,7 +15,10 @@
 
 /// Walking from a relay to the provider process that ran it (ADR 0014 D2).
 mod ancestry;
+mod attention;
+pub mod clock;
 mod connection;
+mod detection;
 /// Sessions Corral found rather than started (ADR 0014).
 mod external_session;
 mod hook_endpoint;
@@ -127,6 +130,16 @@ fn start() -> Result<ExitCode, StartupError> {
         DaemonState::open(paths.registry(), paths.launch_dir(), paths.state_dir())
             .map_err(StartupError::State)?,
     );
+    // Diagnostics beside state, never inside it, and never a startup failure:
+    // a daemon that cannot journal still derives (ADR 0015 D8).
+    match crate::attention::Journal::open(
+        paths.diagnostics_dir(),
+        crate::attention::Budget::default(),
+        std::time::SystemTime::now(),
+    ) {
+        Ok(journal) => state.attach_journal(journal),
+        Err(source) => tracing::warn!(%source, "the attention journal could not be opened"),
+    }
 
     // Before the endpoint is bound, and only by the daemon holding the claim.
     // Every managed episode still open belongs to a daemon that is gone, and a
@@ -174,6 +187,9 @@ fn start() -> Result<ExitCode, StartupError> {
     if state.settle_observations() == runtime::Integrity::Lost {
         error!("this daemon could not record everything it observed about its runs");
     }
+    // A stop, not a death: the day the journal was writing is finished rather
+    // than left open for the next daemon to treat as possibly short a record.
+    state.close_journal();
     // Best effort: the next claim winner owns whatever an abrupt death leaves
     // behind, so failing to unlink here costs nothing.
     //

@@ -22,6 +22,9 @@ pub enum EvidenceSource {
     ProviderHook,
     /// A signal carried in the runtime's own output stream.
     InBandSignal,
+    /// Bytes the emulator consumed from a PTY Corral owns, device replies
+    /// excluded: the agent is drawing (ADR 0015 D5).
+    PtyActivity,
     /// Terminal or screen detection.
     ScreenDetection,
     /// Provider history or transcript records.
@@ -44,6 +47,7 @@ impl EvidenceSource {
             Self::CorralConstructed | Self::NodeRuntimeObservation => true,
             Self::ProviderHook
             | Self::InBandSignal
+            | Self::PtyActivity
             | Self::ScreenDetection
             | Self::HistoryRecord
             | Self::Correlation

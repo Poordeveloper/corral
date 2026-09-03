@@ -48,6 +48,11 @@ pub mod capability {
     /// composes a managed launch is the same daemon that can continue one, and
     /// two names would let a client believe in half of it.
     pub const MANAGED_SESSIONS: &str = "managed-sessions";
+
+    /// The attention projection on `session.list`, `attention.summary`, and
+    /// `attention.acknowledge`: the daemon derives the five-state main
+    /// status and clients render it (ADR 0015).
+    pub const ATTENTION: &str = "attention.v1";
 }
 
 /// What a connection is for.

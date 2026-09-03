@@ -1,0 +1,24 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788407803760254968, "offset": 0}
+{"name": "prompt_ready", "t_ns": 1788407804547622907, "offset": 1409}
+{"quiet_s": 2, "last_output_ns": 1788407804826059410, "name": "quiet", "t_ns": 1788407806827639654, "offset": 1660}
+{"name": "idle_before_error", "t_ns": 1788407806827692622, "offset": 1660}
+{"name": "submitted", "t_ns": 1788407807680831558, "offset": 2639}
+{"last_output_ns": 1788407808677395342, "name": "after_submit_0", "t_ns": 1788407808680998898, "offset": 4343}
+{"last_output_ns": 1788407809637546636, "name": "after_submit_1", "t_ns": 1788407809681171905, "offset": 4530}
+{"last_output_ns": 1788407810597551118, "name": "after_submit_2", "t_ns": 1788407810681337233, "offset": 4626}
+{"last_output_ns": 1788407811557817411, "name": "after_submit_3", "t_ns": 1788407811681505074, "offset": 4722}
+{"last_output_ns": 1788407812598141035, "name": "after_submit_4", "t_ns": 1788407812681630130, "offset": 4944}
+{"last_output_ns": 1788407813478112904, "name": "after_submit_5", "t_ns": 1788407813681799333, "offset": 5040}
+{"last_output_ns": 1788407814438175798, "name": "after_submit_6", "t_ns": 1788407814682005018, "offset": 5136}
+{"last_output_ns": 1788407815398389813, "name": "after_submit_7", "t_ns": 1788407815682181282, "offset": 5232}
+{"last_output_ns": 1788407816358409780, "name": "after_submit_8", "t_ns": 1788407816682362801, "offset": 5349}
+{"last_output_ns": 1788407817318487432, "name": "after_submit_9", "t_ns": 1788407817682529493, "offset": 5469}
+{"last_output_ns": 1788407818278741663, "name": "after_submit_10", "t_ns": 1788407818682687906, "offset": 5565}
+{"last_output_ns": 1788407819238775606, "name": "after_submit_11", "t_ns": 1788407819682871113, "offset": 5661}
+{"last_output_ns": 1788407820198903921, "name": "after_submit_12", "t_ns": 1788407820683056202, "offset": 5757}
+{"last_output_ns": 1788407821159177186, "name": "after_submit_13", "t_ns": 1788407821683252697, "offset": 5853}
+{"last_output_ns": 1788407822119214505, "name": "after_submit_14", "t_ns": 1788407822683451268, "offset": 5949}
+{"quiet_s": 5, "last_output_ns": 1788407982745247272, "name": "quiet", "t_ns": 1788407987749634758, "offset": 23130}
+{"name": "error_settled", "t_ns": 1788407987749717986, "offset": 23130}
+{"last_output_ns": 1788407982745247272, "name": "thirty_s_after_error", "t_ns": 1788408017749858082, "offset": 23130}
+{"name": "end", "t_ns": 1788408018537683234, "offset": 35131}

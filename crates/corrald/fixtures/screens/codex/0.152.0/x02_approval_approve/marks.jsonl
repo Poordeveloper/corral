@@ -1,0 +1,13 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788354612671999907, "offset": 0}
+{"quiet_s": 2, "last_output_ns": 1788354619511183001, "name": "quiet", "t_ns": 1788354621512642058, "offset": 6024}
+{"name": "prompt_ready", "t_ns": 1788354621512707729, "offset": 6024}
+{"name": "submitted", "t_ns": 1788354624250097423, "offset": 12258}
+{"name": "approval_prompt_visible", "t_ns": 1788354640176501389, "offset": 65231}
+{"name": "quiet_timeout", "t_ns": 1788354670203010355, "offset": 66221}
+{"name": "approval_settled", "t_ns": 1788354670203078455, "offset": 66221}
+{"name": "approved", "t_ns": 1788354670203127135, "offset": 66221}
+{"name": "after_approve", "t_ns": 1788354671203279665, "offset": 71599}
+{"name": "notify_turn_complete", "t_ns": 1788354671203820239, "offset": 71599}
+{"quiet_s": 3, "last_output_ns": 1788354683827466548, "name": "quiet", "t_ns": 1788354686829627596, "offset": 119265}
+{"name": "ready_after", "t_ns": 1788354686829726480, "offset": 119265}
+{"name": "end", "t_ns": 1788354687416956341, "offset": 121232}

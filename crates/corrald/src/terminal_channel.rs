@@ -103,6 +103,10 @@ async fn serve_frames(
     if !send_snapshot(writer, &attachment).await {
         return;
     }
+    // Open succeeded: the channel is bound and the first screen served. That
+    // is what acknowledges a Ready item — and never a Needs You one — rather
+    // than the attach request that preceded it (grill Q18).
+    state.with_runtime(|runtime| runtime.attention.opened(session));
     let mut serving = Serving {
         session,
         run,

@@ -1,0 +1,19 @@
+1291181 mark resize
+1318641 started pid=1314777
+1269458102 wait_for '❯|manual mode on|auto mode on' matched at +807
+1269533677 mark prompt_ready
+3185659528 mark submitted
+5182415194 wait_hook matched record 2
+5326659917 wait_hook matched record 3
+6826859391 mark permission_prompt_visible
+37153111299 mark quiet_timeout
+37153154571 mark permission_prompt_settled
+37153206584 mark approved
+37399089874 wait_hook matched record 5
+37899338917 mark after_post_tool_use
+41197674902 wait_hook matched record 6
+41197720902 mark stop_hook
+44202871633 mark quiet
+44202899895 mark ready_after_stop
+45654336528 wait_hook matched record 8
+45894258747 mark end

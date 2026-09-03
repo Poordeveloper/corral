@@ -1,0 +1,12 @@
+{"rows": 40, "cols": 120, "name": "resize", "t_ns": 1788354690593377451, "offset": 0}
+{"quiet_s": 2, "last_output_ns": 1788354699123696279, "name": "quiet", "t_ns": 1788354701550623899, "offset": 6612}
+{"name": "prompt_ready", "t_ns": 1788354701550689126, "offset": 6612}
+{"name": "submitted", "t_ns": 1788354704287849395, "offset": 12866}
+{"name": "approval_prompt_visible", "t_ns": 1788354720835816291, "offset": 63889}
+{"name": "quiet_timeout", "t_ns": 1788354750882863882, "offset": 64879}
+{"name": "rejected_esc", "t_ns": 1788354750882963469, "offset": 64879}
+{"name": "after_reject", "t_ns": 1788354752883148631, "offset": 67882}
+{"name": "notify_turn_complete", "t_ns": 1788354752883727989, "offset": 67882}
+{"quiet_s": 3, "last_output_ns": 1788354750932368767, "name": "quiet", "t_ns": 1788354755886621943, "offset": 67882}
+{"name": "ready_after", "t_ns": 1788354755886703777, "offset": 67882}
+{"name": "end", "t_ns": 1788354756421877333, "offset": 69849}

@@ -126,6 +126,16 @@ pub struct DaemonState {
 
     /// The mutating commands this daemon is executing right now.
     commands: InFlightCommands,
+    /// The screen-detection manifests this daemon runs with: the built-ins,
+    /// and whatever the state directory's `manifests/` overrode at startup
+    /// (ADR 0015 D6). Read once; a changed manifest means a restart.
+    detection: crate::detection::Loadout,
+
+    /// The attention journal, once the daemon has a diagnostics directory to
+    /// put it in. Absent means nothing is journaled — a test daemon, or a
+    /// directory that could not be made — and derivation carries on either
+    /// way: diagnostics never gate product state.
+    journal: Mutex<Option<crate::attention::Journal>>,
     /// The sessions this daemon is running, and the tokens it has issued for
     /// their terminals.
     ///
@@ -148,6 +158,10 @@ pub struct Runtime {
     /// restart loses it and the rows return to bare runtime truth
     /// (ADR 0004 D7).
     pub reported: ReportedSessions,
+    /// Every Session's claims and derived attention state. Live for the same
+    /// reason: nothing derived is durable, and a restart reads Unknown until a
+    /// session acts (ADR 0015 D8).
+    pub attention: crate::attention::Ledger,
 }
 
 impl DaemonState {
@@ -188,8 +202,117 @@ impl DaemonState {
             incoming: Mutex::new(Some(incoming)),
             resuming: Mutex::new(HashSet::new()),
             commands: InFlightCommands::new(),
+            detection: crate::detection::load_built_in(Some(&state_dir.join("manifests"))),
+            journal: Mutex::new(None),
             runtime: Mutex::new(Runtime::default()),
         })
+    }
+
+    /// The manifest the screen thread evaluates for this provider, if any.
+    pub fn manifest_for(
+        &self,
+        provider: crate::provider::KnownProvider,
+    ) -> Option<Arc<crate::detection::Manifest>> {
+        self.detection
+            .manifest(provider.as_str())
+            .map(|manifest| Arc::new(manifest.clone()))
+    }
+
+    /// Give this daemon its attention journal.
+    pub fn attach_journal(&self, journal: crate::attention::Journal) {
+        if let Ok(mut slot) = self.journal.lock() {
+            *slot = Some(journal);
+        }
+    }
+
+    /// Let the journal finish the day it is writing, because this daemon is
+    /// stopping on purpose rather than dying. Without this, an orderly
+    /// shutdown would leave the same sentinel an abrupt death does, and every
+    /// restart would mark a day partial that never lost a thing.
+    pub fn close_journal(&self) {
+        if let Ok(mut slot) = self.journal.lock()
+            && let Some(journal) = slot.as_mut()
+        {
+            journal.close();
+        }
+    }
+
+    /// Where the journal lives, when this daemon has one.
+    pub fn journal_dir(&self) -> Option<std::path::PathBuf> {
+        self.journal
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|journal| journal.dir().to_path_buf()))
+    }
+
+    /// Append records to the journal, if there is one. Blocking: the one
+    /// caller runs off the reactor.
+    pub fn journal_append(
+        &self,
+        now: std::time::SystemTime,
+        records: Vec<crate::attention::Record>,
+    ) {
+        let Ok(mut slot) = self.journal.lock() else {
+            return;
+        };
+        // No journal attached is not a journal that failed: a daemon without
+        // one answers an empty report, which is the truth about what it can
+        // report.
+        let Some(journal) = slot.as_mut() else {
+            return;
+        };
+        for record in records {
+            match journal.append(now, record) {
+                Ok(crate::attention::Appended::Written) => {}
+                Ok(crate::attention::Appended::BudgetExhausted) => {
+                    tracing::warn!(
+                        "the attention journal's day budget is exhausted; \
+                         the day's records stop here and it is marked incomplete"
+                    );
+                }
+                // Already known and already said. Repeating it every record
+                // until the day rolls over would bury the one that mattered,
+                // and for a day marked by an I/O failure it would name the
+                // wrong cause.
+                Ok(crate::attention::Appended::DayAlreadyIncomplete) => {}
+                Err(source) => {
+                    tracing::warn!(%source, "an attention journal record could not be written");
+                    // The record is gone, and nothing on disk would say so.
+                    // The marker is the only thing that can, and if it cannot
+                    // be written either then no report of this journal can
+                    // claim to be complete again (ADR 0015 D8).
+                    if let Err(marker) = journal.mark_incomplete(now) {
+                        tracing::warn!(
+                            %marker,
+                            "the attention journal could not be marked incomplete; \
+                             reporting is refused until the mark lands"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether a record was lost with nothing on disk to say so, after one
+    /// more attempt to put it there.
+    ///
+    /// Not a flag this process sets and clears: the condition is a day whose
+    /// marker has not landed, and the answer is derived from that each time.
+    /// A filesystem that recovers therefore turns into a day the report calls
+    /// INCOMPLETE — durably, across restarts — instead of a daemon that
+    /// refuses forever or, worse, one that forgets on the way up. A journal
+    /// lock nobody can take is the same case: nothing can be written and
+    /// nothing can be marked.
+    ///
+    /// A daemon that dies while the marker is still impossible to write
+    /// carries nothing forward itself; the day's sentinel does, because it
+    /// was on disk before the write failed (ADR 0015 D8).
+    pub fn journal_unreportable(&self) -> bool {
+        let Ok(mut slot) = self.journal.lock() else {
+            return true;
+        };
+        slot.as_mut()
+            .is_some_and(|journal| journal.settle_marks() > 0)
     }
 
     /// This node's identity.

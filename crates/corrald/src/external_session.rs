@@ -50,7 +50,8 @@ pub async fn discovered(
     provider: KnownProvider,
     identity: ExternalId,
     corroboration: Corroboration,
-    observed_at: SystemTime,
+    observed_at: crate::clock::Reading,
+    fact: Option<crate::provider::AgentFactKind>,
 ) -> Result<Option<Discovered>, StateError> {
     let Corroboration::Reached { process, .. } = corroboration else {
         // Payload identity with no corroboration is honest discovery
@@ -111,14 +112,15 @@ pub async fn discovered(
     let evidence = Evidence::new(
         EvidenceSource::ProviderHook,
         Assurance::Attested,
-        observed_at,
+        observed_at.wall,
     );
     let resolution = state
-        .resolve_or_create_session(key, Provenance::Discovered, evidence, observed_at)
+        .resolve_or_create_session(key, Provenance::Discovered, evidence, observed_at.wall)
         .await?;
 
     match resolution {
         SessionResolution::Created { session, binding } => {
+            observe_fact(state, provider, session.id(), fact, observed_at, &process);
             info!(
                 session = %session.id(),
                 binding = %binding.id(),
@@ -126,7 +128,7 @@ pub async fn discovered(
                 "a session running outside Corral is now visible",
             );
             if let RuntimeRecord::Run(run) =
-                record_run(state, session.id(), named, &process, observed_at).await?
+                record_run(state, session.id(), named, &process, observed_at.wall).await?
             {
                 shown_under(state, provider, &process, session.id(), identity, run);
             }
@@ -143,6 +145,7 @@ pub async fn discovered(
         // no Run — which every later delivery would otherwise confirm and
         // never repair. So the Run is ensured rather than assumed.
         SessionResolution::Existing { session, .. } => {
+            observe_fact(state, provider, session.id(), fact, observed_at, &process);
             if has_live_run(state, session.id()).await? {
                 debug!(
                     session = %session.id(),
@@ -151,7 +154,7 @@ pub async fn discovered(
                 );
                 return Ok(Some(Discovered::AlreadyKnown));
             }
-            match record_run(state, session.id(), named, &process, observed_at).await? {
+            match record_run(state, session.id(), named, &process, observed_at.wall).await? {
                 RuntimeRecord::Run(run) => {
                     shown_under(state, provider, &process, session.id(), identity, run);
                     Ok(Some(Discovered::Run))
@@ -160,6 +163,38 @@ pub async fn discovered(
             }
         }
     }
+}
+
+/// The corroborated fact as a claim about the Session it was filed under.
+///
+/// Attested association — the identity is the provider's, the process was
+/// observed — on a runtime Corral does not own: no screen, no activity, and
+/// whether the event is version-sealed is the sealing table's answer
+/// (ADR 0015 D3, ADR 0014 D3).
+fn observe_fact(
+    state: &Arc<DaemonState>,
+    provider: KnownProvider,
+    session: corral_core::CorralSessionId,
+    fact: Option<crate::provider::AgentFactKind>,
+    observed_at: crate::clock::Reading,
+    process: &crate::platform::process::ProcessIdentity,
+) {
+    // The version the observed executable's installation carries, bound to
+    // this process only if that metadata predates it (grill Q12).
+    let version = crate::provider::version::installed_version(provider, &process.executable)
+        .and_then(|installed| installed.bound_to(process.started));
+    let Some(claim) = fact.and_then(|fact| {
+        crate::attention::hook_fact_claim(
+            provider,
+            fact,
+            version.as_deref(),
+            corral_core::Assurance::Attested,
+            corral_core::Channel::ExternalRuntime,
+        )
+    }) else {
+        return;
+    };
+    state.with_runtime(|runtime| runtime.attention.observe(session, claim, observed_at));
 }
 
 /// Put the Session on the live table, in the row its runtime is shown as.

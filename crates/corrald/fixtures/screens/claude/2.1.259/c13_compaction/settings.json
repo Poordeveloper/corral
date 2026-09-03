@@ -1,0 +1,104 @@
+{
+ "hooks": {
+  "SessionStart": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c11_compaction/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "UserPromptSubmit": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c11_compaction/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "PreToolUse": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c11_compaction/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "PostToolUse": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c11_compaction/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "Notification": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c11_compaction/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "Stop": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c11_compaction/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "SubagentStop": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c11_compaction/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "PreCompact": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c11_compaction/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "SessionEnd": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c11_compaction/hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "PermissionRequest": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /matrix/hookcap.py /matrix/out/c11_compaction/hooks.jsonl"
+     }
+    ]
+   }
+  ]
+ }
+}
