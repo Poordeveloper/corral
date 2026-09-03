@@ -575,8 +575,9 @@ impl SessionHandle {
 /// exists. What is left is starting threads, which cannot fail, so a Run whose
 /// start committed is always served.
 pub struct PendingSession {
-    /// The manifest the screen thread evaluates, when this provider has one.
-    detect: Option<Arc<crate::detection::Manifest>>,
+    /// What this session's screen is read against, when its provider has a
+    /// manifest.
+    detect: Option<ScreenRules>,
     /// Taken by whichever of `serve` and the destructor gets there first.
     ///
     /// The obligation lives in the type rather than in every caller: this owns
@@ -652,8 +653,16 @@ pub fn spawn_session(
 impl PendingSession {
     /// Evaluate this manifest against the screen once output settles.
     #[must_use]
-    pub fn detect_with(mut self, manifest: Arc<crate::detection::Manifest>) -> Self {
-        self.detect = Some(manifest);
+    /// Read this session's screen against a provider manifest, at the version
+    /// the runtime is running. The version is half of what seals a reading, so
+    /// it travels with the manifest rather than being looked up later from a
+    /// runtime that may have been upgraded underneath.
+    pub fn detect_with(
+        mut self,
+        manifest: Arc<crate::detection::Manifest>,
+        version: Option<String>,
+    ) -> Self {
+        self.detect = Some(ScreenRules { manifest, version });
         self
     }
 
@@ -775,7 +784,7 @@ impl PendingSession {
                 geometry,
                 questions,
                 &serving,
-                detect.as_deref(),
+                detect.as_ref(),
             )
         });
 
@@ -907,14 +916,26 @@ fn read_pty(
     }
 }
 
+/// What a session's screen is read against: the provider's manifest, and the
+/// provider version the runtime is running.
+///
+/// One value rather than two, because a rule seals only where both agree —
+/// a manifest measured on one build asserts nothing about another — and
+/// carrying them apart invites a caller to have one and not the other
+/// (ADR 0015 D6, grill Q13).
+struct ScreenRules {
+    manifest: Arc<crate::detection::Manifest>,
+    version: Option<String>,
+}
+
 /// Evaluate the manifest against the screen as it stands and publish the
 /// result, or its absence.
 fn read_screen(
     terminal: &super::terminal::AuthoritativeTerminal,
-    detect: Option<&crate::detection::Manifest>,
+    detect: Option<&ScreenRules>,
     published: &Published,
 ) {
-    let Some(manifest) = detect else {
+    let Some(rules) = detect else {
         return;
     };
     let reading = terminal.terminal().and_then(|emulator| {
@@ -922,13 +943,15 @@ fn read_screen(
             rows: emulator.plain_string().lines().map(str::to_owned).collect(),
             title: String::from_utf8_lossy(&emulator.title).into_owned(),
         };
-        crate::detection::evaluate(manifest, &screen).map(|reading| PublishedReading {
-            rule: reading.rule,
-            asserts: reading.asserts,
-            sealing: reading.sealing,
-            manifest_version: reading.manifest_version,
-            at: std::time::SystemTime::now(),
-        })
+        crate::detection::evaluate(&rules.manifest, &screen, rules.version.as_deref()).map(
+            |reading| PublishedReading {
+                rule: reading.rule,
+                asserts: reading.asserts,
+                sealing: reading.sealing,
+                manifest_version: reading.manifest_version,
+                at: std::time::SystemTime::now(),
+            },
+        )
     });
     if let Ok(mut slot) = published.reading.lock() {
         *slot = reading;
@@ -949,7 +972,7 @@ fn serve_screen(
     geometry: PtyGeometry,
     questions: Receiver<Ask>,
     published: &Published,
-    detect: Option<&crate::detection::Manifest>,
+    detect: Option<&ScreenRules>,
 ) {
     let mut terminal = super::terminal::AuthoritativeTerminal::new(geometry);
     let mut stream = super::stream::TerminalStream::new();

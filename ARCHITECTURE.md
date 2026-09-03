@@ -55,6 +55,16 @@ Manual          the user explicitly linked it
 Heuristic       cwd / time / process / history correlation only
 ```
 
+**A hook event Corral received on a launch token it minted directly
+supports the positive claim that event makes.** That a turn started, ended,
+or is waiting for an answer is what the provider said about itself through a
+channel Corral owns, and no further corroboration is owed for *that* claim —
+the corroboration a `ProviderSessionBinding` needs is for the different, live
+association claim that a named process is carrying the identity. Assurance
+qualifies the claim being made, not the object globally. What such an event
+may not do is assert a state its version was never measured to assert; that
+is sealing, not assurance (ADR 0015 D3, D9).
+
 Only Deterministic, Attested, or Manual bindings may drive cross-facet
 control (AGENTS.md §Core model). Whether a heuristic match was *claimed* by
 provider history or *inferred* from correlation is evidence detail, not a

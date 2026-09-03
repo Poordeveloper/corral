@@ -23,7 +23,25 @@ pub const ENGINE_VERSION: u32 = 1;
 pub struct Manifest {
     pub provider: String,
     pub version: String,
+    /// The provider versions this manifest's rules were measured on. A rule
+    /// asserts a person-visible state only while the runtime drawing the
+    /// screen is one of them; every other version reads the same rules and
+    /// asserts nothing (grill Q13, ADR 0015 D6).
+    pub sealed_versions: Vec<String>,
     pub rules: Vec<Rule>,
+}
+
+impl Manifest {
+    /// Whether this manifest's evidence covers the version drawing the screen.
+    /// A version Corral could not establish is not one of them.
+    #[must_use]
+    pub fn seals(&self, version: Option<&str>) -> bool {
+        version.is_some_and(|version| {
+            self.sealed_versions
+                .iter()
+                .any(|sealed| sealed.as_str() == version)
+        })
+    }
 }
 
 /// One rule: a region of the screen, substring gates over it, and the state
@@ -134,6 +152,7 @@ pub fn parse(text: &str) -> Result<(Manifest, Vec<RuleRefused>), ManifestRefused
     }
     let provider = string(document.get("provider")).ok_or(ManifestRefused::MissingProvider)?;
     let version = string(document.get("version")).unwrap_or_else(|| "unversioned".to_owned());
+    let sealed_versions = strings(document.get("sealed_versions"));
     let mut rules = Vec::new();
     let mut refused = Vec::new();
     if let Some(Item::ArrayOfTables(tables)) = document.get("rule") {
@@ -148,6 +167,7 @@ pub fn parse(text: &str) -> Result<(Manifest, Vec<RuleRefused>), ManifestRefused
         Manifest {
             provider,
             version,
+            sealed_versions,
             rules,
         },
         refused,
@@ -224,7 +244,7 @@ fn strings(item: Option<&Item>) -> Vec<String> {
 /// Every rule is evaluated, sealed or not: an unsealed match is a reading the
 /// ledger will refuse to act on, and one the journal can still count.
 #[must_use]
-pub fn evaluate(manifest: &Manifest, screen: &Screen) -> Option<Reading> {
+pub fn evaluate(manifest: &Manifest, screen: &Screen, version: Option<&str>) -> Option<Reading> {
     manifest
         .rules
         .iter()
@@ -233,7 +253,14 @@ pub fn evaluate(manifest: &Manifest, screen: &Screen) -> Option<Reading> {
         .map(|rule| Reading {
             rule: rule.id.clone(),
             asserts: rule.asserts,
-            sealing: rule.sealing(),
+            // Both halves, and the version is the half a rule cannot carry:
+            // a rule sealed on the build it was measured on says nothing
+            // about the build actually drawing this screen (grill Q13).
+            sealing: if rule.sealing() == Sealing::Sealed && manifest.seals(version) {
+                Sealing::Sealed
+            } else {
+                Sealing::Unsealed
+            },
             manifest_version: manifest.version.clone(),
         })
 }

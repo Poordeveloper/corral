@@ -657,7 +657,7 @@ fn a_settled_screen_publishes_its_reading() {
         GEOMETRY,
     )
     .expect("spawn")
-    .detect_with(std::sync::Arc::new(manifest));
+    .detect_with(std::sync::Arc::new(manifest), Some("2.1.258".to_owned()));
     let (observations, observed) = observe_runs();
     let handle = pending.serve(CorralSessionId::mint(), RunId::mint(), observations);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);

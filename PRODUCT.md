@@ -178,6 +178,20 @@ behind.
   direction-aware call to action ("Upgrade Claude Code for full Corral
   integration" versus "This Claude Code version is not yet supported by
   Corral").
+- **An unverified version is Limited awareness, not inherited authority.**
+  Support is measured per version, and a version nobody measured inherits
+  nothing from the one beside it — not from an earlier release, not from a
+  later one, not from the same minor. Its events and screens are still read,
+  still counted, and still visible; they assert no main state and raise no
+  notification. Corral says it is not sure rather than being sure on
+  yesterday's evidence.
+- **Support is claimed per capability, not per provider.** "Supported"
+  answers *which* capabilities were measured on this provider at this
+  version on this platform — knowing a session exists, knowing it needs you,
+  taking control, continuing it — and a release claims each one separately.
+  A capability measured nowhere is absent from the surface rather than
+  offered and unreliable, and one measured on a single platform is claimed
+  for that platform alone.
 - **Identity certainty is itself a user-visible claim.** Display-merging two
   entries requires attested-or-better identity evidence. Heuristic
   correlation produces two honest rows plus a weak hint ("Possibly the same

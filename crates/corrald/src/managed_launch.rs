@@ -86,17 +86,23 @@ where
         .as_ref()
         .and_then(|injected| state.resolve_launch_token(&injected.token))
         .map(|scope| scope.provider);
-    let pending = match provider.and_then(|provider| state.manifest_for(provider)) {
-        Some(manifest) => pending.detect_with(manifest),
-        None => pending,
-    };
-    if let Some(provider) = provider {
+    // The version is read before the manifest is attached, because it is half
+    // of what seals a reading: a rule measured on one build asserts nothing
+    // about the build actually drawing this screen.
+    let version = provider.and_then(|provider| {
         let began = pending.began();
-        let version = crate::provider::version::resolve_program(&program)
+        crate::provider::version::resolve_program(&program)
             .and_then(|resolved| crate::provider::version::installed_version(provider, &resolved))
-            .and_then(|installed| installed.bound_to(began));
+            .and_then(|installed| installed.bound_to(began))
+    });
+    if provider.is_some() {
+        let version = version.clone();
         state.with_runtime(|runtime| runtime.reported.versioned(session, version));
     }
+    let pending = match provider.and_then(|provider| state.manifest_for(provider)) {
+        Some(manifest) => pending.detect_with(manifest, version),
+        None => pending,
+    };
     // Known as Corral's from this moment, not from the serve below: the
     // process is on the table now, and a sweep that reads it while the store
     // is still committing must not list it as a runtime outside Corral. A

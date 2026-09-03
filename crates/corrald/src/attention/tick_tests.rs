@@ -31,6 +31,7 @@ fn a_sealed_screen_reading_becomes_the_sessions_main_state() {
     let (state, directory) = daemon("sealed-reading");
     let (manifest, _) = crate::detection::manifest::parse(
         "schema = 1\nmin_engine_version = 1\nversion = \"t\"\nprovider = \"test\"\n\
+         sealed_versions = [\"2.1.258\"]\n\
          [[rule]]\nid = \"ready\"\nasserts = \"turn_complete\"\nregion = \"whole_screen\"\n\
          all = [\"done\"]\nsealed_by = \"synthetic\"\n",
     )
@@ -45,7 +46,7 @@ fn a_sealed_screen_reading_becomes_the_sessions_main_state() {
     .expect("launch");
     let pending = spawn_session(&launch, PtyGeometry::expect_valid(24, 80))
         .expect("spawn")
-        .detect_with(Arc::new(manifest));
+        .detect_with(Arc::new(manifest), Some("2.1.258".to_owned()));
     let session = CorralSessionId::mint();
     let handle = pending.serve(session, RunId::mint(), state.observations().clone());
     state.with_runtime(|runtime| runtime.sessions.insert(handle));

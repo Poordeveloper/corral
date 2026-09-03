@@ -545,6 +545,23 @@ ladder answers are exhaustive in code.
 Unverified implementation may merge behind an honest capability boundary;
 unverified product claims may not.
 
+**ADR 0015 status.** Accepted 2026-09-03, after the round-5 reconciliation
+confirmed all nine conditions: the attention matrix evidence artifact
+exists (`docs/evidence/pr8-attention-semantics-2026-09-03.md`); every
+required Q21 scenario has a capture or an explicit measured absence;
+provider/version rows are explicit and inherit nothing across versions;
+every semantic-capable event or screen rule is sealed by human-reviewed
+evidence, and `sealed_by` names it; Claude's `Notification` variants are
+classified by `notification_type`, with unknown ones diagnostic only; the
+noise catalog exists and the fixtures cite it; every load-bearing fact
+points at measured evidence, an earlier accepted invariant, or an
+explicitly non-load-bearing limitation; and the glossary, `ARCHITECTURE.md`
+and `PRODUCT.md` carry received hook evidence supporting its own positive
+claim, claim-scoped assurance, capability-scoped support and release
+semantics, and unverified versions meaning Limited awareness rather than
+inherited authority. Q1–Q34 do not reopen. What remains before PR8a lands
+is the review pass and the harness-isolation gate above.
+
 **When the dogfood window may start (grill Q31).** PR8a merged; a human
 has advanced `STORAGE_EPOCH` to `dogfood`; the exercised
 provider/version/capability rows are sealed; diagnostics function and the

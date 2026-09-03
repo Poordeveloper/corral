@@ -10,6 +10,8 @@ const SESSION_START_OLDER: &str =
 const USER_PROMPT_SUBMIT: &str = include_str!("../../fixtures/claude-hooks/UserPromptSubmit.json");
 const STOP: &str = include_str!("../../fixtures/claude-hooks/Stop.json");
 const NOTIFICATION: &str = include_str!("../../fixtures/claude-hooks/Notification.json");
+const NOTIFICATION_PERMISSION: &str =
+    include_str!("../../fixtures/claude-hooks/Notification-permission.json");
 const SESSION_END: &str = include_str!("../../fixtures/claude-hooks/SessionEnd.json");
 
 fn reported(payload: &str) -> ProviderReport {
@@ -23,7 +25,12 @@ fn every_injected_event_normalizes_to_the_fact_it_names() {
         (SESSION_START_RESUME, AgentFactKind::SessionStarted),
         (USER_PROMPT_SUBMIT, AgentFactKind::TurnStarted),
         (STOP, AgentFactKind::TurnEnded),
-        (NOTIFICATION, AgentFactKind::AwaitingInput),
+        // The captured `Notification.json` is the idle one — its own
+        // `notification_type` says `idle_prompt` and its message is "Claude
+        // is waiting for your input". It re-observes a Ready prompt; the
+        // request is the payload beside it.
+        (NOTIFICATION, AgentFactKind::TurnEnded),
+        (NOTIFICATION_PERMISSION, AgentFactKind::AwaitingInput),
         (SESSION_END, AgentFactKind::SessionEnded),
     ] {
         assert_eq!(reported(payload).fact, expected);
@@ -706,4 +713,44 @@ fn every_token_form_is_placed_by_the_grammar_rather_than_by_its_spelling() {
         let args: Vec<String> = shape.iter().map(|word| (*word).to_owned()).collect();
         assert!(refuse_arguments(&args).is_err(), "{shape:?} ({why})");
     }
+}
+
+/// `Notification` is two different facts wearing one event name, and the
+/// difference is the whole difference between "answer me" and "still here".
+/// Measured on 2.1.258: `permission_prompt` 6 s after a `PermissionRequest`
+/// that is still pending, `idle_prompt` 60 s after `Stop` at an idle prompt
+/// (matrix C1, C2, C7; noise catalog `claude.notification.idle-prompt`).
+#[test]
+fn a_notification_is_read_by_its_type_not_by_its_name() {
+    let blocked = interpret(&notification("permission_prompt")).expect("interpreted");
+    assert_eq!(blocked.fact, AgentFactKind::AwaitingInput);
+
+    // Not AwaitingInput: read that way, every session a person left alone
+    // becomes a blocker one minute later.
+    let idle = interpret(&notification("idle_prompt")).expect("interpreted");
+    assert_eq!(idle.fact, AgentFactKind::TurnEnded);
+
+    // A variant this build has no word for asserts nothing at all rather than
+    // defaulting to the louder of the two.
+    assert_eq!(
+        interpret(&notification("some_later_variant")),
+        Err(Uninterpretable::UnknownEvent)
+    );
+    let bare = serde_json::json!({
+        "hook_event_name": "Notification",
+        "session_id": "abc",
+        "message": "Claude needs your permission to use Bash"
+    })
+    .to_string();
+    assert_eq!(interpret(&bare), Err(Uninterpretable::UnknownEvent));
+}
+
+fn notification(kind: &str) -> String {
+    serde_json::json!({
+        "hook_event_name": "Notification",
+        "session_id": "abc",
+        "notification_type": kind,
+        "message": "Claude needs your permission to use Bash"
+    })
+    .to_string()
 }

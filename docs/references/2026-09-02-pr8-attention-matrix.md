@@ -414,19 +414,19 @@ prompt until the answer was typed as the next turn. A Codex "question" is
 Ready, not Needs You; the approval dialog is the provider's one blocking
 surface.
 
-### X6 — help, resize, typing, paste, compaction — **partial**
+### X6 — help, resize, typing, paste, compaction — **partial; completed by X9 and X10**
 
 - `/help` is not a command on 0.152.0 (`Unrecognized command '/help'.
   Type "/" for a list of supported commands.`); the popup that `/` opens
-  was not captured.
+  is X9 below.
 - Resize 100×30 and back: redraws only.
 - Typing at 60 ms per character echoes one frame per key; the composer
   does not clear on Ctrl-U once it holds several lines.
 - A 60-line bracketed paste is inserted literally — no placeholder — and
   the following `/compact` was appended to it and submitted as one
-  message, so compaction was not exercised. The model's reply ("I see the
-  pasted lines ending with /compact/help. What would you like me to do
-  with them?") is a Ready turn.
+  message, so compaction was not exercised here; it is X10 below. The
+  model's reply ("I see the pasted lines ending with /compact/help. What
+  would you like me to do with them?") is a Ready turn.
 
 ### X7 — approval-like words as ordinary output — **pass**
 

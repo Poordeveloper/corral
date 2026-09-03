@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 read_when:
   - deriving, ranking, or rendering a session's main state
   - adding an evidence source, a hook event, or a screen rule that touches status
@@ -8,16 +8,26 @@ read_when:
   - deciding what survives a daemon restart about status, and what is recorded about it
 ---
 
-> Structural rulings founder-accepted 2026-09-02, rounds 1–4
-> (`docs/decisions/2026-09-02-pr8-attention-grill.md`); the ADR stays
-> proposed until the PR8 matrix measures the load-bearing facts below and
-> an acceptance reconciliation finds grill Q32's closing conditions met:
-> the matrix artifact exists, every Q21 scenario has a capture or a
-> measured absence, the noise catalog exists, every load-bearing fact is
-> measured, covered by an accepted invariant, or marked a non-load-bearing
-> limitation, and no semantic-capable rule exists merely because code came
-> before evidence. Mechanics the rulings already fix may be built on a
-> branch before then; nothing merges before then.
+> Accepted 2026-09-03, by the acceptance reconciliation round 5 required
+> against its nine conditions. Structural rulings founder-accepted
+> 2026-09-02, rounds 1–4 (`docs/decisions/2026-09-02-pr8-attention-grill.md`).
+>
+> What the reconciliation found: the matrix ran on Claude Code 2.1.258 and
+> Codex 0.152.0 (2026-09-02) and on Claude Code 2.1.259 and Codex 0.152.0
+> (2026-09-03); every Q21 scenario has a capture or an explicit measured
+> absence, the four the first run could not induce included; the sealing
+> evidence is `docs/evidence/pr8-attention-semantics-2026-09-03.md`, which
+> every `sealed_by` and every row of `corrald::attention::sealing` names;
+> provider and version rows are explicit and inherit nothing across
+> versions; Claude's `Notification` variants are classified by
+> `notification_type` with unknown ones diagnostic only; the noise catalog
+> holds twenty entries with dispositions and the fixtures cite them; each
+> load-bearing fact below points at measured evidence or is marked what it
+> is; and the glossary, `ARCHITECTURE.md` and `PRODUCT.md` carry
+> claim-scoped assurance, hook evidence supporting its own positive claim,
+> capability-scoped support, and unverified versions meaning Limited
+> awareness. Sealing itself is a human act on this evidence: the merge that
+> lands it is that act (D9).
 
 # Attention derivation: which evidence may assert which state, how a claim rots, and what the engine owns
 
@@ -440,12 +450,20 @@ manifest, never to the catalog, which records the confusion instead:
 
 ## Load-bearing facts, measured
 
-Measured 2026-09-02 on Claude Code 2.1.258 and Codex 0.152.0
+Measured 2026-09-02 on Claude Code 2.1.258 and Codex 0.152.0, and
+2026-09-03 on Claude Code 2.1.259 and Codex 0.152.0
 (`docs/references/2026-09-02-pr8-attention-matrix.md`; captures under
 `crates/corrald/fixtures/screens/`), inside the PR7 spike's udocker
 container on Linux, which leaves screen bytes, hook and notify payloads,
 and their timings unaltered and does not measure the Linux external-Know
 chain (grill Q16).
+
+**What each fact below is worth is sealed per version, and the sealing
+evidence is `docs/evidence/pr8-attention-semantics-2026-09-03.md`.** Claude
+Code replaced itself between the two runs and deleted the 2.1.258 binary,
+so the hook and screen semantics are sealed for 2.1.258 alone and cannot be
+re-measured on it; 2.1.259 carries the compaction and failure facts and no
+turn-event row. Nothing inherits across versions (grill Q13, Q28).
 
 - Claude `Notification` types: `permission_prompt` fires 6 s after a
   pending `PermissionRequest`; `idle_prompt` fires 60 s after `Stop` at
@@ -460,8 +478,24 @@ chain (grill Q16).
   the fresh-directory trust dialog precedes `SessionStart`; Codex's
   approval dialog and its blinking `Action Required` title; the Ready,
   Working, spinner, resume-picker, help, paste, resize, typing, and
-  permission-like-output negatives. Not induced: compaction and an API
-  error on Claude; the `/` popup and compaction on Codex.
+  permission-like-output negatives. The four the first run could not
+  induce were measured in the second: Claude compaction and API failure,
+  Codex's `/` popup and compaction.
+- Compaction is not a turn on either provider: no `Stop`, no
+  `agent-turn-complete`, and the only positive signal while it runs is the
+  provider's own spinner — in the OSC title on both, in the transcript on
+  Codex. So Working through a compaction rests on PTY activity, which needs
+  no version row, and never on turn events. Claude also fires a second
+  `SessionStart` with `source: "compact"` carrying the **same**
+  `session_id`: a compaction marker, never a session boundary.
+- A turn the API refuses leaves a Ready-shaped screen — the error line
+  above the ordinary prompt and mode bar — and fires **no `Stop` and no
+  `Notification`**, so nothing closes the Working a `UserPromptSubmit`
+  opened. This is the one measured shape that seals nothing: it is
+  `claude.api-error.ready-shaped` in the catalog, held `unresolved`, and
+  this build answers it only through D4's ordinary rules — the hook claim
+  rots on its horizon and the screen rule is unsealed on that version, so
+  such a session reads Unknown rather than a guess in either direction.
 - Codex approvals announce themselves in-band through the OSC 0 title
   (`[ . ]`/`[ ! ] Action Required | proj`), focused or not;
   `tui.notifications` adds only a bare BEL when unfocused. Codex has no
@@ -480,7 +514,11 @@ chain (grill Q16).
   Esc on any dialog, in either provider, produces no turn-end event at
   all.
 - Provider version: neither provider's events carry one; each channel's
-  installation metadata and its cost are tabled in the matrix.
+  installation metadata and its cost are tabled in the matrix. A provider
+  that updates itself under a running daemon is not hypothetical — Claude
+  Code did it mid-capture on 2026-09-03 — which is why a version is bound
+  at the launch boundary from metadata predating the process, and why a
+  version Corral cannot establish seals nothing.
 
 ## What this does not decide
 

@@ -121,10 +121,15 @@ const ATTACH_SUBCOMMAND: &str = "attach";
 /// `PreToolUse` / `PostToolUse` are deliberately absent: high-frequency, and
 /// nothing in this phase consumes them. Adding an event later is additive
 /// (ADR 0004 D6).
+const NOTIFICATION: &str = "Notification";
+
 const INJECTED: [(&str, AgentFactKind); 5] = [
     ("SessionStart", AgentFactKind::SessionStarted),
     ("UserPromptSubmit", AgentFactKind::TurnStarted),
     ("Stop", AgentFactKind::TurnEnded),
+    // `Notification` is not one fact; `notification_type` decides which, and
+    // the table's entry is the one this event can never be on its own.
+    // `interpret` reads the type before it reads this row.
     ("Notification", AgentFactKind::AwaitingInput),
     ("SessionEnd", AgentFactKind::SessionEnded),
 ];
@@ -420,11 +425,15 @@ pub fn interpret(payload: &str) -> Result<ProviderReport, Uninterpretable> {
         .get("hook_event_name")
         .and_then(Value::as_str)
         .ok_or(Uninterpretable::Malformed)?;
-    let fact = INJECTED
-        .iter()
-        .find(|(name, _)| *name == event)
-        .map(|(_, fact)| *fact)
-        .ok_or(Uninterpretable::UnknownEvent)?;
+    let fact = if event == NOTIFICATION {
+        notification_fact(&document)?
+    } else {
+        INJECTED
+            .iter()
+            .find(|(name, _)| *name == event)
+            .map(|(_, fact)| *fact)
+            .ok_or(Uninterpretable::UnknownEvent)?
+    };
 
     // A known event with no usable id is a fact without an identity, not a
     // malformed payload: the fact is still true of the launch the token names,
@@ -463,6 +472,28 @@ pub fn interpret(payload: &str) -> Result<ProviderReport, Uninterpretable> {
             })
             .flatten(),
     })
+}
+
+/// Which fact a `Notification` carries, from its own `notification_type`.
+///
+/// The name alone is not the fact. Measured on 2.1.258:
+/// `permission_prompt` fires about 6 s after a `PermissionRequest` that is
+/// still pending, and `idle_prompt` about 60 s after `Stop` at a prompt
+/// nobody has typed at. Reading the second as a blocker would put every
+/// session a person walked away from into Needs You a minute later, which is
+/// the false blocker the noise catalog names `claude.notification.idle-prompt`
+/// (matrix C1, C2, C7).
+///
+/// A type this build has no word for is `UnknownEvent`: tolerated, counted,
+/// asserting nothing. Defaulting it to either fact would let a later release
+/// mint a blocker, or clear one, on a variant nobody measured (ADR 0015 D3).
+fn notification_fact(document: &Value) -> Result<AgentFactKind, Uninterpretable> {
+    match document.get("notification_type").and_then(Value::as_str) {
+        Some("permission_prompt") => Ok(AgentFactKind::AwaitingInput),
+        // Idle at the prompt is the Ready it re-observes, not a request.
+        Some("idle_prompt") => Ok(AgentFactKind::TurnEnded),
+        Some(_) | None => Err(Uninterpretable::UnknownEvent),
+    }
 }
 
 /// Claude Code's `SessionStart.source`, normalized.

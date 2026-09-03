@@ -7,6 +7,7 @@ schema = 1
 min_engine_version = 1
 version = "2026.09.02.1"
 provider = "claude"
+sealed_versions = ["2.1.258"]
 
 [[rule]]
 id = "permission-prompt"
@@ -97,7 +98,7 @@ fn a_rule_reads_the_region_it_names_and_the_highest_priority_match_wins() {
         ],
         "✳ Claude Code",
     );
-    let reading = evaluate(&manifest, &blocked).expect("a reading");
+    let reading = evaluate(&manifest, &blocked, Some("2.1.258")).expect("a reading");
     assert_eq!(reading.rule, "permission-prompt");
     assert_eq!(reading.asserts, SemanticState::NeedsYou);
     assert_eq!(reading.sealing, Sealing::Sealed);
@@ -110,7 +111,7 @@ fn a_rule_reads_the_region_it_names_and_the_highest_priority_match_wins() {
         ],
         "✳ Claude Code",
     );
-    let reading = evaluate(&manifest, &idle).expect("a reading");
+    let reading = evaluate(&manifest, &idle, None).expect("a reading");
     assert_eq!(reading.rule, "idle-prompt");
     assert_eq!(reading.sealing, Sealing::Unsealed);
 
@@ -127,7 +128,7 @@ fn a_rule_reads_the_region_it_names_and_the_highest_priority_match_wins() {
         "✳ Claude Code",
     );
     assert_eq!(
-        evaluate(&manifest, &near_miss).map(|r| r.rule),
+        evaluate(&manifest, &near_miss, None).map(|r| r.rule),
         Some("idle-prompt".to_owned())
     );
 }
@@ -148,11 +149,11 @@ all = ["Action Required"]
     let (manifest, _) = parse(text).expect("a valid manifest");
     let blocked = screen(&["anything"], "[ ! ] Action Required | proj");
     assert_eq!(
-        evaluate(&manifest, &blocked).map(|r| r.rule),
+        evaluate(&manifest, &blocked, None).map(|r| r.rule),
         Some("action-required".to_owned())
     );
     let idle = screen(&["anything"], "proj");
-    assert_eq!(evaluate(&manifest, &idle), None);
+    assert_eq!(evaluate(&manifest, &idle, None), None);
 }
 
 /// Built-in manifests are the floor; an override replaces its provider's
@@ -187,4 +188,85 @@ fn an_override_replaces_its_provider_and_a_refused_one_is_reported() {
     );
     assert_eq!(loadout.refused.len(), 1);
     assert!(loadout.refused[0].path.ends_with("codex.toml"));
+}
+
+/// A rule is sealed for the versions its manifest was measured on and no
+/// others. Sealing that ignored the running version would let a rule measured
+/// on one build assert a person-visible state on a build nobody looked at,
+/// which is the inheritance grill Q13 forbids.
+#[test]
+fn a_sealed_rule_reads_unsealed_on_a_version_the_manifest_does_not_name() {
+    let manifest = parse(
+        r#"
+schema = 1
+min_engine_version = 1
+version = "2026.09.03.1"
+provider = "claude"
+sealed_versions = ["2.1.258"]
+
+[[rule]]
+id = "blocked"
+asserts = "needs_input"
+region = "whole_screen"
+all = ["Do you want to proceed?"]
+sealed_by = "docs/evidence/pr8-attention-semantics-2026-09-03.md"
+priority = 10
+"#,
+    )
+    .expect("a usable manifest")
+    .0;
+    let screen = Screen {
+        rows: vec!["Do you want to proceed?".to_owned()],
+        title: String::new(),
+    };
+
+    assert_eq!(
+        evaluate(&manifest, &screen, Some("2.1.258"))
+            .expect("a reading")
+            .sealing,
+        Sealing::Sealed
+    );
+    for unmeasured in [Some("2.1.259"), Some("2.1.257"), Some(""), None] {
+        assert_eq!(
+            evaluate(&manifest, &screen, unmeasured)
+                .expect("a reading")
+                .sealing,
+            Sealing::Unsealed,
+            "{unmeasured:?}"
+        );
+    }
+}
+
+/// A manifest naming no versions seals nothing, whatever its rules say.
+#[test]
+fn a_manifest_that_names_no_version_seals_nothing() {
+    let manifest = parse(
+        r#"
+schema = 1
+min_engine_version = 1
+version = "2026.09.03.1"
+provider = "claude"
+
+[[rule]]
+id = "blocked"
+asserts = "needs_input"
+region = "whole_screen"
+all = ["Do you want to proceed?"]
+sealed_by = "somewhere"
+priority = 10
+"#,
+    )
+    .expect("a usable manifest")
+    .0;
+    let screen = Screen {
+        rows: vec!["Do you want to proceed?".to_owned()],
+        title: String::new(),
+    };
+
+    assert_eq!(
+        evaluate(&manifest, &screen, Some("2.1.258"))
+            .expect("a reading")
+            .sealing,
+        Sealing::Unsealed
+    );
 }
