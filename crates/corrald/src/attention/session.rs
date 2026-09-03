@@ -76,6 +76,14 @@ pub enum Transition {
         item: AttentionItemId,
         end: ItemEnd,
     },
+    /// One item ended and its replacement was born in the same derivation:
+    /// a blocker resolved straight into Ready, or Ready into a new blocker.
+    /// Neither fact can be read off the other, so both travel together.
+    ItemReplaced {
+        ended: AttentionItemId,
+        end: ItemEnd,
+        born: AttentionItemId,
+    },
 }
 
 /// What an acknowledgement did (grill Q18).
@@ -137,13 +145,17 @@ impl SessionAttention {
             }
             _ => derived.into_state(now),
         };
-        let ended = self.item.take().map(|item| Transition::ItemEnded {
-            item: item.id,
-            end: match to {
-                MainState::Exited => ItemEnd::Exited,
-                MainState::Unknown => ItemEnd::Rotted,
-                MainState::Working | MainState::NeedsYou | MainState::Ready => ItemEnd::Resolved,
-            },
+        let ended = self.item.take().map(|item| {
+            (
+                item.id,
+                match to {
+                    MainState::Exited => ItemEnd::Exited,
+                    MainState::Unknown => ItemEnd::Rotted,
+                    MainState::Working | MainState::NeedsYou | MainState::Ready => {
+                        ItemEnd::Resolved
+                    }
+                },
+            )
         });
         let reason = match to {
             MainState::NeedsYou => Some(AttentionReason::NeedsInput),
@@ -151,7 +163,7 @@ impl SessionAttention {
             MainState::Working | MainState::Unknown | MainState::Exited => None,
         };
         match (ended, reason) {
-            (_, Some(reason)) => {
+            (ended, Some(reason)) => {
                 let item = Item {
                     id: AttentionItemId::mint(),
                     reason,
@@ -159,9 +171,16 @@ impl SessionAttention {
                     acknowledged: false,
                 };
                 self.item = Some(item);
-                Transition::ItemBorn(item.id)
+                match ended {
+                    Some((id, end)) => Transition::ItemReplaced {
+                        ended: id,
+                        end,
+                        born: item.id,
+                    },
+                    None => Transition::ItemBorn(item.id),
+                }
             }
-            (Some(ended), None) => ended,
+            (Some((item, end)), None) => Transition::ItemEnded { item, end },
             (None, None) => Transition::StateChanged { from, to },
         }
     }

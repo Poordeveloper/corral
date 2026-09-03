@@ -128,10 +128,11 @@ pub fn tick_once(state: &Arc<DaemonState>, now: SystemTime) -> Vec<Change> {
 }
 
 fn record(change: &Change, provider_version: Option<String>) -> Record {
-    let (item, item_end, notifiable) = match change.transition {
-        Transition::ItemBorn(item) => (Some(item), None, true),
-        Transition::ItemEnded { item, end } => (Some(item), Some(end), false),
-        Transition::StateChanged { .. } | Transition::Unchanged => (None, None, false),
+    let (born, ended, item_end, notifiable) = match change.transition {
+        Transition::ItemBorn(item) => (Some(item), None, None, true),
+        Transition::ItemEnded { item, end } => (None, Some(item), Some(end), false),
+        Transition::ItemReplaced { ended, end, born } => (Some(born), Some(ended), Some(end), true),
+        Transition::StateChanged { .. } | Transition::Unchanged => (None, None, None, false),
     };
     Record::Transition(TransitionRecord {
         session: change.session,
@@ -153,7 +154,8 @@ fn record(change: &Change, provider_version: Option<String>) -> Record {
             (MainState::Exited, None) => None,
             (_, None) => change.decided_by.map(|_| true),
         },
-        item,
+        born,
+        ended,
         item_end,
         notifiable,
     })

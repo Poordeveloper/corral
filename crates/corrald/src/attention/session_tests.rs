@@ -187,3 +187,25 @@ fn a_successful_open_acknowledges_ready_but_not_needs_you() {
     blocked.opened();
     assert!(!blocked.item().expect("an item").acknowledged());
 }
+
+/// Needs You straight into Ready ends one item and births another in the same
+/// derivation. Both are lifecycle facts, and neither is inferable from the
+/// other: a transition that could carry only the birth drops every resolution
+/// that happened this way, so the journal never records it (ADR 0015 D8).
+#[test]
+fn moving_between_actionable_states_reports_the_end_and_the_birth() {
+    let mut session = SessionAttention::new(T0);
+    session.apply(asserted(MainState::NeedsYou), later(1));
+    let first = session.item().expect("an item").id();
+    let transition = session.apply(asserted(MainState::Ready), later(2));
+    let second = session.item().expect("an item").id();
+    assert_ne!(first, second);
+    assert_eq!(
+        transition,
+        Transition::ItemReplaced {
+            ended: first,
+            end: ItemEnd::Resolved,
+            born: second,
+        }
+    );
+}

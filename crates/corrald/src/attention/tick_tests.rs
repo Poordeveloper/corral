@@ -137,3 +137,34 @@ fn a_journaled_transition_carries_the_horizon_the_expiry_and_the_version() {
     assert_eq!(written.contradicted_first, Some(true));
     assert_eq!(written.provider_version, None);
 }
+
+/// A move straight from one actionable state to another is two lifecycle
+/// facts, and the record carries both: the item that ended, how it ended, and
+/// the item that replaced it. Recording only the birth would leave the day's
+/// evidence unable to say when the blocker was resolved (ADR 0015 D8).
+#[test]
+fn a_journaled_replacement_names_both_the_item_that_ended_and_the_one_born() {
+    let ended = corral_core::AttentionItemId::mint();
+    let born = corral_core::AttentionItemId::mint();
+    let replaced = Change {
+        session: CorralSessionId::mint(),
+        from: MainState::NeedsYou,
+        to: MainState::Ready,
+        transition: crate::attention::Transition::ItemReplaced {
+            ended,
+            end: crate::attention::ItemEnd::Resolved,
+            born,
+        },
+        decided_by: None,
+        horizon: None,
+        expired_after: None,
+        at: SystemTime::UNIX_EPOCH,
+    };
+    let crate::attention::Record::Transition(written) = record(&replaced, None) else {
+        panic!("a transition record");
+    };
+    assert_eq!(written.born, Some(born));
+    assert_eq!(written.ended, Some(ended));
+    assert_eq!(written.item_end, Some(crate::attention::ItemEnd::Resolved));
+    assert!(written.notifiable, "the new item is one to ring for");
+}

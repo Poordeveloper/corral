@@ -55,7 +55,11 @@ pub struct TransitionRecord {
     pub expired_after: Option<Duration>,
     /// Whether contradicting evidence arrived before the horizon did.
     pub contradicted_first: Option<bool>,
-    pub item: Option<AttentionItemId>,
+    /// The item born by this transition, if one was.
+    pub born: Option<AttentionItemId>,
+    /// The item this transition ended, and how it ended. A move straight
+    /// from one actionable state to another carries both this and `born`.
+    pub ended: Option<AttentionItemId>,
     pub item_end: Option<ItemEnd>,
     /// Whether this transition is one a notification may be emitted for.
     pub notifiable: bool,
@@ -196,7 +200,8 @@ fn encode(record: &Record, now: SystemTime, seq: u64) -> Value {
             "horizon_ms": t.horizon.map(|d| d.as_millis()),
             "expired_after_ms": t.expired_after.map(|d| d.as_millis()),
             "contradicted_first": t.contradicted_first,
-            "item": t.item.map(|id| id.to_string()),
+            "born": t.born.map(|id| id.to_string()),
+            "ended": t.ended.map(|id| id.to_string()),
             "item_end": t.item_end.map(item_end),
             "notifiable": t.notifiable,
         }),
