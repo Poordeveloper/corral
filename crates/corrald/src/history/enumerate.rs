@@ -9,7 +9,9 @@ use std::time::{Duration, SystemTime};
 
 use corral_core::ExternalId;
 
-use crate::provider::KnownProvider;
+use tracing::debug;
+
+use crate::provider::{KnownProvider, program};
 
 /// One session the store holds, as the list may show it before Corral knows
 /// anything else about it.
@@ -70,6 +72,36 @@ pub fn layout_sealed(provider: KnownProvider, version: &str) -> bool {
         KnownProvider::Claude => matches!(version, "2.1.258" | "2.1.259"),
         KnownProvider::Codex => version == "0.152.0",
     }
+}
+
+/// Whether the provider installed on this machine has a sealed store layout.
+///
+/// Never cached: an install can be upgraded under a running daemon, and the
+/// answer must follow the binary that is there now — both for what may be
+/// enumerated and for what a row learned earlier may still be used for.
+/// Filesystem work, so callers on the reactor ask off it.
+pub fn sealed_here(provider: KnownProvider) -> bool {
+    let Some(executable) =
+        crate::provider::version::resolve_program(std::path::Path::new(program(provider)))
+    else {
+        return false;
+    };
+    let Some(installed) = crate::provider::version::installed_version(provider, &executable) else {
+        debug!(
+            provider = provider.as_str(),
+            "the installed version could not be read; its store is not enumerated",
+        );
+        return false;
+    };
+    let sealed = layout_sealed(provider, &installed.version);
+    if !sealed {
+        debug!(
+            provider = provider.as_str(),
+            version = installed.version,
+            "this version's store layout is unmeasured; its store is not enumerated",
+        );
+    }
+    sealed
 }
 
 /// The store's recent sessions, newest first, one per identity.

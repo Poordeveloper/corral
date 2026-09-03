@@ -8,8 +8,8 @@ use corral_core::ProviderId;
 use tokio::sync::watch;
 use tracing::{debug, warn};
 
-use super::{HistoryEntry, Recent, enumerate, layout_sealed, store_root};
-use crate::provider::{KnownProvider, program};
+use super::{HistoryEntry, Recent, enumerate, sealed_here, store_root};
+use crate::provider::KnownProvider;
 use crate::state::DaemonState;
 
 /// How often the stores are read again. A session file changes when its
@@ -81,34 +81,6 @@ async fn pass(state: &Arc<DaemonState>, now: SystemTime, sealed: impl Fn(KnownPr
         );
         state.with_runtime(|runtime| runtime.history.replace(provider, unresolved, resolved));
     }
-}
-
-/// Whether the provider installed on this machine has a sealed store layout.
-///
-/// Read per pass rather than cached: an install can be upgraded under a
-/// running daemon, and the answer must follow the binary that is there now.
-fn sealed_here(provider: KnownProvider) -> bool {
-    let Some(executable) =
-        crate::provider::version::resolve_program(std::path::Path::new(program(provider)))
-    else {
-        return false;
-    };
-    let Some(installed) = crate::provider::version::installed_version(provider, &executable) else {
-        debug!(
-            provider = provider.as_str(),
-            "the installed version could not be read; its store is not enumerated",
-        );
-        return false;
-    };
-    let sealed = layout_sealed(provider, &installed.version);
-    if !sealed {
-        debug!(
-            provider = provider.as_str(),
-            version = installed.version,
-            "this version's store layout is unmeasured; its store is not enumerated",
-        );
-    }
-    sealed
 }
 
 /// Enumerate until the daemon shuts down.

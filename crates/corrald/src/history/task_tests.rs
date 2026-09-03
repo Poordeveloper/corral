@@ -65,7 +65,8 @@ async fn a_provider_that_stops_being_sealed_takes_its_rows_with_it() {
     let row = listed[0].session;
     assert!(
         matches!(
-            continuation::decide(&state, row, Some(std::path::Path::new("/tmp"))).await,
+            continuation::decide_with(&state, row, Some(std::path::Path::new("/tmp")), |_| true)
+                .await,
             Ok(continuation::Decision::EligibleWithDisclosure { .. })
         ),
         "a row read under a sealed layout is continuable"
@@ -82,7 +83,8 @@ async fn a_provider_that_stops_being_sealed_takes_its_rows_with_it() {
     );
     assert!(
         matches!(
-            continuation::decide(&state, row, Some(std::path::Path::new("/tmp"))).await,
+            continuation::decide_with(&state, row, Some(std::path::Path::new("/tmp")), |_| true)
+                .await,
             Ok(continuation::Decision::Refused { .. })
         ),
         "and so is the continuation it supported"
@@ -106,6 +108,41 @@ async fn a_sealed_provider_keeps_its_rows_across_a_pass_that_found_nothing_new()
             .expect("the runtime")
             .len(),
         1
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// The cadence is not a licence. Between an in-place upgrade and the pass
+/// that would retract the rows, a continuation would otherwise start the
+/// version installed *now* on evidence read under the version installed
+/// *then* — and an unmeasured version inherits nothing (ADR 0016). The
+/// decision asks again, so the re-decision `session.resume` makes on its way
+/// to spawning asks again too, exactly as it already does for the working
+/// directory.
+#[tokio::test]
+async fn a_row_is_refused_the_moment_its_provider_stops_being_sealed() {
+    let (state, directory) = daemon("unsealed-at-decision");
+    pass(&state, now(), |_| true).await;
+    let row = state
+        .with_runtime(|runtime| runtime.history.rows())
+        .expect("the runtime")[0]
+        .session;
+
+    // No pass in between: the install changed under the daemon, and this is
+    // the next thing the daemon is asked.
+    let decision =
+        continuation::decide_with(&state, row, Some(std::path::Path::new("/tmp")), |_| false).await;
+
+    assert!(
+        matches!(decision, Ok(continuation::Decision::Refused { .. })),
+        "an unmeasured version inherits nothing"
+    );
+    assert!(
+        state
+            .with_runtime(|runtime| runtime.history.rows())
+            .expect("the runtime")
+            .is_empty(),
+        "and the row it refused is not still offered"
     );
     let _ = std::fs::remove_dir_all(&directory);
 }

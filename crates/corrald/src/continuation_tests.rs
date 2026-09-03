@@ -235,7 +235,9 @@ async fn a_history_row_is_eligible_once_the_client_says_where() {
         .expect("the runtime is available");
     let session = listed.first().expect("one row").session;
 
-    let silent = decide(&registry.state, session, None)
+    // Sealed here, because this test is about the directory rather than
+    // about the install; `history::task` covers the sealing decision.
+    let silent = decide_with(&registry.state, session, None, |_| true)
         .await
         .expect("decided");
     let Decision::Refused { reason, .. } = silent else {
@@ -243,7 +245,7 @@ async fn a_history_row_is_eligible_once_the_client_says_where() {
     };
     assert!(reason.contains("which directory"), "{reason}");
 
-    let decided = decide(&registry.state, session, Some(&scratch))
+    let decided = decide_with(&registry.state, session, Some(&scratch), |_| true)
         .await
         .expect("decided");
     let Decision::EligibleWithDisclosure {
@@ -268,7 +270,7 @@ async fn a_history_row_is_eligible_once_the_client_says_where() {
 
     let elsewhere = registry.directory.join("other");
     std::fs::create_dir_all(&elsewhere).expect("another directory");
-    let moved = decide(&registry.state, session, Some(&elsewhere))
+    let moved = decide_with(&registry.state, session, Some(&elsewhere), |_| true)
         .await
         .expect("decided");
     let Decision::EligibleWithDisclosure {

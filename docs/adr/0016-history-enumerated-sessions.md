@@ -192,6 +192,18 @@ provider's first identity report confirming the `HistoryBinding`'s claim
 as a `ProviderSessionBinding` at Attested — or contesting it (ADR 0004
 D8), which is the one way the store's claim can be found wrong.
 
+Sealing is asked again when a history row's continuation is decided, not
+only when the store was read. The row is an observation; sealing is what
+makes it evidence, and it is a property of the binary a continuation
+launches — the one installed now, which an in-place upgrade can change
+between one enumeration pass and the next. An unmeasured version inherits
+nothing, so a row learned under a sealed version is not a licence to start
+an unmeasured one for the length of a cadence, and a decision that finds
+its provider unsealed retracts the rows rather than leaving them offered.
+The working directory is rechecked on the same path for the same reason:
+both are mutable state that the decision, not the enumeration, is
+answerable for.
+
 ## D5 — The disclosure is the daemon's, correlated, and never assumed
 
 Which of D4's answers applies is the daemon's to decide and the client's

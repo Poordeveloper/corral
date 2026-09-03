@@ -153,6 +153,20 @@ pub(crate) async fn decide(
     session: CorralSessionId,
     requested: Option<&Path>,
 ) -> Result<Decision, corral_state::StateError> {
+    decide_with(state, session, requested, history::sealed_here).await
+}
+
+/// The same, told how to answer whether a provider's layout is sealed here.
+///
+/// The decision is a parameter for the same reason the enumeration pass takes
+/// one: it is the whole of what makes a history row usable, and a test that
+/// cannot change it can only exercise this machine's installation.
+pub(crate) async fn decide_with(
+    state: &Arc<DaemonState>,
+    session: CorralSessionId,
+    requested: Option<&Path>,
+    sealed: fn(KnownProvider) -> bool,
+) -> Result<Decision, corral_state::StateError> {
     let refused = match resume_plan(state, session).await? {
         Ok(plan) => return Ok(Decision::Eligible(plan)),
         Err(refused) => refused,
@@ -160,6 +174,30 @@ pub(crate) async fn decide(
     if let ResumeRefused::IdentityUnknown = refused
         && let Some(Some(row)) = state.with_runtime(|runtime| runtime.history.row(session).cloned())
     {
+        let provider = row.entry.provider;
+        // Asked again here, not left to the next enumeration pass. Sealing is
+        // not a property of the row: it is what makes the row usable at all,
+        // and it is a property of the binary a continuation would launch —
+        // which is the one installed now, and can have changed since the pass
+        // that read the store. An unmeasured version inherits nothing
+        // (ADR 0016), so a row learned under a sealed version is not a licence
+        // to start an unmeasured one for the length of a cadence. The working
+        // directory is rechecked on this path for the same reason.
+        if !sealed_now(provider, sealed).await {
+            // Just learned, so said once rather than left for the pass: a row
+            // this daemon has refused to act on has no business still being
+            // listed as one it might.
+            state.with_runtime(|runtime| runtime.history.retract(provider));
+            return Ok(Decision::Refused {
+                code: ErrorCode::SessionNotContinuable,
+                reason: format!(
+                    "Corral found this session in {}'s history, and the version \
+                     installed now is not one Corral has measured, so it cannot \
+                     say what continuing it would do.",
+                    product_name(provider)
+                ),
+            });
+        }
         return Ok(history_row(session, &row, requested));
     }
     let live = match refused {
@@ -179,6 +217,16 @@ pub(crate) async fn decide(
 /// asked for — the store holds no location, and both providers resume an id
 /// from anywhere and carry on there (ADR 0016, measured), so the directory is
 /// Corral's to be told and never to guess (Q35).
+/// Whether the installed provider is sealed, asked off the reactor: version
+/// resolution walks `PATH` and reads package metadata. A question this daemon
+/// could not put fails closed, because an unanswered sealing question is not
+/// a sealed one.
+async fn sealed_now(provider: KnownProvider, sealed: fn(KnownProvider) -> bool) -> bool {
+    tokio::task::spawn_blocking(move || sealed(provider))
+        .await
+        .unwrap_or(false)
+}
+
 fn history_row(
     session: CorralSessionId,
     row: &history::HistoryRow,
