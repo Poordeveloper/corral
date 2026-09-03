@@ -55,3 +55,69 @@ fn a_known_session_is_decorated_rather_than_listed() {
     assert_eq!(rows.last_active(known), Some(at));
     assert_eq!(rows.row(known), None);
 }
+
+/// Recency is part of the pass that observed it. A store entry that is
+/// deleted, or ages out of the enumeration window, stops being evidence that
+/// the Session acted then — and `session.list` encodes this value straight
+/// through, so a map only ever added to would keep showing it until the
+/// daemon restarts.
+#[test]
+fn a_recency_a_later_pass_no_longer_sees_is_retracted() {
+    let mut rows = HistoryRows::default();
+    let known = CorralSessionId::mint();
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(5);
+    rows.replace(KnownProvider::Claude, Vec::new(), vec![(known, at)]);
+    assert_eq!(rows.last_active(known), Some(at));
+
+    rows.replace(KnownProvider::Claude, Vec::new(), Vec::new());
+
+    assert_eq!(rows.last_active(known), None, "the store stopped saying so");
+}
+
+/// One Session can be held in more than one store, and the question
+/// `session.list` asks is when it last acted — so a provider's pass replaces
+/// its own answer without silencing the other's.
+#[test]
+fn recency_is_the_newest_across_providers() {
+    let mut rows = HistoryRows::default();
+    let known = CorralSessionId::mint();
+    let older = SystemTime::UNIX_EPOCH + Duration::from_secs(5);
+    let newer = SystemTime::UNIX_EPOCH + Duration::from_secs(9);
+    rows.replace(KnownProvider::Claude, Vec::new(), vec![(known, older)]);
+    rows.replace(KnownProvider::Codex, Vec::new(), vec![(known, newer)]);
+    assert_eq!(rows.last_active(known), Some(newer));
+
+    rows.replace(KnownProvider::Codex, Vec::new(), Vec::new());
+
+    assert_eq!(
+        rows.last_active(known),
+        Some(older),
+        "the store that still says so is still heard"
+    );
+}
+
+/// Retracting a provider takes back everything its store was the evidence
+/// for — the rows and the recency alike — and touches no other provider's.
+#[test]
+fn retracting_a_provider_takes_back_its_rows_and_its_recency() {
+    let mut rows = HistoryRows::default();
+    let known = CorralSessionId::mint();
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(5);
+    rows.replace(
+        KnownProvider::Claude,
+        vec![entry("a", 10)],
+        vec![(known, at)],
+    );
+    let mut codex = entry("t", 1);
+    codex.provider = KnownProvider::Codex;
+    let elsewhere = CorralSessionId::mint();
+    rows.replace(KnownProvider::Codex, vec![codex], vec![(elsewhere, at)]);
+
+    rows.retract(KnownProvider::Claude);
+
+    assert_eq!(rows.last_active(known), None);
+    assert_eq!(rows.last_active(elsewhere), Some(at));
+    let listed = rows.rows();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].entry.provider, KnownProvider::Codex);
+}

@@ -24,7 +24,11 @@ pub struct HistoryRow {
 #[derive(Debug, Default)]
 pub struct HistoryRows {
     rows: HashMap<(KnownProvider, ExternalId), HistoryRow>,
-    known: HashMap<CorralSessionId, SystemTime>,
+    /// Keyed by the provider that observed it, because it is part of that
+    /// provider's snapshot and not a fact of its own: a session whose file is
+    /// deleted or ages out of the window has no recency any more, and a map
+    /// only ever added to could never say so.
+    known: HashMap<(KnownProvider, CorralSessionId), SystemTime>,
 }
 
 impl HistoryRows {
@@ -45,11 +49,25 @@ impl HistoryRows {
                 .map_or_else(CorralSessionId::mint, |row| row.session);
             fresh.insert(key, HistoryRow { session, entry });
         }
-        self.rows.retain(|(held, _), _| *held != provider);
+        self.retract(provider);
         self.rows.extend(fresh);
-        for (session, last_active) in resolved {
-            self.known.insert(session, last_active);
-        }
+        self.known.extend(
+            resolved
+                .into_iter()
+                .map(|(session, last_active)| ((provider, session), last_active)),
+        );
+    }
+
+    /// Drop everything one provider's store was the evidence for.
+    ///
+    /// A pass that cannot read a store under a layout the matrix sealed at the
+    /// version installed *now* is not a pass that says nothing; it says the
+    /// evidence these rows stood on is gone (ADR 0016 D1). Keeping them would
+    /// let a row learned under a sealed version stay listable — and
+    /// continuable — after an in-place upgrade to an unmeasured one.
+    pub fn retract(&mut self, provider: KnownProvider) {
+        self.rows.retain(|(held, _), _| *held != provider);
+        self.known.retain(|(held, _), _| *held != provider);
     }
 
     /// Drop one row, because the identity it stood for is a Session now.
@@ -72,10 +90,18 @@ impl HistoryRows {
         rows
     }
 
-    /// When the store last saw a Session Corral holds act, if it has.
+    /// When a store last saw a Session Corral holds act, if one has.
+    ///
+    /// The newest across providers rather than one provider's answer: a
+    /// Session can hold a binding in more than one store, and the question is
+    /// when it last acted, not where.
     #[must_use]
     pub fn last_active(&self, session: CorralSessionId) -> Option<SystemTime> {
-        self.known.get(&session).copied()
+        self.known
+            .iter()
+            .filter(|((_, held), _)| *held == session)
+            .map(|(_, last_active)| *last_active)
+            .max()
     }
 
     /// The row listed under this id, if it is one of ours.
