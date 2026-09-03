@@ -132,7 +132,13 @@ fn start() -> Result<ExitCode, StartupError> {
         DaemonState::open(paths.registry(), paths.launch_dir(), paths.state_dir())
             .map_err(StartupError::State)?,
     );
-    state.attach_account_home(paths.account_home().to_path_buf());
+    // The providers' own home, resolved the way the hook installer resolves
+    // it. A daemon that cannot resolve one enumerates nothing rather than
+    // reading a directory it guessed at.
+    match corral_rendezvous::provider_home() {
+        Ok(home) => state.attach_provider_home(home),
+        Err(source) => tracing::warn!(%source, "the provider home could not be resolved"),
+    }
     // Diagnostics beside state, never inside it, and never a startup failure:
     // a daemon that cannot journal still derives (ADR 0015 D8).
     match crate::attention::Journal::open(

@@ -19,7 +19,7 @@ pub const ENUMERATION_CADENCE: Duration = Duration::from_secs(30);
 
 /// One pass over every sealed provider's store.
 pub async fn enumerate_once(state: &Arc<DaemonState>, now: SystemTime) {
-    let Some(home) = state.account_home() else {
+    let Some(home) = state.provider_home() else {
         return;
     };
     for provider in KnownProvider::ALL {

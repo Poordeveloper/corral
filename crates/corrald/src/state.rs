@@ -133,7 +133,7 @@ pub struct DaemonState {
 
     /// The account home the providers keep their session stores under, once
     /// the daemon knows it. Absent means no store is enumerated.
-    account_home: Mutex<Option<PathBuf>>,
+    provider_home: Mutex<Option<PathBuf>>,
 
     /// The attention journal, once the daemon has a diagnostics directory to
     /// put it in. Absent means nothing is journaled — a test daemon, or a
@@ -211,7 +211,7 @@ impl DaemonState {
             resuming: Mutex::new(HashSet::new()),
             commands: InFlightCommands::new(),
             detection: crate::detection::load_built_in(Some(&state_dir.join("manifests"))),
-            account_home: Mutex::new(None),
+            provider_home: Mutex::new(None),
             journal: Mutex::new(None),
             runtime: Mutex::new(Runtime::default()),
         })
@@ -227,15 +227,21 @@ impl DaemonState {
             .map(|manifest| Arc::new(manifest.clone()))
     }
 
-    /// Tell this daemon where the account's provider stores live.
-    pub fn attach_account_home(&self, home: PathBuf) {
-        if let Ok(mut slot) = self.account_home.lock() {
+    /// Tell this daemon where the providers keep their own files.
+    ///
+    /// The same home the hook installer works in (`corral_rendezvous::
+    /// provider_home`, ADR 0013): a provider's settings and its session store
+    /// are two files in one place, and reading them out of two different
+    /// notions of "home" is how a test comes to prove a layout no
+    /// installation has.
+    pub fn attach_provider_home(&self, home: PathBuf) {
+        if let Ok(mut slot) = self.provider_home.lock() {
             *slot = Some(home);
         }
     }
 
-    pub fn account_home(&self) -> Option<PathBuf> {
-        self.account_home.lock().ok().and_then(|slot| slot.clone())
+    pub fn provider_home(&self) -> Option<PathBuf> {
+        self.provider_home.lock().ok().and_then(|slot| slot.clone())
     }
 
     /// Give this daemon its attention journal.

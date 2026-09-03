@@ -144,12 +144,6 @@ impl RendezvousPaths {
         &self.state_dir
     }
 
-    /// The account home the root sits under — where the providers keep their
-    /// own session stores, which history enumeration reads by name.
-    pub fn account_home(&self) -> &Path {
-        self.root.parent().unwrap_or(&self.root)
-    }
-
     /// Where diagnostic journals live: the attention journal and whatever
     /// later diagnostics need a home that is plainly not product truth.
     pub fn diagnostics_dir(&self) -> &Path {
