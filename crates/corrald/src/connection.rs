@@ -642,19 +642,39 @@ async fn attention_report(request: &Request, state: &Arc<DaemonState>) -> Frame 
             );
         }
     };
+    // The filter compares `since` against the journal's own day names, so a
+    // value in another shape would answer a report that looks valid and
+    // means nothing.
+    if let Some(since) = params.since.as_deref()
+        && !crate::attention::names_a_day(since)
+    {
+        return Frame::error(
+            id,
+            ProtocolError::new(
+                ErrorCode::InvalidParams,
+                "attention.report since must be a day as YYYY-MM-DD",
+            ),
+        );
+    }
     let Some(dir) = state.journal_dir() else {
         return Frame::result(
             id,
             serde_json::to_value(method::AttentionReportResult::default()).unwrap_or_default(),
         );
     };
-    let report = tokio::task::spawn_blocking(move || crate::attention::report(&dir))
-        .await
-        .unwrap_or_else(|_| Ok(crate::attention::Report::default()));
-    let report = match report {
-        Ok(report) => report,
-        Err(source) => {
+    // A reader that failed is not a journal with nothing in it. Answering
+    // zero days would present incomplete evidence as a quiet period, which
+    // is the one thing D8 says the journal must never do silently.
+    let report = match tokio::task::spawn_blocking(move || crate::attention::report(&dir)).await {
+        Ok(Ok(report)) => report,
+        Ok(Err(source)) => {
             return Frame::error(id, ProtocolError::new(ErrorCode::Busy, source.to_string()));
+        }
+        Err(_) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::Busy, "the attention journal could not be read"),
+            );
         }
     };
     let days = report

@@ -303,6 +303,18 @@ impl std::fmt::Display for CivilDate {
     }
 }
 
+/// Whether `text` names a day in the one spelling the journal uses:
+/// `YYYY-MM-DD`, zero padded. `attention.report` filters by comparing
+/// `since` against these names directly, so a value in any other shape
+/// would order against something it does not mean and answer a report that
+/// looks valid.
+#[must_use]
+pub fn names_a_day(text: &str) -> bool {
+    CivilDate::parse(text).is_some_and(|date| {
+        (1..=12).contains(&date.month) && (1..=31).contains(&date.day) && date.to_string() == text
+    })
+}
+
 fn file_name(date: CivilDate, suffix: &str) -> String {
     format!("{FILE_PREFIX}{date}{suffix}")
 }
