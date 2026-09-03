@@ -255,3 +255,76 @@ fn a_day_holding_a_record_that_will_not_parse_is_reported_incomplete() {
         "a day with a record nobody can read is not a complete evidence day"
     );
 }
+
+/// `since` exists to make a string comparison against the journal's own day
+/// names mean something, so the check has to establish exactly that: a real
+/// calendar day, in the one spelling those names use. A five-digit year is
+/// the case that shows the difference — it parses, it is a date, and it sorts
+/// *below* every four-digit year, so a report asked to start in the year
+/// 10000 would answer with 2026.
+#[test]
+fn a_day_name_is_a_real_calendar_day_in_the_journals_own_spelling() {
+    assert!(names_a_day("2026-09-03"));
+    assert!(names_a_day("2024-02-29"), "2024 is a leap year");
+    assert!(names_a_day("2026-12-31"));
+
+    assert!(
+        !names_a_day("10000-01-01"),
+        "sorts below every 4-digit year"
+    );
+    assert!(!names_a_day("2026-02-31"), "February has no 31st");
+    assert!(!names_a_day("2025-02-29"), "2025 is not a leap year");
+    assert!(!names_a_day("2026-04-31"), "April has 30 days");
+    assert!(!names_a_day("1900-02-29"), "1900 is not a leap year");
+    assert!(
+        names_a_day("2000-02-29"),
+        "2000 is a leap year: divisible by 400"
+    );
+    assert!(!names_a_day("2026-9-9"), "not the spelling the names use");
+    assert!(!names_a_day("2026-09"));
+    assert!(!names_a_day("not-a-date"));
+    assert!(!names_a_day("2026-00-01"));
+    assert!(!names_a_day("2026-01-00"));
+}
+
+/// A record whose shape this build cannot place is a record it cannot count,
+/// which is the same thing to the day's evidence as a line that will not
+/// parse: countable or incomplete, never a quietly smaller number
+/// (ADR 0015 D8).
+#[test]
+fn a_record_the_reader_cannot_place_makes_its_day_incomplete() {
+    // A record that says it is a transition still counts as one; what it
+    // cannot do is say which class the day gained.
+    for (line, transitions) in [
+        (r#"{"kind":"something_this_build_never_wrote"}"#, 1),
+        (r#"{"kind":"transition","to":123}"#, 2),
+        (
+            r#"{"kind":"transition","to":"a_state_this_build_cannot_place"}"#,
+            2,
+        ),
+        (r#"{"seq":1}"#, 1),
+    ] {
+        let dir = scratch();
+        let mut journal = Journal::open(&dir, Budget::default(), noon()).expect("open");
+        journal
+            .append(
+                noon(),
+                transition(CorralSessionId::mint(), MainState::NeedsYou),
+            )
+            .expect("append");
+        let path = dir.join("attention-journal-2026-09-02.jsonl");
+        let mut text = std::fs::read_to_string(&path).expect("file");
+        text.push_str(line);
+        text.push('\n');
+        std::fs::write(&path, text).expect("write");
+
+        let report = report(&dir).expect("report");
+        let day = report.days.first().expect("a day");
+        assert!(day.incomplete, "{line} is a record nobody can count");
+        assert_eq!(day.transitions, transitions, "{line}");
+        assert_eq!(
+            day.into_needs_you, 1,
+            "the record that could be placed still counts"
+        );
+    }
+}

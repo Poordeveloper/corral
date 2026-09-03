@@ -20,6 +20,9 @@ use super::ItemEnd;
 const FILE_PREFIX: &str = "attention-journal-";
 const FILE_SUFFIX: &str = ".jsonl";
 const INCOMPLETE_SUFFIX: &str = ".incomplete";
+/// `YYYY-MM-DD`. The journal's own day names are this wide, and the report's
+/// string comparison only orders correctly while every name is.
+const FILE_DATE_WIDTH: usize = 10;
 
 /// The bound on one day's file and how long files are kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +220,18 @@ fn encode(record: &Record, now: SystemTime, seq: u64) -> Value {
     }
 }
 
+/// The state a spelling names, or `None` for one this build cannot place.
+fn main_state_named(text: &str) -> Option<MainState> {
+    match text {
+        "working" => Some(MainState::Working),
+        "needs_you" => Some(MainState::NeedsYou),
+        "ready" => Some(MainState::Ready),
+        "unknown" => Some(MainState::Unknown),
+        "exited" => Some(MainState::Exited),
+        _ => None,
+    }
+}
+
 fn main_state(state: MainState) -> &'static str {
     match state {
         MainState::Working => "working",
@@ -295,6 +310,26 @@ impl CivilDate {
         let day = parts.next()?.parse().ok()?;
         Some(Self { year, month, day })
     }
+
+    /// Whether this names a day that exists. `parse` reads three numbers; a
+    /// calendar decides which of them are a date.
+    fn is_real(self) -> bool {
+        (1..=12).contains(&self.month) && (1..=self.days_in_month()).contains(&self.day)
+    }
+
+    fn days_in_month(self) -> u8 {
+        match self.month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if self.is_leap_year() => 29,
+            2 => 28,
+            _ => 0,
+        }
+    }
+
+    fn is_leap_year(self) -> bool {
+        self.year % 4 == 0 && (self.year % 100 != 0 || self.year % 400 == 0)
+    }
 }
 
 impl std::fmt::Display for CivilDate {
@@ -304,15 +339,17 @@ impl std::fmt::Display for CivilDate {
 }
 
 /// Whether `text` names a day in the one spelling the journal uses:
-/// `YYYY-MM-DD`, zero padded. `attention.report` filters by comparing
-/// `since` against these names directly, so a value in any other shape
-/// would order against something it does not mean and answer a report that
-/// looks valid.
+/// `YYYY-MM-DD`, zero padded, four-digit year, and a day the calendar has.
+///
+/// `attention.report` filters by comparing `since` against these names as
+/// strings, and this is what makes that comparison mean what it says. The
+/// width is load-bearing, not tidiness: `10000-01-01` is a date, and it sorts
+/// below every four-digit year, so a report asked to start in the year 10000
+/// would answer with 2026.
 #[must_use]
 pub fn names_a_day(text: &str) -> bool {
-    CivilDate::parse(text).is_some_and(|date| {
-        (1..=12).contains(&date.month) && (1..=31).contains(&date.day) && date.to_string() == text
-    })
+    text.len() == FILE_DATE_WIDTH
+        && CivilDate::parse(text).is_some_and(|date| date.is_real() && date.to_string() == text)
 }
 
 fn file_name(date: CivilDate, suffix: &str) -> String {
@@ -349,11 +386,16 @@ pub struct Report {
 /// calls this; reporting is what the journal is for.
 pub fn report(dir: &Path) -> std::io::Result<Report> {
     let mut days = Vec::new();
-    let mut names: Vec<String> = std::fs::read_dir(dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with(FILE_PREFIX) && name.ends_with(FILE_SUFFIX))
-        .collect();
+    // An entry the directory cannot yield is a day that would simply not be
+    // in the answer, with nothing saying so. The failure travels instead, as
+    // it already does in `prune`.
+    let mut names: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if name.starts_with(FILE_PREFIX) && name.ends_with(FILE_SUFFIX) {
+            names.push(name);
+        }
+    }
     names.sort();
     for name in names {
         let Some(date) = date_of_file(&name) else {
@@ -379,14 +421,21 @@ pub fn report(dir: &Path) -> std::io::Result<Report> {
             match value["kind"].as_str() {
                 Some("transition") => {
                     day.transitions += 1;
-                    match value["to"].as_str() {
-                        Some("needs_you") => day.into_needs_you += 1,
-                        Some("ready") => day.into_ready += 1,
-                        _ => {}
+                    match value["to"].as_str().and_then(main_state_named) {
+                        Some(MainState::NeedsYou) => day.into_needs_you += 1,
+                        Some(MainState::Ready) => day.into_ready += 1,
+                        Some(MainState::Working | MainState::Unknown | MainState::Exited) => {}
+                        // A state this build cannot place is a transition it
+                        // cannot classify, so the day's class counts are a
+                        // floor rather than a count.
+                        None => day.incomplete = true,
                     }
                 }
                 Some("dispute") => day.disputes += 1,
-                _ => {}
+                // Syntax this build can read and a record shape it cannot is
+                // the same thing to the day's evidence as a line that will not
+                // parse at all: countable, or incomplete.
+                _ => day.incomplete = true,
             }
         }
         days.push(day);
