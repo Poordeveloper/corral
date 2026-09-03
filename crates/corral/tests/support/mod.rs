@@ -112,6 +112,37 @@ impl TestAccount {
         self
     }
 
+    /// The same stand-in, installed the way Claude Code's native installer
+    /// lays itself out, so the daemon can read a version from the path it
+    /// resolves to. A store layout is sealed per version (ADR 0016 D1), so a
+    /// test about enumeration has to be about a version.
+    pub fn with_versioned_claude(mut self, version: &str) -> Self {
+        let bin = self.base.join("bin");
+        create_private_dir_all(&bin);
+        let installed = self.base.join("claude/versions").join(version);
+        create_private_dir_all(&installed);
+        let real = installed.join("claude");
+        std::fs::copy(MOCK_PROVIDER_BINARY, &real).expect("place the stand-in provider");
+        let link = bin.join("claude");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).expect("link the stand-in onto PATH");
+        self.provider_path = Some(bin);
+        self
+    }
+
+    /// A session file in the provider's own store, as the provider files it.
+    /// Content is never read (ADR 0016 D1), so the bytes are a marker.
+    pub fn with_claude_history(self, label: &str, session_id: &str) -> Self {
+        let directory = self.base.join(".claude/projects").join(label);
+        create_private_dir_all(&directory);
+        std::fs::write(
+            directory.join(format!("{session_id}.jsonl")),
+            b"{\"type\":\"user\"}\n",
+        )
+        .expect("write a session file");
+        self
+    }
+
     pub fn with_idle_grace(mut self, idle_grace: Duration) -> Self {
         self.idle_grace = idle_grace;
         self

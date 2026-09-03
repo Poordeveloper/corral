@@ -1520,3 +1520,184 @@ fn the_command_line_reports_a_refused_continuation_in_the_daemons_words() {
 
     drop(daemon);
 }
+
+/// A session that exists only in Claude's own store is listed, continued, and
+/// becomes a Session — Session, `HistoryBinding`, managed runtime, and Run in
+/// one transaction, the provider launched with the id the store named, in the
+/// directory the client asked for (ADR 0016 D2/D4/D5, grill Q35).
+#[test]
+fn a_session_only_the_providers_store_knows_is_listed_and_continued() {
+    const STORED: &str = "11111111-2222-4333-8444-555555555555";
+    let account = account("history-continue")
+        .with_versioned_claude("2.1.258")
+        .with_claude_history("-tmp-proj", STORED);
+    let script = Script::new(&account, "history-continue").fires(&session_start(STORED, "resume"));
+    let daemon = daemon_running(&account, &script);
+    let workspace = account.scratch().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("a directory to continue in");
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    // The store's own contents, in their own tier: no runtime, no main state.
+    let row = wait_for(&mut client, |listed| listed["origin"] == "history");
+    let session = row["session_id"].as_str().expect("a session id").to_owned();
+    assert_eq!(row["execution_state"], "unknown", "{row}");
+    assert!(row["last_active_unix_ms"].is_number(), "{row}");
+
+    let answer = client
+        .request(
+            3,
+            "session.continuation",
+            Some(json!({
+                "session_id": session,
+                "working_directory": workspace.to_string_lossy(),
+            })),
+        )
+        .expect("session.continuation answered");
+    let decision = &answer["outcome"]["result"];
+    assert_eq!(decision["decision"], "eligible_with_disclosure", "{answer}");
+    let disclosure = decision["disclosure"]["text"]
+        .as_str()
+        .expect("a disclosure");
+    assert!(
+        disclosure.contains("still running somewhere else")
+            && disclosure.contains(&workspace.to_string_lossy().into_owned()),
+        "{disclosure}"
+    );
+    let revision = decision["disclosure_revision"]
+        .as_str()
+        .expect("a revision")
+        .to_owned();
+
+    // Without the revision the daemon refuses: nobody was shown anything.
+    let bare = client
+        .request(
+            4,
+            "session.resume",
+            Some(json!({
+                "command_id": "history-1",
+                "session_id": session,
+                "working_directory": workspace.to_string_lossy(),
+            })),
+        )
+        .expect("session.resume answered");
+    assert_eq!(error_code(&bare), Some("stale_disclosure"), "{bare}");
+    assert!(script.launches().is_empty(), "a refusal spawned a provider");
+
+    let continued = client
+        .request(
+            5,
+            "session.resume",
+            Some(json!({
+                "command_id": "history-2",
+                "session_id": session,
+                "working_directory": workspace.to_string_lossy(),
+                "disclosure_revision": revision,
+            })),
+        )
+        .expect("session.resume answered");
+    let result = &continued["outcome"]["result"];
+    assert_eq!(
+        result["session_id"],
+        session.as_str(),
+        "the row's id is the Session's: {continued}"
+    );
+
+    // The provider was asked to continue the conversation the store named.
+    wait_until(SETTLE, || script.launches().len() == 1);
+    assert!(
+        script.launches()[0].ends_with(&format!("--resume {STORED}")),
+        "{:?}",
+        script.launches()
+    );
+
+    // And it is one session now, not a row beside a Session.
+    wait_until(provider::DELIVERED, || {
+        let sessions = sessions(&mut client, 6);
+        sessions.len() == 1 && sessions[0]["origin"] != "history"
+    });
+    let kinds = recorded_kinds(&account.registry());
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| *kind == "session-created")
+            .count(),
+        1,
+        "{kinds:?}"
+    );
+
+    drop(daemon);
+}
+
+/// Wait for one listed session matching a predicate, and return it.
+fn wait_for(client: &mut RawClient, matching: impl Fn(&Value) -> bool) -> Value {
+    let mut found = None;
+    wait_until(SETTLE, || {
+        found = sessions(client, 2).into_iter().find(&matching);
+        found.is_some()
+    });
+    found.expect("a matching session was listed")
+}
+
+/// `corral continue --yes` answers the disclosure in advance and still
+/// preflights: the person sees what they agreed to, and the revision the
+/// daemon required is the one the resume carries.
+#[test]
+fn the_command_line_continues_a_history_row_with_yes() {
+    const STORED: &str = "99999999-8888-4777-8666-555555555555";
+    let account = account("cli-history")
+        .with_versioned_claude("2.1.258")
+        .with_claude_history("-tmp-proj", STORED);
+    let script = Script::new(&account, "cli-history").fires(&session_start(STORED, "resume"));
+    let daemon = daemon_running(&account, &script);
+    let workspace = account.scratch().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("a directory to continue in");
+
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+    let row = wait_for(&mut client, |listed| listed["origin"] == "history");
+    let session = row["session_id"].as_str().expect("a session id").to_owned();
+
+    // Without --yes the person is shown the disclosure and nothing is spawned.
+    let asked = support::run(
+        account
+            .corral()
+            .arg("continue")
+            .arg(&session)
+            .current_dir(&workspace)
+            .stdin(std::process::Stdio::null()),
+    );
+    let stderr = support::stderr(&asked);
+    assert!(!asked.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("still running somewhere else")
+            && stderr.contains(&workspace.to_string_lossy().into_owned()),
+        "{stderr}"
+    );
+    assert!(script.launches().is_empty(), "asking spawned a provider");
+
+    let continued = support::run(
+        account
+            .corral()
+            .arg("continue")
+            .arg("--yes")
+            .arg(&session)
+            .current_dir(&workspace)
+            .stdin(std::process::Stdio::null()),
+    );
+    let stderr = support::stderr(&continued);
+    assert!(continued.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("still running somewhere else"),
+        "--yes still shows what it said yes to: {stderr}"
+    );
+    assert!(stderr.contains(&format!("session {session}")), "{stderr}");
+    wait_until(SETTLE, || script.launches().len() == 1);
+    assert!(
+        script.launches()[0].ends_with(&format!("--resume {STORED}")),
+        "{:?}",
+        script.launches()
+    );
+
+    drop(daemon);
+}

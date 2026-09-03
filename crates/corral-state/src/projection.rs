@@ -248,13 +248,25 @@ pub(crate) fn session_by_external_id(
     provider: &ProviderId,
     external_id: &ExternalId,
 ) -> Result<Option<CorralSessionId>, StateError> {
+    binding_by_external_id(connection, node, provider, external_id)
+        .map(|binding| binding.map(|binding| binding.session()))
+}
+
+/// The binding an external identity is already filed under, whatever its
+/// kind. A provider-session binding wins when several name the same identity,
+/// because it is the one that asserts the live association.
+pub(crate) fn binding_by_external_id(
+    connection: &Connection,
+    node: NodeId,
+    provider: &ProviderId,
+    external_id: &ExternalId,
+) -> Result<Option<Binding>, StateError> {
     query_binding(
         connection,
         "WHERE node_id = ?1 AND provider = ?2 AND external_id = ?3 \
          ORDER BY (kind = 'provider-session') DESC, created_at_ms, id",
         params![node.to_string(), provider.as_str(), external_id.as_str(),],
     )
-    .map(|binding| binding.map(|binding| binding.session()))
 }
 
 /// The binding this Session may currently drive control through, if any.

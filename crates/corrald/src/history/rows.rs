@@ -52,6 +52,13 @@ impl HistoryRows {
         }
     }
 
+    /// Drop one row, because the identity it stood for is a Session now.
+    /// The next pass would resolve it anyway; forgetting it here keeps the
+    /// list from showing the row and its own Session at once.
+    pub fn forget(&mut self, provider: KnownProvider, external_id: &ExternalId) {
+        self.rows.remove(&(provider, external_id.clone()));
+    }
+
     /// The rows, newest first.
     #[must_use]
     pub fn rows(&self) -> Vec<HistoryRow> {

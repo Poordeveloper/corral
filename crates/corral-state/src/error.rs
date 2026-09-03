@@ -2,7 +2,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use corral_core::{
-    Assurance, BindingId, CommandId, CorralSessionId, EvidenceSource, NodeId,
+    Assurance, BindingId, BindingKind, CommandId, CorralSessionId, EvidenceSource, NodeId,
     ReservedNamespaceMisuse, RunId,
 };
 
@@ -104,6 +104,10 @@ pub enum Refusal {
     /// A Run's association is its runtime binding; no other kind of binding
     /// can carry one.
     NotARuntimeBinding(BindingId),
+    /// A history continuation files the identity a provider's store named,
+    /// under the one kind entitled to claim it (ADR 0016 D3). Another kind
+    /// would assert something the store cannot support.
+    NotAHistoryBinding(BindingKind),
     /// A Session with no control-capable runtime binding has nothing to file
     /// another Run's association under. Minting a second one here would break
     /// the at-most-one rule from the other side (ADR 0008 D2).
@@ -297,6 +301,11 @@ impl fmt::Display for Refusal {
             Self::NotARuntimeBinding(binding) => {
                 write!(f, "binding {binding} is not a runtime binding")
             }
+            Self::NotAHistoryBinding(kind) => write!(
+                f,
+                "a session found in a provider's history is filed under a history binding, not \
+                 a {kind:?} one"
+            ),
             Self::NoManagedRuntimeBinding(session) => write!(
                 f,
                 "session {session} has no runtime binding another run could belong to"

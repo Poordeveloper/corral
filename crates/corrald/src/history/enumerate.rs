@@ -51,13 +51,19 @@ pub fn store_root(provider: KnownProvider, home: &Path) -> PathBuf {
     }
 }
 
-/// Whether the matrix sealed this provider's store layout for the versions
-/// in use (ADR 0016 D1). Nothing is sealed until the acceptance
-/// reconciliation; until then the daemon enumerates nothing.
+/// Whether the matrix measured this provider's store layout, at this exact
+/// installed version (ADR 0016 D1).
+///
+/// A row is a claim that a session exists, and the shape it was read from is
+/// what supports the claim. Sealing is therefore per version and exact: a
+/// version whose layout nobody measured is not enumerated, however close its
+/// number is to one that was. Evidence:
+/// `docs/evidence/pr8b-history-store-and-resume-2026-09-02.md`.
 #[must_use]
-pub fn layout_sealed(provider: KnownProvider) -> bool {
+pub fn layout_sealed(provider: KnownProvider, version: &str) -> bool {
     match provider {
-        KnownProvider::Claude | KnownProvider::Codex => false,
+        KnownProvider::Claude => version == "2.1.258",
+        KnownProvider::Codex => version == "0.152.0",
     }
 }
 

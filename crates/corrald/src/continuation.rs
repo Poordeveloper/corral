@@ -27,6 +27,11 @@ pub(crate) struct Disclosure {
 pub(crate) enum Decision {
     Eligible(ResumePlan),
     EligibleWithDisclosure {
+        /// Everything the continuation needs once the disclosure is answered.
+        /// A history row's plan is not a `ResumePlan`: no Session, Run, or
+        /// binding exists for it yet, and creating them is part of what
+        /// continuing it means (ADR 0016 D2).
+        plan: HistoryPlan,
         disclosure: Disclosure,
         revision: String,
     },
@@ -40,6 +45,15 @@ pub(crate) enum Decision {
         code: ErrorCode,
         reason: String,
     },
+}
+
+/// What continuing a history row needs: the identity the provider's store
+/// named, and the directory the client asked for.
+#[derive(Clone, Debug)]
+pub(crate) struct HistoryPlan {
+    pub provider: KnownProvider,
+    pub external_id: ExternalId,
+    pub working_directory: PathBuf,
 }
 
 /// Whether a resume carried the disclosure its decision requires.
@@ -201,6 +215,11 @@ fn history_row(
             last_active,
             &directory,
         ),
+        plan: HistoryPlan {
+            provider,
+            external_id: row.entry.external_id.clone(),
+            working_directory: directory,
+        },
     }
 }
 

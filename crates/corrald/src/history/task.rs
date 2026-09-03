@@ -9,7 +9,7 @@ use tokio::sync::watch;
 use tracing::{debug, warn};
 
 use super::{HistoryEntry, Recent, enumerate, layout_sealed, store_root};
-use crate::provider::KnownProvider;
+use crate::provider::{KnownProvider, program};
 use crate::state::DaemonState;
 
 /// How often the stores are read again. A session file changes when its
@@ -23,10 +23,13 @@ pub async fn enumerate_once(state: &Arc<DaemonState>, now: SystemTime) {
         return;
     };
     for provider in KnownProvider::ALL {
-        // Nothing is enumerated for a layout the matrix has not sealed: a
-        // row is a claim that a session exists, and the shape it is read
-        // from is what supports it (ADR 0016 D1).
-        if !layout_sealed(provider) {
+        // Nothing is enumerated for a layout the matrix has not sealed at
+        // the version installed here: a row is a claim that a session
+        // exists, and the shape it is read from is what supports it (ADR
+        // 0016 D1). An install Corral cannot version is unsealed for the
+        // same reason — not knowing which layout is on disk is not a
+        // licence to assume the measured one.
+        if !sealed_here(provider) {
             continue;
         }
         let root = store_root(provider, &home);
@@ -63,6 +66,34 @@ pub async fn enumerate_once(state: &Arc<DaemonState>, now: SystemTime) {
         );
         state.with_runtime(|runtime| runtime.history.replace(provider, unresolved, resolved));
     }
+}
+
+/// Whether the provider installed on this machine has a sealed store layout.
+///
+/// Read per pass rather than cached: an install can be upgraded under a
+/// running daemon, and the answer must follow the binary that is there now.
+fn sealed_here(provider: KnownProvider) -> bool {
+    let Some(executable) =
+        crate::provider::version::resolve_program(std::path::Path::new(program(provider)))
+    else {
+        return false;
+    };
+    let Some(installed) = crate::provider::version::installed_version(provider, &executable) else {
+        debug!(
+            provider = provider.as_str(),
+            "the installed version could not be read; its store is not enumerated",
+        );
+        return false;
+    };
+    let sealed = layout_sealed(provider, &installed.version);
+    if !sealed {
+        debug!(
+            provider = provider.as_str(),
+            version = installed.version,
+            "this version's store layout is unmeasured; its store is not enumerated",
+        );
+    }
+    sealed
 }
 
 /// Enumerate until the daemon shuts down.

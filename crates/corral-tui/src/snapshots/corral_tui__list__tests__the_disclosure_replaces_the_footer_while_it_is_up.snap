@@ -1,0 +1,14 @@
+---
+source: crates/corral-tui/src/list_tests.rs
+expression: frame.painted()
+---
+[?25l[H[2J[0mCorral — 1 session[0m
+[0m[0m
+[7m> s0  sh                                                                      [0m
+[2m    Runtime unverified · Status unknown[0m
+[0m[0m
+[0m[0m
+[0m[0m
+[2mCorral can't tell whether this session is still running somewhere else.[0m
+[2mContinuing starts another Claude Code process for this session in /tmp/proj.[0m
+[2mContinue anyway? y / any other key[0m

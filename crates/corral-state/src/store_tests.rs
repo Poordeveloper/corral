@@ -3208,3 +3208,127 @@ fn a_session_is_found_by_its_external_id_whatever_the_binding_kind() {
         .expect("readable");
     assert_eq!(unknown, None);
 }
+
+/// Continuing a session Corral knows only from a provider's own store puts it
+/// in the durable log for the first time: the Session, the `HistoryBinding`
+/// that says which provider session it is, the managed runtime Corral is
+/// about to own, and the Run — one transaction, or nothing (ADR 0016 D2).
+#[test]
+fn continuing_a_history_row_records_the_session_its_history_binding_and_its_run() {
+    let mut store = TestStore::new("continue-history");
+    let at = instant(500);
+    let session = CorralSessionId::mint();
+    let run = RunId::mint();
+    let history = BindingKey::history(
+        store.node(),
+        ProviderId::new("claude-code").expect("usable"),
+        ExternalId::new("session-abc").expect("usable"),
+    );
+
+    let started = store
+        .continue_history_session(
+            &command("continue-1", "/w"),
+            session,
+            run,
+            history.clone(),
+            OccurrenceTime::Authoritative(at),
+            at,
+        )
+        .expect("recorded");
+
+    assert_eq!(started.session, session);
+    assert_eq!(started.run, run);
+    assert_eq!(
+        kinds(&store.events_of(session).expect("read")),
+        vec![
+            "session-created",
+            "binding-added",
+            "binding-added",
+            "run-started",
+            "command-accepted"
+        ]
+    );
+
+    // The history binding claims the identity and nothing about the present:
+    // Attested for what the store holds, from the store's own record, and
+    // never control-capable (ADR 0016 D3).
+    let bindings = store.bindings_of(session).expect("read");
+    let history = bindings
+        .iter()
+        .find(|binding| binding.key().kind() == BindingKind::History)
+        .expect("a history binding");
+    assert_eq!(history.key().kind(), BindingKind::History);
+    assert_eq!(history.key().external_id().as_str(), "session-abc");
+    assert_eq!(history.assurance(), Assurance::Attested);
+    assert_eq!(history.evidence().source(), EvidenceSource::HistoryRecord);
+    assert_eq!(history.provenance(), Provenance::Discovered);
+    assert!(!history.is_control_capable_runtime_binding());
+
+    // And the Run belongs to the managed runtime, which is what Corral drives.
+    let runs = store.runs_of(session).expect("read");
+    let managed = bindings
+        .iter()
+        .find(|binding| binding.is_control_capable_runtime_binding())
+        .expect("a managed runtime binding");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].runtime_binding(), managed.id());
+
+    // The store found it by the identity the provider's store named.
+    assert_eq!(
+        store
+            .session_by_external_id(
+                &ProviderId::new("claude-code").expect("usable"),
+                &ExternalId::new("session-abc").expect("usable")
+            )
+            .expect("read"),
+        Some(session)
+    );
+}
+
+/// The same continuation sent twice is one continuation: the receipt answers
+/// the retry, and no second Session appears for the same provider session.
+#[test]
+fn a_retried_history_continuation_replays_its_receipt() {
+    let mut store = TestStore::new("continue-history-retry");
+    let at = instant(500);
+    let command = command("continue-1", "/w");
+    let history = BindingKey::history(
+        store.node(),
+        ProviderId::new("claude-code").expect("usable"),
+        ExternalId::new("session-abc").expect("usable"),
+    );
+    let first = store
+        .continue_history_session(
+            &command,
+            CorralSessionId::mint(),
+            RunId::mint(),
+            history.clone(),
+            OccurrenceTime::Authoritative(at),
+            at,
+        )
+        .expect("recorded");
+
+    let again = store
+        .continue_history_session(
+            &command,
+            CorralSessionId::mint(),
+            RunId::mint(),
+            history.clone(),
+            OccurrenceTime::Authoritative(at),
+            at,
+        )
+        .expect("replayed");
+
+    assert_eq!(again.session, first.session);
+    assert_eq!(again.run, first.run);
+    assert_eq!(
+        store
+            .events_of(first.session)
+            .expect("read")
+            .iter()
+            .filter(|recorded| recorded.event().kind() == "session-created")
+            .count(),
+        1,
+        "a retry created a second Session"
+    );
+}

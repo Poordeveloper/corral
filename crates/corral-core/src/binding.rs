@@ -103,6 +103,17 @@ impl BindingKey {
             ExternalId::mint(),
         )
     }
+
+    /// The key of the provider session a history row names.
+    ///
+    /// Named here for the same reason `mint_managed_runtime` is: the kind is
+    /// part of what the binding *means*, and a caller that could choose it
+    /// could file a history claim as something entitled to more than one
+    /// (ADR 0016 D3).
+    #[must_use]
+    pub fn history(node: NodeId, provider: ProviderId, external_id: ExternalId) -> Self {
+        Self::new(node, BindingKind::History, provider, external_id)
+    }
 }
 
 /// How a binding sits wrongly in the reserved `corral` provider namespace

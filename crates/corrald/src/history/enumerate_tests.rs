@@ -161,10 +161,24 @@ fn a_missing_store_is_no_sessions_not_an_error() {
     );
 }
 
-/// Layouts are sealed per provider by the matrix (ADR 0016 D1); until the
-/// reconciliation seals one, the daemon enumerates nothing for it.
+/// A store layout is sealed for the versions the matrix actually measured
+/// and for no others. The founder's own macOS installs were not exercised
+/// (grill Q28), so they inherit nothing: a session that only a sealed
+/// version's store could describe is not listed from an unmeasured one.
 #[test]
-fn no_layout_is_sealed_yet() {
-    assert!(!layout_sealed(KnownProvider::Claude));
-    assert!(!layout_sealed(KnownProvider::Codex));
+fn a_layout_is_sealed_only_for_the_versions_that_were_measured() {
+    assert!(layout_sealed(KnownProvider::Claude, "2.1.258"));
+    assert!(layout_sealed(KnownProvider::Codex, "0.152.0"));
+
+    assert!(!layout_sealed(KnownProvider::Claude, "2.1.252"));
+    assert!(!layout_sealed(KnownProvider::Codex, "0.145.0"));
+    assert!(
+        !layout_sealed(KnownProvider::Claude, "2.1.259"),
+        "a newer version is unmeasured, not assumed"
+    );
+    assert!(!layout_sealed(KnownProvider::Claude, ""));
+    assert!(
+        !layout_sealed(KnownProvider::Codex, "0.152.0-rc.1"),
+        "sealing is an exact match, not a prefix"
+    );
 }

@@ -137,8 +137,13 @@ pub async fn continue_session(
                 });
             };
             match shown {
-                Shown::Accepted => (Some(revision), Some(disclosure.text)),
-                Shown::NotYet => {
+                Shown::InAdvance => (Some(revision), Some(disclosure.text)),
+                // The decision moved between being shown and being answered
+                // — a directory changed, a Run appeared — so what the person
+                // said yes to is not what would happen. Asked again rather
+                // than carried over (ADR 0016 D5).
+                Shown::Accepted(seen) if seen == revision => (Some(revision), None),
+                Shown::NotYet | Shown::Accepted(_) => {
                     return Ok(Continued::NeedsDisclosure {
                         text: disclosure.text,
                         revision,
@@ -183,14 +188,16 @@ pub fn working_directory() -> Option<std::path::PathBuf> {
 
 /// Whether the person has already been shown, and answered, whatever the
 /// daemon requires disclosing before this continuation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shown {
     /// Ask first: a required disclosure comes back as
     /// [`Continued::NeedsDisclosure`] for the surface to show.
     NotYet,
-    /// The person answered yes in advance (`corral continue --yes`), or was
-    /// shown this exact disclosure and said so.
-    Accepted,
+    /// The person answered yes in advance (`corral continue --yes`), so
+    /// whatever the preflight requires is shown and accepted at once.
+    InAdvance,
+    /// The person was shown this exact revision and said yes to it.
+    Accepted(String),
 }
 
 /// What continuing produced.

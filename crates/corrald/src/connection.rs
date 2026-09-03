@@ -1620,6 +1620,7 @@ async fn session_continuation(request: &Request, state: &Arc<DaemonState>) -> Di
         continuation::Decision::EligibleWithDisclosure {
             disclosure,
             revision,
+            ..
         } => SessionContinuationResult {
             decision: method::CONTINUATION_ELIGIBLE_WITH_DISCLOSURE.to_owned(),
             reason: None,
@@ -1643,6 +1644,79 @@ async fn session_continuation(request: &Request, state: &Arc<DaemonState>) -> Di
             ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
         ),
     })
+}
+
+/// Continue a session Corral knows only from a provider's own store.
+///
+/// Its Session, its `HistoryBinding`, its managed runtime, and the Run all
+/// enter the durable log together, at the moment a person asks for them (ADR
+/// 0016 D2). The row's id becomes the Session's, so the list does not change
+/// what it was calling this session.
+async fn continue_history_row(
+    state: &Arc<DaemonState>,
+    command: Command,
+    session: CorralSessionId,
+    plan: continuation::HistoryPlan,
+) -> Result<Concluded, corral_state::StateError> {
+    let run = RunId::mint();
+    let (launch, injected) = match compose_provider_launch(
+        state,
+        session,
+        run,
+        plan.provider,
+        // The Session does not exist yet; this command is what creates it.
+        SessionOwnership::CreatedHere,
+        &plan.working_directory,
+        provider::LaunchIntent::Continue {
+            external_id: plan.external_id.clone(),
+        },
+    )
+    .await
+    {
+        Ok(composed) => composed,
+        Err(message) => {
+            return Ok(Concluded::Refused {
+                code: ErrorCode::InvalidParams,
+                message,
+            });
+        }
+    };
+
+    let Ok(named) = corral_core::ProviderId::new(plan.provider.as_str()) else {
+        return Ok(Concluded::Refused {
+            code: ErrorCode::UnknownProvider,
+            message: format!("{} is not a provider id", plan.provider),
+        });
+    };
+    let history = corral_core::BindingKey::history(state.node(), named, plan.external_id.clone());
+    let geometry = PtyGeometry::expect_valid(24, 80);
+    let committed = managed_launch::spawn_and_commit(
+        state,
+        session,
+        run,
+        launch,
+        geometry,
+        injected,
+        |began, at| {
+            let state = Arc::clone(state);
+            let command = command.clone();
+            let history = history.clone();
+            async move {
+                state
+                    .continue_history_session(command, session, run, history, began, at)
+                    .await
+            }
+        },
+    )
+    .await;
+
+    let concluded = concluded(committed, &command)?;
+    if matches!(concluded, Concluded::Accepted { .. }) {
+        state.with_runtime(|runtime| {
+            runtime.history.forget(plan.provider, &plan.external_id);
+        });
+    }
+    Ok(concluded)
 }
 
 /// Perform one `session.resume`, as the owner of its command id.
@@ -1697,27 +1771,18 @@ async fn execute_session_resume(
                 message: reason,
             });
         }
-        Ok(continuation::Decision::EligibleWithDisclosure { revision, .. }) => {
-            return Ok(
-                match continuation::shown(Some(&revision), disclosure_revision.as_deref()) {
-                    continuation::Shown::Stale => Concluded::Refused {
-                        code: ErrorCode::StaleDisclosure,
-                        message: "this continuation needs a disclosure shown first, and the one \
+        Ok(continuation::Decision::EligibleWithDisclosure { plan, revision, .. }) => {
+            if continuation::shown(Some(&revision), disclosure_revision.as_deref())
+                == continuation::Shown::Stale
+            {
+                return Ok(Concluded::Refused {
+                    code: ErrorCode::StaleDisclosure,
+                    message: "this continuation needs a disclosure shown first, and the one \
                               shown is not the current one; ask session.continuation again"
-                            .to_owned(),
-                    },
-                    // Reachable once a resume location is sealed; nothing in this
-                    // build creates the Session and Run a history row continues as.
-                    continuation::Shown::Matching | continuation::Shown::NotNeeded => {
-                        Concluded::Refused {
-                            code: ErrorCode::SessionNotContinuable,
-                            message: "continuing a session from a provider's history is not \
-                                  available in this build"
-                                .to_owned(),
-                        }
-                    }
-                },
-            );
+                        .to_owned(),
+                });
+            }
+            return continue_history_row(state, command, session, plan).await;
         }
         Err(error) => return refused_by_store(&command, error),
     };

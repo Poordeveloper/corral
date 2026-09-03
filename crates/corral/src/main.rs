@@ -474,7 +474,7 @@ async fn continue_session(connection: &mut Connection, session: &str, yes: bool)
         Err(code) => return code,
     };
     let shown = if yes {
-        corral_tui::Shown::Accepted
+        corral_tui::Shown::InAdvance
     } else {
         corral_tui::Shown::NotYet
     };

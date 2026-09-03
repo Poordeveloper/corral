@@ -441,6 +441,124 @@ impl Store {
         })
     }
 
+    /// Record a session Corral knows only from a provider's own store, and
+    /// the continuation that puts it in the durable log for the first time.
+    ///
+    /// One transaction, because the three facts are one fact: a Session
+    /// exists, it *is* the provider session the store named, and Corral is
+    /// running it now. Recording any of them alone would leave either a
+    /// Session nothing identifies or an identity with no session (ADR 0016
+    /// D2), and a daemon restart re-enumerates rather than replaying, so a
+    /// partial write would not be repaired by the next pass.
+    ///
+    /// The history binding's shape is the store's, not the caller's: what a
+    /// provider's own store proves is that it holds a session it calls X, and
+    /// that claim is Attested from `HistoryRecord` and Discovered. It is not
+    /// control-capable and never becomes a claim about a live runtime (ADR
+    /// 0016 D3). The Run belongs to the managed runtime binding minted here,
+    /// exactly as `start_managed_session` mints one, because the process this
+    /// continuation is about to spawn is Corral's own.
+    pub fn continue_history_session(
+        &mut self,
+        command: &Command,
+        session: CorralSessionId,
+        run: RunId,
+        history: BindingKey,
+        started: OccurrenceTime,
+        at: SystemTime,
+    ) -> Result<StartedManagedSession, StateError> {
+        let node = self.node;
+        self.write(move |transaction| {
+            let at = encoding::as_stored(at)?;
+            let started = as_stored_occurrence(started)?;
+            refuse_oversized_fingerprint(command)?;
+            if projection::recorded_run(transaction, run)?.is_some() {
+                return Err(Refusal::RunAlreadyRecorded(run).into());
+            }
+            if let Some(replayed) = already_started(transaction, command)? {
+                return Ok(Written::nothing_to_record(replayed));
+            }
+            // Resolution before creation (ADR 0016 D2): an identity that has
+            // become a Session since the row was listed is that Session, and
+            // continuing it is that Session's continuation to accept or
+            // refuse — never a second Session for one provider session.
+            if history.kind() != BindingKind::History {
+                return Err(Refusal::NotAHistoryBinding(history.kind()).into());
+            }
+            if let Some(claimed) = projection::binding_by_external_id(
+                transaction,
+                node,
+                history.provider(),
+                history.external_id(),
+            )? {
+                return Err(Refusal::BindingClaimedByAnotherSession {
+                    binding: claimed.id(),
+                    session: claimed.session(),
+                }
+                .into());
+            }
+
+            let history = Binding::new(
+                BindingId::mint(),
+                session,
+                history,
+                Provenance::Discovered,
+                as_stored_evidence(Evidence::new(
+                    EvidenceSource::HistoryRecord,
+                    Assurance::Attested,
+                    at,
+                ))?,
+                at,
+            );
+            refuse_reserved_namespace(&history)?;
+            let runtime = Binding::new(
+                BindingId::mint(),
+                session,
+                BindingKey::mint_managed_runtime(node),
+                Provenance::CorralCreated,
+                as_stored_evidence(Evidence::new(
+                    EvidenceSource::CorralConstructed,
+                    Assurance::Deterministic,
+                    at,
+                ))?,
+                at,
+            );
+            let receipt = CommandReceipt::new(
+                command.id().clone(),
+                command.fingerprint().clone(),
+                CommandOutcome::SessionCreated(session),
+                at,
+            );
+            Ok(Written::recording(
+                StartedManagedSession {
+                    acceptance: CommandAcceptance::Executed(receipt),
+                    session,
+                    run,
+                },
+                vec![
+                    SessionEvent::SessionCreated {
+                        session,
+                        created_at: at,
+                    },
+                    SessionEvent::BindingAdded(history),
+                    SessionEvent::BindingAdded(runtime.clone()),
+                    SessionEvent::RunStarted {
+                        session,
+                        run,
+                        runtime_binding: runtime.id(),
+                        started_at: started.authoritative(),
+                    },
+                    SessionEvent::CommandAccepted {
+                        command: command.id().clone(),
+                        fingerprint: command.fingerprint().clone(),
+                        outcome: CommandOutcome::SessionCreated(session),
+                        accepted_at: at,
+                    },
+                ],
+            ))
+        })
+    }
+
     /// Open another Run of a Session that already exists, exactly once per
     /// command id.
     ///

@@ -476,6 +476,23 @@ impl DaemonState {
     }
 
     /// Open another Run of a Session that already exists.
+    /// Record a history row's first durable facts and its continuation, in
+    /// one transaction (ADR 0016 D2).
+    pub async fn continue_history_session(
+        self: &Arc<Self>,
+        command: Command,
+        session: CorralSessionId,
+        run: RunId,
+        history: corral_core::BindingKey,
+        started: OccurrenceTime,
+        at: SystemTime,
+    ) -> Result<StartedManagedSession, StateError> {
+        self.off_the_reactor(move |store| {
+            store.continue_history_session(&command, session, run, history, started, at)
+        })
+        .await
+    }
+
     pub async fn resume_managed_session(
         self: &Arc<Self>,
         command: Command,

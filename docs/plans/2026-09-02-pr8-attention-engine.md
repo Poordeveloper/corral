@@ -714,12 +714,15 @@ anywhere and then run where they were started, so identity does not imply
 location and the daemon substitutes none — and the disclosure names the
 exact directory. The CLI and the TUI send their own working directory as
 client policy. The revision covers it, so changing directory after the
-preflight is refused as stale rather than started somewhere nobody saw. Still to build, now that ADR 0016 is accepted: the sealed
-layout rows keyed by the exact measured versions, the composing store
-operation (Session + `HistoryBinding` at Attested + Run, one transaction)
-and the launch it precedes, the TUI's own disclosure prompt (the list
-currently hands the daemon's words and the `--yes` command line to the
-person), and the glossary and PRODUCT §8 prose.
+preflight is refused as stale rather than started somewhere nobody saw. B1–B5 are implemented: layouts sealed per exact
+measured version (Claude Code 2.1.258, Codex 0.152.0), read from the
+install the daemon resolves on PATH, so an unmeasured version enumerates
+nothing; the composing store operation recording Session, `HistoryBinding`
+at Attested, the managed runtime, and the Run in one transaction, with the
+row forgotten as it becomes a Session; the TUI asking the disclosure on the
+list itself, wrapped rather than truncated so the directory survives; and
+the glossary and `PRODUCT.md` §8 prose. What is left is the review pass and
+the merge itself, which waits on ADR 0015.
 
 ## Plan size justification
 

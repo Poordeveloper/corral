@@ -249,6 +249,7 @@ async fn a_history_row_is_eligible_once_the_client_says_where() {
     let Decision::EligibleWithDisclosure {
         disclosure,
         revision,
+        plan,
     } = decided
     else {
         panic!("a history row with a directory is eligible, with the unknown said");
@@ -260,6 +261,10 @@ async fn a_history_row_is_eligible_once_the_client_says_where() {
         disclosure.text
     );
     assert_eq!(shown(Some(&revision), Some(&revision)), Shown::Matching);
+    // What the continuation would run, if it were answered.
+    assert_eq!(plan.provider, KnownProvider::Claude);
+    assert_eq!(plan.external_id, external_id);
+    assert_eq!(plan.working_directory, scratch);
 
     let elsewhere = registry.directory.join("other");
     std::fs::create_dir_all(&elsewhere).expect("another directory");
