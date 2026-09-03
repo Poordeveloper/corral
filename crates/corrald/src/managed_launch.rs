@@ -414,15 +414,30 @@ impl std::fmt::Display for ResumeRefused {
 /// other request, stop the hook endpoint accepting, and push relays past their
 /// interference budget, which is the same reason the spawn and every store
 /// call are already moved off it.
+pub(crate) struct LaunchTarget<'a> {
+    pub provider: KnownProvider,
+    /// The executable to run. A continuation of a history row names the file
+    /// the sealing check read the version from; a launch that makes no version
+    /// claim names the provider's program and lets exec resolve it
+    /// (ADR 0016 D4).
+    pub program: &'a std::ffi::OsStr,
+    pub working_directory: &'a std::path::Path,
+    pub intent: LaunchIntent,
+}
+
 pub(crate) async fn compose_provider_launch(
     state: &Arc<DaemonState>,
     session: CorralSessionId,
     run: RunId,
-    provider: KnownProvider,
     ownership: SessionOwnership,
-    working_directory: &std::path::Path,
-    intent: LaunchIntent,
+    target: LaunchTarget<'_>,
 ) -> Result<(LaunchRequest, Option<Injected>), String> {
+    let LaunchTarget {
+        provider,
+        program,
+        working_directory,
+        intent,
+    } = target;
     // Asked before anything is minted or written. A managed session's whole
     // point is that it reports; if nothing is listening for what it reports,
     // starting it produces a session that looks managed and can never be
@@ -478,11 +493,11 @@ pub(crate) async fn compose_provider_launch(
         }
     };
 
-    match LaunchRequest::new(
-        provider::program(provider),
-        composed.argv,
-        working_directory,
-    ) {
+    // The caller's, not this function's: a continuation of a history row may
+    // only run the executable whose version the sealing check read, while a
+    // launch that makes no version claim resolves the provider's program name
+    // the way any command does (ADR 0016 D4).
+    match LaunchRequest::new(program, composed.argv, working_directory) {
         Ok(launch) => Ok((
             launch,
             Some(Injected {

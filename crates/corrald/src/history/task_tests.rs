@@ -55,7 +55,7 @@ fn daemon(name: &str) -> (Arc<DaemonState>, std::path::PathBuf) {
 async fn a_provider_that_stops_being_sealed_takes_its_rows_with_it() {
     let (state, directory) = daemon("unsealed");
 
-    pass(&state, now(), |_| true).await;
+    pass(&state, now(), sealed_at).await;
     let listed = state
         .with_runtime(|runtime| runtime.history.rows())
         .expect("the runtime");
@@ -67,14 +67,14 @@ async fn a_provider_that_stops_being_sealed_takes_its_rows_with_it() {
     let row = listed[0].session;
     assert!(
         matches!(
-            continuation::decide_with(&state, row, Some(std::path::Path::new("/tmp")), |_| true)
+            continuation::decide_with(&state, row, Some(std::path::Path::new("/tmp")), sealed_at)
                 .await,
             Ok(continuation::Decision::EligibleWithDisclosure { .. })
         ),
         "a row read under a sealed layout is continuable"
     );
 
-    pass(&state, now(), |_| false).await;
+    pass(&state, now(), not_sealed).await;
 
     assert!(
         state
@@ -85,7 +85,7 @@ async fn a_provider_that_stops_being_sealed_takes_its_rows_with_it() {
     );
     assert!(
         matches!(
-            continuation::decide_with(&state, row, Some(std::path::Path::new("/tmp")), |_| true)
+            continuation::decide_with(&state, row, Some(std::path::Path::new("/tmp")), sealed_at)
                 .await,
             Ok(continuation::Decision::Refused { .. })
         ),
@@ -101,8 +101,8 @@ async fn a_provider_that_stops_being_sealed_takes_its_rows_with_it() {
 async fn a_sealed_provider_keeps_its_rows_across_a_pass_that_found_nothing_new() {
     let (state, directory) = daemon("still-sealed");
 
-    pass(&state, now(), |_| true).await;
-    pass(&state, now(), |_| true).await;
+    pass(&state, now(), sealed_at).await;
+    pass(&state, now(), sealed_at).await;
 
     assert_eq!(
         state
@@ -110,6 +110,36 @@ async fn a_sealed_provider_keeps_its_rows_across_a_pass_that_found_nothing_new()
             .expect("the runtime")
             .len(),
         1
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// The version was sealed on a file, so the plan names that file.
+///
+/// Nothing downstream may resolve the provider's program name a second time:
+/// between the sealing check and the exec, an in-place upgrade would make the
+/// two names refer to different binaries, and Corral would run a version it
+/// never measured while reporting that it had. `continue_history_row` hands
+/// this straight to the launch, which is what makes the check bind.
+#[tokio::test]
+async fn the_plan_names_the_executable_the_sealing_check_read() {
+    let (state, directory) = daemon("sealed-executable");
+    pass(&state, now(), sealed_at).await;
+    let row = state
+        .with_runtime(|runtime| runtime.history.rows())
+        .expect("the runtime")[0]
+        .session;
+
+    let decision =
+        continuation::decide_with(&state, row, Some(std::path::Path::new("/tmp")), sealed_at).await;
+
+    let Ok(continuation::Decision::EligibleWithDisclosure { plan, .. }) = decision else {
+        panic!("a sealed install continues");
+    };
+    assert_eq!(
+        plan.executable,
+        sealed_at(KnownProvider::Claude).expect("sealed").executable,
+        "the launch runs what the check read, not a name resolved again"
     );
     let _ = std::fs::remove_dir_all(&directory);
 }
@@ -124,7 +154,7 @@ async fn a_sealed_provider_keeps_its_rows_across_a_pass_that_found_nothing_new()
 #[tokio::test]
 async fn a_row_is_refused_the_moment_its_provider_stops_being_sealed() {
     let (state, directory) = daemon("unsealed-at-decision");
-    pass(&state, now(), |_| true).await;
+    pass(&state, now(), sealed_at).await;
     let row = state
         .with_runtime(|runtime| runtime.history.rows())
         .expect("the runtime")[0]
@@ -133,7 +163,8 @@ async fn a_row_is_refused_the_moment_its_provider_stops_being_sealed() {
     // No pass in between: the install changed under the daemon, and this is
     // the next thing the daemon is asked.
     let decision =
-        continuation::decide_with(&state, row, Some(std::path::Path::new("/tmp")), |_| false).await;
+        continuation::decide_with(&state, row, Some(std::path::Path::new("/tmp")), not_sealed)
+            .await;
 
     assert!(
         matches!(decision, Ok(continuation::Decision::Refused { .. })),
@@ -153,9 +184,9 @@ async fn a_row_is_refused_the_moment_its_provider_stops_being_sealed() {
 /// A `fn` pointer carries no captures, so the answer comes back here.
 static PROBED_ON: Mutex<Option<ThreadId>> = Mutex::new(None);
 
-fn sealed_recording_its_thread(_: KnownProvider) -> bool {
+fn sealed_recording_its_thread(provider: KnownProvider) -> Option<crate::history::SealedInstall> {
     *PROBED_ON.lock().expect("the recorder") = Some(std::thread::current().id());
-    true
+    sealed_at(provider)
 }
 
 /// `corrald` runs one reactor thread, and resolving the installed version
@@ -182,4 +213,18 @@ async fn a_pass_asks_about_the_install_off_the_reactor() {
         "the reactor thread waited on the filesystem"
     );
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A sealed install standing in for this machine's, so a test drives the
+/// transition rather than whatever happens to be on `PATH`.
+fn sealed_at(provider: KnownProvider) -> Option<crate::history::SealedInstall> {
+    let _ = provider;
+    Some(crate::history::SealedInstall {
+        executable: std::path::PathBuf::from("/opt/measured/claude"),
+        version: "2.1.259".to_owned(),
+    })
+}
+
+fn not_sealed(_: KnownProvider) -> Option<crate::history::SealedInstall> {
+    None
 }

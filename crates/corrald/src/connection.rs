@@ -1448,10 +1448,13 @@ async fn execute_session_new(
                 state,
                 session,
                 run,
-                provider,
                 SessionOwnership::CreatedHere,
-                &working_directory,
-                provider::LaunchIntent::Fresh { args },
+                managed_launch::LaunchTarget {
+                    provider,
+                    program: std::ffi::OsStr::new(provider::program(provider)),
+                    working_directory: &working_directory,
+                    intent: provider::LaunchIntent::Fresh { args },
+                },
             )
             .await
             {
@@ -1676,12 +1679,18 @@ async fn continue_history_row(
         state,
         session,
         run,
-        plan.provider,
         // The Session does not exist yet; this command is what creates it.
         SessionOwnership::CreatedHere,
-        &plan.working_directory,
-        provider::LaunchIntent::Continue {
-            external_id: plan.external_id.clone(),
+        managed_launch::LaunchTarget {
+            provider: plan.provider,
+            // The file the sealing check read the version from, never the
+            // program name resolved afresh: this is the launch that claims a
+            // measured layout, so it runs what was measured (ADR 0016 D4).
+            program: plan.executable.as_os_str(),
+            working_directory: &plan.working_directory,
+            intent: provider::LaunchIntent::Continue {
+                external_id: plan.external_id.clone(),
+            },
         },
     )
     .await
@@ -1805,11 +1814,17 @@ async fn execute_session_resume(
         state,
         session,
         run,
-        plan.provider,
         SessionOwnership::Preexisting,
-        &plan.working_directory,
-        provider::LaunchIntent::Continue {
-            external_id: plan.external_id.clone(),
+        managed_launch::LaunchTarget {
+            provider: plan.provider,
+            // A recorded Session's continuation rests on a durable provider
+            // binding rather than on a sealed store layout, so it resolves the
+            // program the way any command does.
+            program: std::ffi::OsStr::new(provider::program(plan.provider)),
+            working_directory: &plan.working_directory,
+            intent: provider::LaunchIntent::Continue {
+                external_id: plan.external_id.clone(),
+            },
         },
     )
     .await

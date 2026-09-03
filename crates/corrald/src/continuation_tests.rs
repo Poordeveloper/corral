@@ -237,7 +237,7 @@ async fn a_history_row_is_eligible_once_the_client_says_where() {
 
     // Sealed here, because this test is about the directory rather than
     // about the install; `history::task` covers the sealing decision.
-    let silent = decide_with(&registry.state, session, None, |_| true)
+    let silent = decide_with(&registry.state, session, None, sealed_at)
         .await
         .expect("decided");
     let Decision::Refused { reason, .. } = silent else {
@@ -245,7 +245,7 @@ async fn a_history_row_is_eligible_once_the_client_says_where() {
     };
     assert!(reason.contains("which directory"), "{reason}");
 
-    let decided = decide_with(&registry.state, session, Some(&scratch), |_| true)
+    let decided = decide_with(&registry.state, session, Some(&scratch), sealed_at)
         .await
         .expect("decided");
     let Decision::EligibleWithDisclosure {
@@ -270,7 +270,7 @@ async fn a_history_row_is_eligible_once_the_client_says_where() {
 
     let elsewhere = registry.directory.join("other");
     std::fs::create_dir_all(&elsewhere).expect("another directory");
-    let moved = decide_with(&registry.state, session, Some(&elsewhere), |_| true)
+    let moved = decide_with(&registry.state, session, Some(&elsewhere), sealed_at)
         .await
         .expect("decided");
     let Decision::EligibleWithDisclosure {
@@ -284,4 +284,14 @@ async fn a_history_row_is_eligible_once_the_client_says_where() {
         Shown::Stale,
         "a directory changed after the preflight is a different decision"
     );
+}
+
+/// A sealed install standing in for this machine's, so a test drives the
+/// transition rather than whatever happens to be on `PATH`.
+fn sealed_at(provider: KnownProvider) -> Option<crate::history::SealedInstall> {
+    let _ = provider;
+    Some(crate::history::SealedInstall {
+        executable: std::path::PathBuf::from("/opt/measured/claude"),
+        version: "2.1.259".to_owned(),
+    })
 }

@@ -54,6 +54,12 @@ pub(crate) struct HistoryPlan {
     pub provider: KnownProvider,
     pub external_id: ExternalId,
     pub working_directory: PathBuf,
+    /// The executable whose version the sealing check read, and the one this
+    /// continuation runs. Not the provider's program name: that is resolved
+    /// again at exec, and an install upgraded in between would answer it
+    /// differently — the version was sealed, so the file it was read from is
+    /// what may be launched (ADR 0016 D4).
+    pub executable: PathBuf,
 }
 
 /// Whether a resume carried the disclosure its decision requires.
@@ -165,7 +171,7 @@ pub(crate) async fn decide_with(
     state: &Arc<DaemonState>,
     session: CorralSessionId,
     requested: Option<&Path>,
-    sealed: fn(KnownProvider) -> bool,
+    sealed: fn(KnownProvider) -> Option<history::SealedInstall>,
 ) -> Result<Decision, corral_state::StateError> {
     let refused = match resume_plan(state, session).await? {
         Ok(plan) => return Ok(Decision::Eligible(plan)),
@@ -183,7 +189,7 @@ pub(crate) async fn decide_with(
         // (ADR 0016), so a row learned under a sealed version is not a licence
         // to start an unmeasured one for the length of a cadence. The working
         // directory is rechecked on this path for the same reason.
-        if !history::sealed_now(provider, sealed).await {
+        let Some(install) = history::sealed_now(provider, sealed).await else {
             // Just learned, so said once rather than left for the pass: a row
             // this daemon has refused to act on has no business still being
             // listed as one it might.
@@ -197,8 +203,8 @@ pub(crate) async fn decide_with(
                     product_name(provider)
                 ),
             });
-        }
-        return Ok(history_row(session, &row, requested));
+        };
+        return Ok(history_row(session, &row, requested, install.executable));
     }
     let live = match refused {
         ResumeRefused::EndUnverifiable | ResumeRefused::RunStillLive => {
@@ -221,6 +227,7 @@ fn history_row(
     session: CorralSessionId,
     row: &history::HistoryRow,
     requested: Option<&Path>,
+    executable: PathBuf,
 ) -> Decision {
     let provider = row.entry.provider;
     let directory = match usable_directory(requested) {
@@ -257,6 +264,7 @@ fn history_row(
             provider,
             external_id: row.entry.external_id.clone(),
             working_directory: directory,
+            executable,
         },
     }
 }

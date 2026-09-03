@@ -204,6 +204,23 @@ The working directory is rechecked on the same path for the same reason:
 both are mutable state that the decision, not the enumeration, is
 answerable for.
 
+The check binds to a file, not to a name. A version is sealed on the
+executable it was read from, so that executable is what the continuation
+runs — carried into the launch rather than resolved again from the
+provider's program name, which an in-place upgrade would answer
+differently between the check and the exec. Continuations that rest on a
+durable provider binding make no version claim and resolve the program
+the way any command does. What remains is the filesystem race between
+reading a file's version and executing it, which is a different and much
+smaller thing.
+
+Enumeration follows no symlink. The sealed layouts describe what a
+provider writes *under* its store; a link is a name in the store pointing
+at a file that is not, and following one would enumerate whatever the
+filesystem can reach from there and grant it the assurance a history
+record carries. Directory entries are classified by their own type and a
+session file's time is its own, never a target's.
+
 ## D5 — The disclosure is the daemon's, correlated, and never assumed
 
 Which of D4's answers applies is the daemon's to decide and the client's

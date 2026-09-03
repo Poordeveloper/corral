@@ -27,7 +27,11 @@ pub async fn enumerate_once(state: &Arc<DaemonState>, now: SystemTime) {
 /// The decision is a parameter because it is the whole of what makes a store
 /// readable, and a test that cannot change it can only ever exercise this
 /// machine's installation.
-async fn pass(state: &Arc<DaemonState>, now: SystemTime, sealed: fn(KnownProvider) -> bool) {
+async fn pass(
+    state: &Arc<DaemonState>,
+    now: SystemTime,
+    sealed: fn(KnownProvider) -> Option<super::SealedInstall>,
+) {
     let Some(home) = state.provider_home() else {
         return;
     };
@@ -38,7 +42,7 @@ async fn pass(state: &Arc<DaemonState>, now: SystemTime, sealed: fn(KnownProvide
         // 0016 D1). An install Corral cannot version is unsealed for the
         // same reason — not knowing which layout is on disk is not a
         // licence to assume the measured one.
-        if !sealed_now(provider, sealed).await {
+        if sealed_now(provider, sealed).await.is_none() {
             // Retracted, not merely skipped. What a previous pass learned was
             // supported by the layout sealed at the version installed then;
             // an install that is no longer sealed takes that support away, and
