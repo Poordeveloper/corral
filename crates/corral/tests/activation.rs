@@ -226,7 +226,7 @@ fn only_the_sibling_daemon_may_be_started() {
     let decoys = account.scratch().join("decoys");
     std::fs::create_dir_all(&install).expect("create");
     std::fs::create_dir_all(&decoys).expect("create");
-    std::fs::copy(support::CORRAL_BINARY, install.join("corral")).expect("copy corral");
+    std::fs::copy(support::corral_binary(), install.join("corral")).expect("copy corral");
     write_decoy(
         &decoys.join("corrald"),
         &account.scratch().join("decoy-ran"),

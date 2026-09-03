@@ -523,7 +523,22 @@ ladder answers are exhaustive in code.
    Linux host is currently confirmed, and the plan assumes none; until the
    artifact exists Linux external Know is unvalidated and its evidence
    window has not started.
-3. **Conditional escalation** — if PR8 would present Linux external Know
+3. **Harness isolation** (founder ruling, round 5) — before either PR8a
+   or PR8b merges, the end-to-end suite must be unable to reach the
+   developer's own Corral. Both `corral` and `corrald` are validated as
+   the intended test-support build; a wrong binary fails the harness
+   before any process starts; execution cannot fall back to the account's
+   canonical endpoint or state paths; a concurrent ordinary `cargo build
+   -p corral` cannot redirect a run in progress; and the wrong-binary case
+   has a permanent regression test. Promoted from a follow-up because
+   `./scripts/verify` demonstrated the race on 2026-09-02: a concurrent
+   plain build replaced `target/debug/corral`, and four attention e2e
+   tests started a daemon under `~/.corral` (log writes only; no registry
+   mutation, no Session created). The damage was small and the invariant
+   violation is not: a suite may not depend on nobody rebuilding a binary
+   while it runs. Production daemon identity and rendezvous semantics are
+   not to be changed to satisfy the harness.
+4. **Conditional escalation** — if PR8 would present Linux external Know
    to ordinary users by default at merge rather than behind an honest
    capability boundary, real Linux E2E becomes the PR8 merge gate.
 

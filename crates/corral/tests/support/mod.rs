@@ -16,6 +16,7 @@ compile_error!(
      or cargo test --features corral/test-support,corrald/test-support"
 );
 
+pub mod binaries;
 pub mod corpus;
 pub mod provider;
 pub mod pty;
@@ -25,12 +26,13 @@ use std::io::Read;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-/// Built by cargo alongside this test binary.
-pub const CORRAL_BINARY: &str = env!("CARGO_BIN_EXE_corral");
+/// Built by cargo alongside this test binary — and replaced by cargo whenever
+/// something else builds the workspace, which is why no test runs it directly.
+/// [`binaries::staged`] is what a test drives.
+pub const CARGO_CORRAL_BINARY: &str = env!("CARGO_BIN_EXE_corral");
 
 /// The scripted stand-in a managed provider launch actually runs. No test
 /// calls a real provider (`AGENTS.md` §Tests).
@@ -41,43 +43,15 @@ pub const SETTLE: Duration = Duration::from_secs(10);
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// The daemon, resolved exactly the way the product resolves it: as `corral`'s
-/// sibling. Cargo puts both binaries in the same directory.
-///
-/// The seam check is not ceremony: a `corrald` built without `test-support`
-/// resolves the developer's real account home instead of this test's root, so
-/// the suite would quietly drive their own daemon. Failing loudly here is the
-/// difference between a red test and a damaged machine.
+/// The daemon a test drives: the staged copy, resolved as the staged client's
+/// sibling exactly the way the product resolves it.
 pub fn corrald_binary() -> PathBuf {
-    static DAEMON: OnceLock<PathBuf> = OnceLock::new();
-    DAEMON
-        .get_or_init(|| {
-            let directory = Path::new(CORRAL_BINARY)
-                .parent()
-                .expect("the corral binary has a directory");
-            let daemon = directory.join("corrald");
-            let image = std::fs::read(&daemon).unwrap_or_else(|source| {
-                panic!(
-                    "{} could not be read ({source}); build the whole workspace, which the \
-                     merge gate does",
-                    daemon.display()
-                )
-            });
-            assert!(
-                contains(&image, b"CORRAL_TEST_ROOT"),
-                "{} was built without the test-support rendezvous seam and would serve the \
-                 real account; rebuild with --features corral/test-support,corrald/test-support",
-                daemon.display()
-            );
-            daemon
-        })
-        .clone()
+    binaries::staged().corrald()
 }
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
+/// The client a test drives.
+pub fn corral_binary() -> PathBuf {
+    binaries::staged().corral()
 }
 
 /// A private Corral root standing in for one OS account's rendezvous.
@@ -189,7 +163,7 @@ impl TestAccount {
 
     /// A `corral` invocation bound to this account's rendezvous.
     pub fn corral(&self) -> Command {
-        let mut command = Command::new(CORRAL_BINARY);
+        let mut command = Command::new(corral_binary());
         self.apply_environment(&mut command);
         command
     }
@@ -205,7 +179,7 @@ impl TestAccount {
     /// A `corral` invocation for a pty, which builds its command differently
     /// from `std::process::Command` and so needs the environment as values.
     pub fn corral_on_pty(&self, arguments: &[&str]) -> portable_pty::CommandBuilder {
-        let mut command = portable_pty::CommandBuilder::new(CORRAL_BINARY);
+        let mut command = portable_pty::CommandBuilder::new(corral_binary());
         for argument in arguments {
             command.arg(argument);
         }
