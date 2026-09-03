@@ -168,13 +168,18 @@ fn a_missing_store_is_no_sessions_not_an_error() {
 #[test]
 fn a_layout_is_sealed_only_for_the_versions_that_were_measured() {
     assert!(layout_sealed(KnownProvider::Claude, "2.1.258"));
+    assert!(layout_sealed(KnownProvider::Claude, "2.1.259"));
     assert!(layout_sealed(KnownProvider::Codex, "0.152.0"));
 
     assert!(!layout_sealed(KnownProvider::Claude, "2.1.252"));
     assert!(!layout_sealed(KnownProvider::Codex, "0.145.0"));
     assert!(
-        !layout_sealed(KnownProvider::Claude, "2.1.259"),
+        !layout_sealed(KnownProvider::Claude, "2.1.260"),
         "a newer version is unmeasured, not assumed"
+    );
+    assert!(
+        !layout_sealed(KnownProvider::Claude, "2.1.257"),
+        "a version between two measured ones is not covered by them"
     );
     assert!(!layout_sealed(KnownProvider::Claude, ""));
     assert!(

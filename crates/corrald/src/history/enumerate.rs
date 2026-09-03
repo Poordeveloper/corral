@@ -62,7 +62,12 @@ pub fn store_root(provider: KnownProvider, home: &Path) -> PathBuf {
 #[must_use]
 pub fn layout_sealed(provider: KnownProvider, version: &str) -> bool {
     match provider {
-        KnownProvider::Claude => version == "2.1.258",
+        // 2.1.258 in the first matrix run, 2.1.259 in the second: the same
+        // dash-encoded project directory, the same `<uuid>.jsonl` per session,
+        // the same `memory/` beside them. Two rows rather than a range,
+        // because 2.1.258's binary no longer exists to re-measure and nothing
+        // between or after them was looked at.
+        KnownProvider::Claude => matches!(version, "2.1.258" | "2.1.259"),
         KnownProvider::Codex => version == "0.152.0",
     }
 }

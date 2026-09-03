@@ -580,7 +580,6 @@ evidence (`docs/evidence/pr8b-history-store-and-resume-2026-09-02.md`);
 its decision frontier is closed and PR8b implements accepted architecture.
 PR8b lands after PR8a (grill Q11).
 
-
 **When the dogfood window may start (grill Q31).** PR8a merged; a human
 has advanced `STORAGE_EPOCH` to `dogfood`; the exercised
 provider/version/capability rows are sealed; diagnostics function and the
