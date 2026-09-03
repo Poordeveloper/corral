@@ -223,3 +223,18 @@ fn a_derivation_becomes_an_attention_state_at_an_instant() {
         AttentionState::unknown(NOW, Some(LastKnown::new(MainState::Ready, at(3 * 60 * 60))))
     );
 }
+
+/// A blocker beats activity only while it is still the newest thing any
+/// source other than the PTY said. Once the turn is reported done, the output
+/// that follows is work: reviving the cleared blocker would be the stale
+/// Needs You D4 forbids — "older evidence never revives a state".
+#[test]
+fn activity_does_not_revive_a_blocker_a_later_claim_cleared() {
+    let blocker = observed(EvidenceSource::ProviderHook, SemanticState::NeedsYou, 1, 30);
+    let cleared = observed(EvidenceSource::ProviderHook, SemanticState::Ready, 2, 20);
+    let activity = observed(EvidenceSource::PtyActivity, SemanticState::Working, 3, 0);
+    assert_eq!(
+        derive_running(&[blocker, cleared, activity]).main,
+        MainState::Working
+    );
+}

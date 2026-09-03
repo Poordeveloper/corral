@@ -205,7 +205,10 @@ Three consequences are fixed rather than left to tuning:
 - **Activity is the default, and a blocker beats it.** PTY output asserts
   Working only when no fresh Needs You claim stands: the prompt that blocks
   the agent is drawn by the same output flow that would otherwise read as
-  work. Activity's own claim ends at the quiet horizon.
+  work. A blocker stands only until something other than the PTY contradicts
+  it — once a later entitled claim reports the turn moved on, the output that
+  follows is work, because older evidence never revives a state. Activity's
+  own claim ends at the quiet horizon.
 - **Every semantic claim rots.** Working, Needs You, and Ready each carry a
   freshness horizon per source, past which the main state is Unknown with
   the last reliable fact as secondary text — "Last known: Needed input

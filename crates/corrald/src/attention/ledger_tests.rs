@@ -278,3 +278,35 @@ fn a_decided_change_carries_the_horizon_its_claim_lives_under() {
     assert_eq!(changes[0].horizon, Some(Horizons::default().hook_needs_you));
     assert_eq!(changes[0].expired_after, None);
 }
+
+/// The sequence a permission prompt actually produces: the hook blocks, the
+/// agent draws while blocked, the hook reports the turn done, and the agent
+/// draws again. The answered request must not come back as the newest blocker
+/// for the rest of its five-minute horizon.
+#[test]
+fn activity_after_a_cleared_blocker_is_working_not_a_revived_blocker() {
+    let mut ledger = Ledger::new(Horizons::default());
+    let session = CorralSessionId::mint();
+    ledger.observe(session, hook(SemanticState::NeedsYou), later(10));
+    ledger.observe(session, activity(), later(11));
+    ledger.tick(later(12), running);
+    assert_eq!(
+        ledger.state(session).expect("tracked").0.main(),
+        MainState::NeedsYou,
+        "activity while blocked is still blocked"
+    );
+
+    ledger.observe(session, hook(SemanticState::Ready), later(20));
+    ledger.tick(later(21), running);
+    assert_eq!(
+        ledger.state(session).expect("tracked").0.main(),
+        MainState::Ready
+    );
+
+    ledger.observe(session, activity(), later(30));
+    ledger.tick(later(31), running);
+    assert_eq!(
+        ledger.state(session).expect("tracked").0.main(),
+        MainState::Working
+    );
+}

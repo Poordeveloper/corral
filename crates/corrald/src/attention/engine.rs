@@ -170,11 +170,14 @@ pub fn derive(
 
     // Activity is the default and a blocker the exception (D4): the prompt
     // that blocks the agent is drawn by the same output flow that would
-    // otherwise read as work.
+    // otherwise read as work. The exception reaches only a blocker nothing
+    // has since contradicted — activity cannot revive one a later entitled
+    // claim cleared, because older evidence never revives a state.
     let blocker = fresh
         .iter()
-        .filter(|observed| observed.claim.asserts == SemanticState::NeedsYou)
-        .max_by_key(|observed| observed.ordinal);
+        .filter(|observed| observed.claim.source != EvidenceSource::PtyActivity)
+        .max_by_key(|observed| observed.ordinal)
+        .filter(|observed| observed.claim.asserts == SemanticState::NeedsYou);
     let rests_on = match blocker {
         Some(blocker) if newest.claim.source == EvidenceSource::PtyActivity => **blocker,
         _ => **newest,
