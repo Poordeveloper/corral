@@ -385,8 +385,23 @@ exhausted, ordinary records stop, an explicit overflow marker is written
 — a sidecar `.incomplete` is enough — a warning is emitted, and
 `corral attention report` marks that interval INCOMPLETE, which means it
 cannot count as a complete evidence day (grill Q26). A bounded journal
-may become incomplete; it must never become silently incomplete. It is
-deletable, never migrated, and never a promise of rebuildability. The invariant is about
+may become incomplete; it must never become silently incomplete.
+
+The same marker carries losses the budget did not cause. A record the
+filesystem refuses is a record nothing on disk would otherwise name, so
+the writer marks its day, and a day whose mark cannot be written either
+is a day no report may describe — `corral attention report` refuses
+rather than answering the smaller count. Because a filesystem that
+refuses the marker refuses every other byte, that evidence cannot be
+created at the moment of failure: the daemon keeps a sidecar `.open`
+naming the day it is writing, put there while the day is still healthy
+and taken away when the day rolls over or the daemon stops on purpose. A
+sentinel a departed daemon left behind is a day the next one marks
+INCOMPLETE, because nothing can say whether that daemon's last records
+reached the file. A marked day is short a record, not closed: journaling
+goes on into it, and only the budget — measured from the file's own size,
+so it survives a restart — stops a day. The journal is deletable, never
+migrated, and never a promise of rebuildability. The invariant is about
 direction: the attention engine never reads it back into product state or
 semantic inference — not to suppress an item, not to produce one.
 Reporting reads it, which is what it is for: `corral attention report` is

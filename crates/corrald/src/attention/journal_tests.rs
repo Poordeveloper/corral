@@ -352,3 +352,76 @@ fn a_day_that_is_only_a_marker_is_reported_and_incomplete() {
     assert_eq!(day.transitions, 0);
     assert!(day.incomplete, "a day nothing could be written to");
 }
+
+/// A daemon that stops on purpose finishes the day it was writing, so the
+/// next one has no reason to doubt it. Without this the sentinel would mark
+/// a day partial on every ordinary restart, and INCOMPLETE would stop
+/// meaning anything.
+#[test]
+fn a_day_a_daemon_finished_on_purpose_is_not_doubted_by_the_next_one() {
+    let dir = scratch();
+    let mut journal = Journal::open(&dir, Budget::default(), noon()).expect("open");
+    journal
+        .append(
+            noon(),
+            transition(CorralSessionId::mint(), MainState::Ready),
+        )
+        .expect("append");
+    journal.close();
+    drop(journal);
+
+    let mut restarted = Journal::open(&dir, Budget::default(), noon() + DAY).expect("reopen");
+    assert_eq!(restarted.settle_marks(), 0);
+    let day = report(&dir).expect("report").days.remove(0);
+    assert_eq!(day.date, "2026-09-02");
+    assert_eq!(day.into_ready, 1);
+    assert!(!day.incomplete, "a day nobody lost anything on");
+}
+
+/// A daemon that goes away without finishing the day leaves the question
+/// behind: nothing here can say whether its last records reached the file.
+/// The next daemon answers it the only honest way, by marking the day rather
+/// than reading the smaller count as all that happened (ADR 0015 D8).
+#[test]
+fn a_day_a_daemon_never_finished_is_marked_by_the_next_one() {
+    let dir = scratch();
+    let mut journal = Journal::open(&dir, Budget::default(), noon()).expect("open");
+    journal
+        .append(
+            noon(),
+            transition(CorralSessionId::mint(), MainState::Ready),
+        )
+        .expect("append");
+    drop(journal);
+
+    let _restarted = Journal::open(&dir, Budget::default(), noon() + DAY).expect("reopen");
+    let day = report(&dir).expect("report").days.remove(0);
+    assert_eq!(day.date, "2026-09-02");
+    assert_eq!(day.into_ready, 1, "what did land is still counted");
+    assert!(day.incomplete, "and it is not claimed to be all of it");
+}
+
+/// A day marked partial is short a record, not closed: the daemon goes on
+/// journaling it. Only the budget stops a day, and it stops it by size, which
+/// the file itself carries across a restart.
+#[test]
+fn a_day_already_marked_partial_still_takes_the_records_after_it() {
+    let dir = scratch();
+    let mut journal = Journal::open(&dir, Budget::default(), noon()).expect("open");
+    journal.mark_incomplete(noon()).expect("mark");
+    drop(journal);
+
+    let mut restarted = Journal::open(&dir, Budget::default(), noon()).expect("reopen");
+    assert_eq!(
+        restarted
+            .append(
+                noon(),
+                transition(CorralSessionId::mint(), MainState::Ready)
+            )
+            .expect("append"),
+        Appended::Written
+    );
+    let day = report(&dir).expect("report").days.remove(0);
+    assert_eq!(day.into_ready, 1);
+    assert!(day.incomplete);
+}

@@ -4,8 +4,10 @@
 //! One file per day under the diagnostics directory, a closed record shape
 //! with nowhere to put a screen or a payload, a per-day budget that ends in
 //! an explicit `.incomplete` marker rather than in silently dropped records,
-//! and a thirty-day prune that runs at open and at every day rollover, so a
-//! daemon alive for weeks prunes too.
+//! a thirty-day prune that runs at open and at every day rollover, so a
+//! daemon alive for weeks prunes too, and a sentinel naming the day being
+//! written so a daemon that dies mid-day is not mistaken for one that had
+//! nothing to say.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -20,6 +22,8 @@ use super::ItemEnd;
 const FILE_PREFIX: &str = "attention-journal-";
 const FILE_SUFFIX: &str = ".jsonl";
 const INCOMPLETE_SUFFIX: &str = ".incomplete";
+/// The day this daemon is writing, on disk while it writes it.
+const OPEN_SUFFIX: &str = ".open";
 /// `YYYY-MM-DD`. The journal's own day names are this wide, and the report's
 /// string comparison only orders correctly while every name is.
 const FILE_DATE_WIDTH: usize = 10;
@@ -109,13 +113,23 @@ pub struct Journal {
     /// it lands, because the filesystem problem that lost the record is
     /// usually not permanent — and a restart is not what repairs it.
     unmarked: std::collections::BTreeSet<CivilDate>,
+    /// The day whose sentinel this journal put on disk and has not taken off.
+    ///
+    /// A filesystem that refuses the marker refuses every other byte too, so
+    /// the evidence a restart needs cannot be written at the moment a record
+    /// is lost — it has to already be there. This is that evidence, written
+    /// while the day is still healthy and removed only on the way out.
+    holding: Option<CivilDate>,
 }
 
 struct OpenDay {
     date: CivilDate,
     file: File,
     written: u64,
-    incomplete: bool,
+    /// The day is already known to be partial, so the budget says so once
+    /// rather than on every record behind it. Never a reason to stop
+    /// writing: a marked day is short a record, not closed.
+    marked: bool,
 }
 
 impl Journal {
@@ -129,9 +143,92 @@ impl Journal {
             seq: 0,
             day: None,
             unmarked: std::collections::BTreeSet::new(),
+            holding: None,
         };
         journal.prune(now)?;
+        journal.adopt_unclosed_days()?;
+        // Before the first record, not with it: a day whose sentinel could
+        // only be written after the filesystem failed is a day nothing would
+        // name. The failure is already held in `unmarked`, so it travels no
+        // further here.
+        let _ = journal.hold_day(CivilDate::of(now));
         Ok(journal)
+    }
+
+    /// Take over the days a departed daemon was writing.
+    ///
+    /// A sentinel still on disk means the daemon that put it there did not
+    /// leave cleanly, so nothing can say whether its last records reached the
+    /// file. That is exactly the day D8 forbids reading as a quiet one, so it
+    /// is marked. A mark that cannot be written keeps its sentinel, and the
+    /// next daemon inherits the same question.
+    fn adopt_unclosed_days(&mut self) -> std::io::Result<()> {
+        let mut unclosed = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if name.ends_with(OPEN_SUFFIX)
+                && let Some(date) = date_of_file(&name)
+            {
+                unclosed.push(date);
+            }
+        }
+        for date in unclosed {
+            if self.mark(date).is_err() {
+                self.unmarked.insert(date);
+            }
+        }
+        Ok(())
+    }
+
+    /// Say on disk that this daemon is writing `date`, so that dying without
+    /// finishing it is a question the next daemon can ask.
+    ///
+    /// A day already marked partial has nothing left to sentinel: the marker
+    /// says outright what the sentinel only raises.
+    fn hold_day(&mut self, date: CivilDate) -> std::io::Result<()> {
+        if self.holding == Some(date) {
+            return Ok(());
+        }
+        if let Some(held) = self.holding.take() {
+            let _ = std::fs::remove_file(self.dir.join(file_name(held, OPEN_SUFFIX)));
+        }
+        if self.dir.join(file_name(date, INCOMPLETE_SUFFIX)).exists() {
+            return Ok(());
+        }
+        match std::fs::write(self.dir.join(file_name(date, OPEN_SUFFIX)), b"") {
+            Ok(()) => {
+                self.holding = Some(date);
+                Ok(())
+            }
+            // Nothing can be written, so nothing would say a record went
+            // missing. The day is unvouchable until the marker lands.
+            Err(source) => {
+                self.unmarked.insert(date);
+                Err(source)
+            }
+        }
+    }
+
+    /// Let go of the day this journal was writing, because it is finishing on
+    /// purpose. Best effort: a sentinel left behind costs the next daemon a
+    /// day marked partial, which is the safe direction to be wrong in.
+    pub fn close(&mut self) {
+        if let Some(held) = self.holding.take() {
+            let _ = std::fs::remove_file(self.dir.join(file_name(held, OPEN_SUFFIX)));
+        }
+    }
+
+    /// Write the marker that says this day is short a record.
+    fn mark(&mut self, date: CivilDate) -> std::io::Result<()> {
+        write_marker(&self.dir, date)?;
+        // The marker states what the sentinel merely raised, so the sentinel
+        // has nothing left to say.
+        let _ = std::fs::remove_file(self.dir.join(file_name(date, OPEN_SUFFIX)));
+        if self.holding == Some(date) {
+            self.holding = None;
+        }
+        self.unmarked.remove(&date);
+        Ok(())
     }
 
     /// Where the journal lives, for the report reader.
@@ -145,31 +242,34 @@ impl Journal {
         let date = CivilDate::of(now);
         if self.day.as_ref().is_none_or(|day| day.date != date) {
             self.prune(now)?;
+            self.hold_day(date)?;
             let path = self.dir.join(file_name(date, FILE_SUFFIX));
             let file = OpenOptions::new().append(true).create(true).open(&path)?;
+            // The budget is measured from the file, so it holds across a
+            // restart without anything having to remember it.
             let written = file.metadata().map(|m| m.len()).unwrap_or(0);
-            let incomplete = self.dir.join(file_name(date, INCOMPLETE_SUFFIX)).exists();
+            let marked = self.dir.join(file_name(date, INCOMPLETE_SUFFIX)).exists();
             self.day = Some(OpenDay {
                 date,
                 file,
                 written,
-                incomplete,
+                marked,
             });
-        }
-        let Some(day) = self.day.as_mut() else {
-            return Ok(Appended::DayAlreadyIncomplete);
-        };
-        if day.incomplete {
-            return Ok(Appended::DayAlreadyIncomplete);
         }
         self.seq += 1;
         let mut line = encode(&record, now, self.seq).to_string();
         line.push('\n');
+        // The day above is what this writes into; there is no other.
+        let Some(day) = self.day.as_mut() else {
+            return Ok(Appended::DayAlreadyIncomplete);
+        };
         if day.written + line.len() as u64 > self.budget.per_day_bytes {
             // The budget is met by refusing, never by rotating earlier
             // records away: the marker says the day's evidence is partial.
-            day.incomplete = true;
-            write_marker(&self.dir, date)?;
+            if std::mem::replace(&mut day.marked, true) {
+                return Ok(Appended::DayAlreadyIncomplete);
+            }
+            self.mark_incomplete(now)?;
             return Ok(Appended::BudgetExhausted);
         }
         day.file.write_all(line.as_bytes())?;
@@ -186,11 +286,8 @@ impl Journal {
     /// no report can describe honestly (ADR 0015 D8).
     pub fn mark_incomplete(&mut self, now: SystemTime) -> std::io::Result<()> {
         let date = CivilDate::of(now);
-        match write_marker(&self.dir, date) {
-            Ok(()) => {
-                self.unmarked.remove(&date);
-                Ok(())
-            }
+        match self.mark(date) {
+            Ok(()) => Ok(()),
             Err(source) => {
                 // Held so it can be tried again. Until it lands there is
                 // nothing on disk saying this day is short a record, and the
@@ -209,7 +306,7 @@ impl Journal {
     /// rather than into a daemon that refuses forever.
     pub fn settle_marks(&mut self) -> usize {
         for date in std::mem::take(&mut self.unmarked) {
-            if write_marker(&self.dir, date).is_err() {
+            if self.mark(date).is_err() {
                 self.unmarked.insert(date);
             }
         }
@@ -415,7 +512,8 @@ fn date_of_file(name: &str) -> Option<CivilDate> {
     let rest = name.strip_prefix(FILE_PREFIX)?;
     let date = rest
         .strip_suffix(FILE_SUFFIX)
-        .or_else(|| rest.strip_suffix(INCOMPLETE_SUFFIX))?;
+        .or_else(|| rest.strip_suffix(INCOMPLETE_SUFFIX))
+        .or_else(|| rest.strip_suffix(OPEN_SUFFIX))?;
     CivilDate::parse(date)
 }
 

@@ -187,6 +187,9 @@ fn start() -> Result<ExitCode, StartupError> {
     if state.settle_observations() == runtime::Integrity::Lost {
         error!("this daemon could not record everything it observed about its runs");
     }
+    // A stop, not a death: the day the journal was writing is finished rather
+    // than left open for the next daemon to treat as possibly short a record.
+    state.close_journal();
     // Best effort: the next claim winner owns whatever an abrupt death leaves
     // behind, so failing to unlink here costs nothing.
     //

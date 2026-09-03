@@ -831,3 +831,73 @@ async fn a_record_the_journal_could_not_write_makes_its_day_report_incomplete() 
     assert_ne!(lost["date"], written["date"], "the day after");
     assert_eq!(lost["disputes"], 0, "the record never reached the file");
 }
+
+/// The sequence the retry alone cannot close: the filesystem is still
+/// refusing every byte when the daemon goes away. Nothing the losing process
+/// held in memory survives that, so the evidence a restart needs has to have
+/// been on disk *before* the write failed. Without it the new daemon reads
+/// the smaller count as a quiet day (ADR 0015 D8).
+#[tokio::test]
+async fn a_record_lost_while_nothing_could_be_written_is_not_forgotten_by_a_restart() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let registry = Registry::new("journal-mark-restart-broken");
+    let diagnostics = registry.directory.join("diagnostics");
+    let opened = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_788_350_400);
+    registry.state.attach_journal(
+        crate::attention::Journal::open(&diagnostics, crate::attention::Budget::default(), opened)
+            .expect("journal"),
+    );
+    let dispute = || {
+        vec![crate::attention::Record::Dispute(
+            crate::attention::DisputeRecord {
+                session: corral_core::CorralSessionId::mint(),
+                item: None,
+                stale: false,
+            },
+        )]
+    };
+    registry.state.journal_append(opened, dispute());
+
+    let next_day = opened + std::time::Duration::from_secs(24 * 60 * 60);
+    std::fs::set_permissions(&diagnostics, PermissionsExt::from_mode(0o500)).expect("chmod");
+    registry.state.journal_append(next_day, dispute());
+    assert_eq!(
+        error_code(dispatch(&request(method::ATTENTION_REPORT, None), &registry.state).await).0,
+        ErrorCode::Busy,
+        "nothing on disk says the record is missing"
+    );
+
+    // The daemon goes away with the filesystem still broken. The replacement
+    // inherits the directory and nothing else. (`registry` is held only so
+    // its scratch tree outlives the test, the way a machine's does.)
+    let restarted = Registry::new("journal-mark-restart-broken-again");
+    restarted.state.attach_journal(
+        crate::attention::Journal::open(
+            &diagnostics,
+            crate::attention::Budget::default(),
+            next_day,
+        )
+        .expect("journal"),
+    );
+    assert_eq!(
+        error_code(dispatch(&request(method::ATTENTION_REPORT, None), &restarted.state).await).0,
+        ErrorCode::Busy,
+        "a restart is not what makes a lost record complete"
+    );
+
+    // Only when the filesystem comes back may a report be served, and the day
+    // whose record went missing says so.
+    std::fs::set_permissions(&diagnostics, PermissionsExt::from_mode(0o700)).expect("restore");
+    let value =
+        result_value(dispatch(&request(method::ATTENTION_REPORT, None), &restarted.state).await);
+    let day = value["days"]
+        .as_array()
+        .expect("days")
+        .iter()
+        .find(|day| day["date"] == "2026-09-03")
+        .expect("the day whose record was lost")
+        .clone();
+    assert_eq!(day["incomplete"], true);
+    assert_eq!(day["disputes"], 0);
+}

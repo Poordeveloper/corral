@@ -225,6 +225,18 @@ impl DaemonState {
         }
     }
 
+    /// Let the journal finish the day it is writing, because this daemon is
+    /// stopping on purpose rather than dying. Without this, an orderly
+    /// shutdown would leave the same sentinel an abrupt death does, and every
+    /// restart would mark a day partial that never lost a thing.
+    pub fn close_journal(&self) {
+        if let Ok(mut slot) = self.journal.lock()
+            && let Some(journal) = slot.as_mut()
+        {
+            journal.close();
+        }
+    }
+
     /// Where the journal lives, when this daemon has one.
     pub fn journal_dir(&self) -> Option<std::path::PathBuf> {
         self.journal
@@ -292,10 +304,9 @@ impl DaemonState {
     /// lock nobody can take is the same case: nothing can be written and
     /// nothing can be marked.
     ///
-    /// What no daemon can carry across a restart is a mark that was never
-    /// written at all, because a filesystem that refuses the marker refuses
-    /// every other byte too. The window is bounded by how soon it recovers,
-    /// not by how long this process happens to live.
+    /// A daemon that dies while the marker is still impossible to write
+    /// carries nothing forward itself; the day's sentinel does, because it
+    /// was on disk before the write failed (ADR 0015 D8).
     pub fn journal_unreportable(&self) -> bool {
         let Ok(mut slot) = self.journal.lock() else {
             return true;
