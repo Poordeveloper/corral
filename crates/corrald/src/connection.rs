@@ -445,7 +445,17 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
         method::ATTENTION_ACKNOWLEDGE => Dispatch::Reply(attention_acknowledge(request, state)),
         method::ATTENTION_REPORT => Dispatch::Reply(attention_report(request, state).await),
         method::ATTENTION_DISPUTE => Dispatch::Reply(attention_dispute(request, state).await),
-        method::SESSION_CONTINUATION => session_continuation(request, state).await,
+        // Not live state: the preflight reads the registry to decide, so it
+        // takes the same gate `session.list` does. A daemon that cannot vouch
+        // for durable truth must not answer whether a session may continue.
+        method::SESSION_CONTINUATION => match state.vouch().await {
+            Ok(Vouched::Yes) => session_continuation(request, state).await,
+            Ok(Vouched::NotNow) => Dispatch::Reply(Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::Busy, "the registry is held by another writer"),
+            )),
+            Err(error) => Dispatch::FailClosed(error),
+        },
         // Status reads a file rather than the registry, but it is still a
         // claim made in the daemon's name and the two mutations write durable
         // intent, so all three take the same gate as any other request.
@@ -1608,7 +1618,10 @@ async fn session_continuation(request: &Request, state: &Arc<DaemonState>) -> Di
     let requested = params.working_directory.map(std::path::PathBuf::from);
     let decision = match continuation::decide(state, session, requested.as_deref()).await {
         Ok(decision) => decision,
-        Err(error) => return Dispatch::FailClosed(error),
+        Err(error) => match refused_reading(error) {
+            Ok(refusal) => return Dispatch::Reply(Frame::error(id, refusal)),
+            Err(fatal) => return Dispatch::FailClosed(fatal),
+        },
     };
     let result = match decision {
         continuation::Decision::Eligible(_) => SessionContinuationResult {
@@ -1877,6 +1890,34 @@ fn refused_by_store(
             code: ErrorCode::InvalidParams,
             message: other.to_string(),
         },
+    })
+}
+
+/// The protocol error a store refusal is when nothing was being executed.
+///
+/// The read counterpart of `refused_by_store`, exhaustive for the same
+/// reason: a refusal no arm named would reach the caller as `FailClosed`,
+/// and `Busy` — a store one other writer is holding — would then be one
+/// backup tool ending every session's control plane.
+fn refused_reading(
+    error: corral_state::StateError,
+) -> Result<ProtocolError, corral_state::StateError> {
+    use corral_state::{Refusal, StateError};
+
+    let refusal = match error {
+        StateError::Refused(refusal) => refusal,
+        fatal => return Err(fatal),
+    };
+    Ok(match refusal {
+        // A fixed message: the engine's own text names tables, columns and
+        // paths, and a protocol error crosses the socket.
+        Refusal::Busy { .. } => ProtocolError::new(
+            ErrorCode::Busy,
+            "the registry is held by another writer".to_owned(),
+        ),
+        // Nothing was executed, so every other refusal is about what was
+        // asked rather than about the store's health.
+        other => ProtocolError::new(ErrorCode::InvalidParams, other.to_string()),
     })
 }
 
