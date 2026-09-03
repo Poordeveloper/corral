@@ -187,3 +187,42 @@ fn a_layout_is_sealed_only_for_the_versions_that_were_measured() {
         "sealing is an exact match, not a prefix"
     );
 }
+
+/// A name in the store that points somewhere else is not a session the
+/// provider holds. Following it would enumerate whatever the filesystem can
+/// reach from the store and hand it the assurance a history record carries —
+/// the sealed layouts describe what a provider writes *under* its store, and
+/// that is the whole of what was measured (ADR 0016 D1).
+#[test]
+fn a_linked_project_or_session_is_outside_the_store_and_is_not_enumerated() {
+    let home = scratch("claude-symlink");
+    let outside = home.join("elsewhere/-root-other");
+    touch(&outside.join(format!("{A}.jsonl")), now());
+    touch(&outside.join(format!("{B}.jsonl")), now());
+
+    let projects = home.join(".claude/projects");
+    // A real session, so the assertion is about what is refused rather than
+    // about an empty store.
+    touch(
+        &projects.join("-root-proj").join(format!("{C}.jsonl")),
+        now(),
+    );
+    std::os::unix::fs::symlink(&outside, projects.join("-root-linked")).expect("linked project");
+    std::os::unix::fs::symlink(
+        outside.join(format!("{A}.jsonl")),
+        projects.join("-root-proj").join(format!("{B}.jsonl")),
+    )
+    .expect("linked session");
+
+    let entries = enumerate(
+        KnownProvider::Claude,
+        &store_root(KnownProvider::Claude, &home),
+        now(),
+        &Recent::default(),
+    );
+    let ids: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry.external_id.as_str())
+        .collect();
+    assert_eq!(ids, vec![C], "only the file the store itself holds");
+}

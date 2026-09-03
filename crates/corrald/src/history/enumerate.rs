@@ -74,34 +74,50 @@ pub fn layout_sealed(provider: KnownProvider, version: &str) -> bool {
     }
 }
 
-/// Whether the provider installed on this machine has a sealed store layout.
+/// The provider install this machine has, when the matrix sealed its store
+/// layout at that exact version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SealedInstall {
+    /// The executable the version was read from, canonicalized.
+    ///
+    /// Carried rather than re-derived: a bare program name resolved again at
+    /// exec is a second question, and an install upgraded in between answers
+    /// it differently. What was sealed is a version, and the only thing that
+    /// ties a version to a launch is running the file it was read from
+    /// (ADR 0016 D4).
+    pub executable: PathBuf,
+    pub version: String,
+}
+
+/// The sealed install, or `None` when this machine has none.
 ///
 /// Never cached: an install can be upgraded under a running daemon, and the
 /// answer must follow the binary that is there now — both for what may be
 /// enumerated and for what a row learned earlier may still be used for.
 /// Filesystem work, so callers on the reactor ask off it.
-pub fn sealed_here(provider: KnownProvider) -> bool {
-    let Some(executable) =
-        crate::provider::version::resolve_program(std::path::Path::new(program(provider)))
-    else {
-        return false;
-    };
+#[must_use]
+pub fn sealed_here(provider: KnownProvider) -> Option<SealedInstall> {
+    let executable =
+        crate::provider::version::resolve_program(std::path::Path::new(program(provider)))?;
     let Some(installed) = crate::provider::version::installed_version(provider, &executable) else {
         debug!(
             provider = provider.as_str(),
             "the installed version could not be read; its store is not enumerated",
         );
-        return false;
+        return None;
     };
-    let sealed = layout_sealed(provider, &installed.version);
-    if !sealed {
+    if !layout_sealed(provider, &installed.version) {
         debug!(
             provider = provider.as_str(),
             version = installed.version,
             "this version's store layout is unmeasured; its store is not enumerated",
         );
+        return None;
     }
-    sealed
+    Some(SealedInstall {
+        executable,
+        version: installed.version,
+    })
 }
 
 /// `sealed_here`, asked off the reactor.
@@ -111,10 +127,14 @@ pub fn sealed_here(provider: KnownProvider) -> bool {
 /// request, hook delivery and timer with it. A question this daemon could not
 /// put fails closed, because an unanswered sealing question is not a sealed
 /// one.
-pub async fn sealed_now(provider: KnownProvider, sealed: fn(KnownProvider) -> bool) -> bool {
+pub async fn sealed_now(
+    provider: KnownProvider,
+    sealed: fn(KnownProvider) -> Option<SealedInstall>,
+) -> Option<SealedInstall> {
     tokio::task::spawn_blocking(move || sealed(provider))
         .await
-        .unwrap_or(false)
+        .ok()
+        .flatten()
 }
 
 /// The store's recent sessions, newest first, one per identity.
@@ -131,7 +151,8 @@ pub fn enumerate(
         let Some(id) = identity_in_name(provider, &path) else {
             continue;
         };
-        let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
+        // The file's own time, never a link target's.
+        let Ok(modified) = std::fs::symlink_metadata(&path).and_then(|m| m.modified()) else {
             continue;
         };
         if oldest.is_some_and(|oldest| modified < oldest) {
@@ -231,16 +252,34 @@ fn looks_like_uuid(text: &str) -> bool {
 }
 
 fn directories(dir: &Path) -> Vec<PathBuf> {
-    entries(dir).into_iter().filter(|p| p.is_dir()).collect()
+    entries(dir)
+        .into_iter()
+        .filter_map(|(path, kind)| kind.is_dir().then_some(path))
+        .collect()
 }
 
 fn files(dir: &Path) -> Vec<PathBuf> {
-    entries(dir).into_iter().filter(|p| p.is_file()).collect()
+    entries(dir)
+        .into_iter()
+        .filter_map(|(path, kind)| kind.is_file().then_some(path))
+        .collect()
 }
 
-fn entries(dir: &Path) -> Vec<PathBuf> {
+/// Each entry with the kind of the entry itself.
+///
+/// `DirEntry::file_type` does not follow a symlink, and that is the point: the
+/// sealed layouts describe what a provider writes *under* its store, and a
+/// link is a name in the store pointing at a file that is not. Following one
+/// would enumerate whatever the filesystem can reach from there and call it a
+/// session the provider holds — a claim the measurement never made, carrying
+/// the assurance a history record is granted (ADR 0016 D1).
+fn entries(dir: &Path) -> Vec<(PathBuf, std::fs::FileType)> {
     std::fs::read_dir(dir)
-        .map(|read| read.filter_map(Result::ok).map(|e| e.path()).collect())
+        .map(|read| {
+            read.filter_map(Result::ok)
+                .filter_map(|entry| Some((entry.path(), entry.file_type().ok()?)))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
