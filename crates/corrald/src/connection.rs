@@ -1505,6 +1505,8 @@ struct ResumeSession {
     session: CorralSessionId,
     /// The disclosure revision the client says it showed, if any.
     disclosure_revision: Option<String>,
+    /// The directory this continuation was preflighted for.
+    working_directory: Option<std::path::PathBuf>,
 }
 
 /// Continue an existing Session's provider session as a new Run, exactly once
@@ -1561,18 +1563,21 @@ fn read_session_resume(request: &Request) -> Result<ResumeSession, ProtocolError
 
     let kind = CommandKind::new(method::SESSION_RESUME)
         .unwrap_or_else(|_| unreachable!("{} is a usable command kind", method::SESSION_RESUME));
-    // The Session is the whole of what this command means. There is no argv to
-    // fingerprint — Corral composes it from what it recorded — so a retry
-    // naming a different Session is a different command, and that is the only
-    // way this one can differ.
-    let fingerprint = CommandFingerprint::builder(kind)
-        .input("session", session.to_string())
-        .build();
+    // The Session is most of what this command means: Corral composes the argv
+    // from what it recorded rather than taking one. The directory is the rest,
+    // because a continuation of a session Corral knows only from a provider's
+    // history runs where the client says (Q35), so two requests naming the
+    // same Session and different directories are two different commands.
+    let mut fingerprint = CommandFingerprint::builder(kind).input("session", session.to_string());
+    if let Some(working_directory) = &params.working_directory {
+        fingerprint = fingerprint.input("working_directory", working_directory.clone());
+    }
 
     Ok(ResumeSession {
-        command: Command::new(command_id, fingerprint),
+        command: Command::new(command_id, fingerprint.build()),
         session,
         disclosure_revision: params.disclosure_revision,
+        working_directory: params.working_directory.map(std::path::PathBuf::from),
     })
 }
 
@@ -1600,7 +1605,8 @@ async fn session_continuation(request: &Request, state: &Arc<DaemonState>) -> Di
             return Dispatch::Reply(Frame::error(id, invalid(error.to_string())));
         }
     };
-    let decision = match continuation::decide(state, session).await {
+    let requested = params.working_directory.map(std::path::PathBuf::from);
+    let decision = match continuation::decide(state, session, requested.as_deref()).await {
         Ok(decision) => decision,
         Err(error) => return Dispatch::FailClosed(error),
     };
@@ -1648,6 +1654,7 @@ async fn execute_session_resume(
         command,
         session,
         disclosure_revision,
+        working_directory,
     } = resume;
 
     // The receipt first, and before the per-Session claim, because this answer
@@ -1680,7 +1687,9 @@ async fn execute_session_resume(
         });
     };
 
-    let plan = match continuation::decide(state, session).await {
+    // Recomputed, not remembered: the preflight left nothing behind, so this
+    // is the decision as it stands now, on the directory this call names.
+    let plan = match continuation::decide(state, session, working_directory.as_deref()).await {
         Ok(continuation::Decision::Eligible(plan)) => plan,
         Ok(continuation::Decision::Refused { code, reason }) => {
             return Ok(Concluded::Refused {

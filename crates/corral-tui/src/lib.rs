@@ -36,6 +36,8 @@ mod presentation;
 mod screen;
 
 pub use attach::{LocalKeys, OpenFailed, RawMode, open};
-pub use launch::{Continued, Requested, Shown, continue_session, requested, start_session};
+pub use launch::{
+    Continued, Requested, Shown, continue_session, requested, start_session, working_directory,
+};
 pub use list::{run, short_id};
 pub use presentation::{MainState, SessionPresentation, present, present_at};

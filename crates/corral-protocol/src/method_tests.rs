@@ -327,6 +327,7 @@ fn session_resume_names_only_a_command_and_a_session() {
         command_id: "c1".to_owned(),
         session_id: "s1".to_owned(),
         disclosure_revision: None,
+        working_directory: None,
     };
 
     let encoded = serde_json::to_value(&params).expect("encode");
@@ -665,8 +666,15 @@ fn a_history_row_carries_its_origin_and_recency() {
 fn a_continuation_preflight_carries_its_decision_and_revision() {
     assert_eq!(SESSION_CONTINUATION, "session.continuation");
     let params: SessionContinuationParams =
-        serde_json::from_value(json!({"session_id": "s"})).expect("decode");
+        serde_json::from_value(json!({"session_id": "s", "working_directory": "/w"}))
+            .expect("decode");
     assert_eq!(params.session_id, "s");
+    assert_eq!(params.working_directory.as_deref(), Some("/w"));
+    // A client that cannot name its own working directory says nothing rather
+    // than naming one, and the daemon refuses what needs one.
+    let silent: SessionContinuationParams =
+        serde_json::from_value(json!({"session_id": "s"})).expect("decode");
+    assert_eq!(silent.working_directory, None);
     let result = SessionContinuationResult {
         decision: CONTINUATION_ELIGIBLE_WITH_DISCLOSURE.to_owned(),
         reason: None,
@@ -698,10 +706,12 @@ fn a_continuation_preflight_carries_its_decision_and_revision() {
 #[test]
 fn session_resume_carries_the_disclosure_revision_it_showed() {
     let with: SessionResumeParams = serde_json::from_value(json!({
-        "command_id": "c", "session_id": "s", "disclosure_revision": "r1"
+        "command_id": "c", "session_id": "s", "disclosure_revision": "r1",
+        "working_directory": "/w"
     }))
     .expect("decode");
     assert_eq!(with.disclosure_revision.as_deref(), Some("r1"));
+    assert_eq!(with.working_directory.as_deref(), Some("/w"));
     let without: SessionResumeParams =
         serde_json::from_value(json!({"command_id": "c", "session_id": "s"})).expect("decode");
     assert_eq!(without.disclosure_revision, None);

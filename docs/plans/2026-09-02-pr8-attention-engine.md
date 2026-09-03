@@ -482,8 +482,11 @@ is told.
 
 ## Definition of done (PR8b)
 
-- Store layouts sealed by the matrix for both providers; ADR 0016
-  accepted; this workstream unblocked before any boundary was crossed.
+- Store layouts sealed by the matrix for both providers, keyed by the
+  exact versions measured and inheriting nothing; ADR 0016 accepted
+  2026-09-03 on durable version-specific evidence
+  (`docs/evidence/pr8b-history-store-and-resume-2026-09-02.md`), so this
+  workstream is unblocked.
 - B1–B5 implemented; `./scripts/verify` green; snapshot coverage present;
   the recent window recorded as tuning.
 - Never an empty first list when the sealed store holds recent sessions;
@@ -493,11 +496,10 @@ is told.
 - Continuation under test: the historical disclosure, external-live
   refusal, managed-live Open, Unverifiable refusal, stale
   `disclosure_revision` rejection, and `--yes` still preflighting.
-- `history::resume_location_sealed` answers true for a provider only
-  after the matrix has measured its `--resume` from a directory other
-  than the session's (done 2026-09-02: both providers resume from
-  anywhere and carry on there) *and* grill Q35 has ruled which directory
-  Corral continues a history row in and how the disclosure names it.
+- The directory a history row continues in is the initiating client's,
+  stated explicitly and never defaulted by the daemon; refused when
+  absent, relative, missing, or not a directory; named in the disclosure;
+  covered by the revision; revalidated on the way to a spawn (Q35).
 - Human-merged (Class C). Glossary entry landed; drift notes placed.
 
 ## Review checklist (PR8b)
@@ -573,6 +575,12 @@ semantics, and unverified versions meaning Limited awareness rather than
 inherited authority. Q1–Q34 do not reopen. What remains before PR8a lands
 is the review pass and the harness-isolation gate above.
 
+**ADR 0016 status.** Accepted 2026-09-03 on durable version-specific
+evidence (`docs/evidence/pr8b-history-store-and-resume-2026-09-02.md`);
+its decision frontier is closed and PR8b implements accepted architecture.
+PR8b lands after PR8a (grill Q11).
+
+
 **When the dogfood window may start (grill Q31).** PR8a merged; a human
 has advanced `STORAGE_EPOCH` to `dogfood`; the exercised
 provider/version/capability rows are sealed; diagnostics function and the
@@ -600,13 +608,6 @@ semantic-capable rule exists merely because code preceded evidence.
 
 ## Follow-ups
 
-- Test-support guard for the `corral` binary: `support::corrald_binary`
-  refuses a daemon built without the `CORRAL_TEST_ROOT` seam, but
-  `TestAccount::corral()` runs whatever `target/debug/corral` is, and a
-  concurrent plain `cargo build -p corral` during `./scripts/verify`
-  handed the attention e2e a binary that resolved the real account's
-  paths and tried to auto-start a daemon there (observed 2026-09-02;
-  nothing was written). The same image check belongs on both binaries.
 - S3 live-join census, then rungs 1–2: hook protocol decision-hold under
   the first-response lease (ADR 0004 D4's admission conditions), Claude
   IDE/MCP and Codex app-server channels.
@@ -707,17 +708,18 @@ carrying it back and refusing a missing or stale one with
 `stale_disclosure`; `corral continue --yes` still preflights, renders
 the disclosure it answered, and carries the revision. The fourth rung
 answers *eligible with disclosure* only once
-`history::resume_location_sealed` holds for the provider. The matrix has
-since measured that both providers resume an id from any directory and
-carry on there (ADR 0016, measured facts); a history row carries no
-location and Corral does not guess one, so which directory a continuation
-runs in — and how the disclosure names it — is grill Q35, open. Until it
-is ruled, a history row's continuation is refused with that said. Waiting on that measurement and
-on acceptance: the sealed layout rows, the composing store operation
-(Session + `HistoryBinding` at Attested + Run, one transaction) and the
-launch it precedes, the TUI's own disclosure prompt (the list currently
-hands the daemon's words and the `--yes` command line to the person),
-and the glossary and PRODUCT §8 prose.
+the client states a usable working directory: absolute, existing, a
+directory. Grill Q35 ruled it — the measured providers resume an id from
+anywhere and then run where they were started, so identity does not imply
+location and the daemon substitutes none — and the disclosure names the
+exact directory. The CLI and the TUI send their own working directory as
+client policy. The revision covers it, so changing directory after the
+preflight is refused as stale rather than started somewhere nobody saw. Still to build, now that ADR 0016 is accepted: the sealed
+layout rows keyed by the exact measured versions, the composing store
+operation (Session + `HistoryBinding` at Attested + Run, one transaction)
+and the launch it precedes, the TUI's own disclosure prompt (the list
+currently hands the daemon's words and the `--yes` command line to the
+person), and the glossary and PRODUCT §8 prose.
 
 ## Plan size justification
 

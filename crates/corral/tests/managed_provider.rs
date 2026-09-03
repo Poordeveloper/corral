@@ -1432,6 +1432,22 @@ fn a_continuation_preflight_says_yes_to_an_exited_session() {
     assert_eq!(result["decision"], "eligible", "{answer}");
     assert!(result.get("disclosure").is_none(), "{answer}");
     assert!(result.get("disclosure_revision").is_none(), "{answer}");
+
+    // A Session Corral launched keeps the working directory Corral recorded
+    // for it; a client's requested directory is what a history row needs, and
+    // naming one here neither changes the answer nor is silently adopted
+    // (Q35). An older client naming none gets the same answer, above.
+    let with_directory = client
+        .request(
+            3,
+            "session.continuation",
+            Some(json!({"session_id": session, "working_directory": "/tmp"})),
+        )
+        .expect("session.continuation answered");
+    assert_eq!(
+        with_directory["outcome"]["result"]["decision"], "eligible",
+        "{with_directory}"
+    );
     assert_eq!(script.launches().len(), 1, "asking spawns nothing");
 
     drop(daemon);

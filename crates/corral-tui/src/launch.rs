@@ -116,11 +116,14 @@ pub async fn continue_session(
     connection: &mut Connection,
     session_id: &str,
     shown: Shown,
+    working_directory: Option<&std::path::Path>,
 ) -> Result<Continued, RequestError> {
     serves_managed_sessions(connection)?;
+    let working_directory = working_directory.map(|path| path.to_string_lossy().into_owned());
     let decision = connection
         .session_continuation(SessionContinuationParams {
             session_id: session_id.to_owned(),
+            working_directory: working_directory.clone(),
         })
         .await?;
     let (disclosure_revision, disclosed) = match decision.decision.as_str() {
@@ -160,9 +163,22 @@ pub async fn continue_session(
             command_id,
             session_id: session_id.to_owned(),
             disclosure_revision,
+            // The directory the decision above was made on. Sending a
+            // different one is a different decision, and the daemon says so
+            // rather than starting a process somewhere nobody was shown.
+            working_directory,
         })
         .await
         .map(|started| Continued::Started { started, disclosed })
+}
+
+/// The directory this client asks a continuation to run in: its own working
+/// directory, which is client policy and never something the daemon supplies
+/// for it (Q35). `None` when the process cannot name its own, which refuses
+/// a continuation that needs one.
+#[must_use]
+pub fn working_directory() -> Option<std::path::PathBuf> {
+    std::env::current_dir().ok()
 }
 
 /// Whether the person has already been shown, and answered, whatever the

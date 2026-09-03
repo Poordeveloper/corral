@@ -717,6 +717,14 @@ pub struct SessionNewResult {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionContinuationParams {
     pub session_id: String,
+    /// The directory the initiating client wants the continuation to run in,
+    /// as that client's own policy decides (its cwd, today). It governs a
+    /// session Corral knows only from a provider's history, which carries no
+    /// location; the daemon never substitutes one of its own. Absent means
+    /// the client did not say, which refuses a continuation that needs it
+    /// rather than picking a directory for the person (ADR 0016 D5, Q35).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
 }
 
 /// The decisions this build names. Open on the decode side, read the way
@@ -773,6 +781,12 @@ pub struct SessionResumeParams {
     /// than assuming a person was told (ADR 0016 D5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disclosure_revision: Option<String>,
+    /// The same directory the preflight was asked about. The daemon recomputes
+    /// the decision from it, so a client that changed its mind after the
+    /// preflight gets a revision mismatch rather than a process in a
+    /// directory nobody was shown (Q35).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
 }
 
 /// `session.resume`'s result.

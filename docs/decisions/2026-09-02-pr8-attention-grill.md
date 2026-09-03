@@ -2775,6 +2775,9 @@ load-bearing fact failed and reopening exactly that ruling. Concrete
 sealed rules, sealed version rows, and noise-catalog entries are matrix
 evidence, not grill questions.
 
+**Superseded by round 5**, which split the two ADRs: 0016 is accepted, 0015
+stays proposed against nine named conditions.
+
 ## Q35 — the directory a history row continues in (opened by the matrix, 2026-09-02)
 
 Opened after the structural grill closed, because a measurement made it
@@ -2806,3 +2809,355 @@ surprises a person who knows the tool; the cwd is the one fact the
 launching client holds authoritatively; and (b) is available on top of it
 as `--in <dir>` later if the default proves wrong. (c) decides for the
 person and hides it.
+
+---
+
+# PR8 grill — round 5 rulings
+
+> Founder, 2026-09-03. Recorded verbatim. Split deliberately: Q35 is decided,
+> ADR 0016 may close, ADR 0015 may not, and the e2e binary footgun becomes a
+> merge gate.
+
+这里我会分开裁：**Q35 现在定；ADR 0016 可以独立收口；ADR 0015 还不能翻 accepted。** 另外你碰到的 e2e 二进制覆盖问题，我会从 follow-up 升为 PR8 merge gate。
+
+## Q35 — historical continuation working directory
+
+裁决：使用发起客户端明确提供的 working directory。
+
+对于 pure history row：
+
+client working directory
+→ becomes the requested continuation working directory
+
+daemon MUST NOT fall back to:
+
+* daemon cwd
+* inferred Claude project-directory path
+* provider history file location
+* home directory
+* last guessed location
+
+If the client does not provide a working directory:
+
+→ continuation refused
+
+rather than silently choosing one.
+
+This is especially important because the measured provider behavior shows
+that resume identity and working directory are independent:
+
+Claude Code 2.1.258:
+
+* resume from another cwd succeeds
+* provider session id remains unchanged
+* original session history continues
+* resumed process adopts the new cwd
+
+Codex 0.152.0:
+
+* resume from another cwd succeeds
+* thread id remains unchanged
+* same rollout continues
+* the new turn records the new cwd
+
+Therefore the cwd is not recoverable merely from provider session identity.
+
+Corral must make the choice explicit.
+
+### Wire shape
+
+`session.continuation` request must include the proposed working directory
+when the continuation requires spawning a new process.
+
+Conceptually:
+
+session.continuation {
+session_id,
+working_directory
+}
+
+The response disclosure and `disclosure_revision` are calculated from,
+and therefore bound to:
+
+* session identity
+* current live/run facts
+* continuation decision
+* provider
+* requested working directory
+* other facts already used by the continuation ladder
+
+`session.resume` must carry:
+
+* session_id
+* working_directory
+* disclosure_revision
+
+The daemon recomputes the decision.
+
+Changing the working directory after preflight:
+
+→ disclosure revision mismatch
+→ fresh preflight required
+
+Do not make `disclosure_revision` a server-side temporary lease that
+requires remembering the preflight request.
+
+It remains a correlation over the decision facts.
+
+### Client policy
+
+For PR8b:
+
+CLI:
+→ default requested cwd = the CLI process's current cwd
+
+TUI:
+→ default requested cwd = the cwd from which that TUI client was launched
+
+The client sends it explicitly.
+
+This is client policy, not daemon ambient-state fallback.
+
+A future directory picker may replace that client default without changing
+the continuation semantics.
+
+For a Corral-known Session with an exact trusted cwd, clients may display
+that location as context, but a pure historical continuation must not
+silently substitute it for the initiating client's requested cwd unless a
+future UX explicitly defines that behavior.
+
+### Disclosure
+
+For a pure historical row:
+
+“Corral can't tell whether this session is still running somewhere else.
+Continuing starts another Claude Code process for this session in
+`<working directory>`.”
+
+Provider name is dynamic.
+
+The important facts disclosed are:
+
+1. liveness elsewhere is unknown;
+2. another provider process will be started;
+3. the exact directory in which Corral will start it.
+
+`--yes` still means only:
+
+skip interactive CLI confirmation for this current disclosure
+
+and still performs:
+
+preflight
+→ render disclosure
+→ resume with matching disclosure_revision
+
+### Validation
+
+Before eligible preflight/spawn:
+
+working directory must be:
+
+* explicitly supplied
+* representable as the platform path type
+* currently existent
+* a directory
+
+The spawn path must revalidate the directory sufficiently to avoid turning
+a stale preflight into silent fallback.
+
+If it disappears or becomes unusable:
+
+→ spawn/continuation failure
+→ never substitute another directory
+
+Core invariant:
+
+A historical provider identity tells Corral what to resume.
+It does not tell Corral where the resumed process should run.
+
+## ADR acceptance reconciliation
+
+### ADR 0016 — history / continuation
+
+Founder decision frontier is now closed.
+
+Q35 resolves the remaining working-directory policy.
+
+ADR 0016 may move:
+
+proposed → accepted
+
+once the reported history/resume measurements are committed as durable
+evidence with:
+
+* exact provider version
+* exact command/fixture shape
+* observed session/thread identity behavior
+* observed cwd behavior
+* history-file behavior
+
+The current evidence must remain version-specific.
+
+In particular:
+
+Codex 0.152.0 resume/cwd evidence
+does NOT automatically seal Codex 0.145.0 for that same fact.
+
+No further founder grill is required for ADR 0016 unless committing the
+evidence reveals a contradiction.
+
+### ADR 0015 — attention
+
+DO NOT move to accepted yet.
+
+Keep:
+
+status: proposed
+
+Reason:
+
+The previously accepted closing condition was empirical, not merely
+structural.
+
+The current update reports implementation work and resume/history
+measurements, but it does not establish completion of the full Q21
+attention matrix.
+
+ADR 0015 may move to accepted only after reconciliation confirms all of:
+
+1. the attention matrix evidence artifact exists;
+
+2. every required Q21 scenario has:
+
+   * capture/result, or
+   * explicit measured unsupported/not-present result;
+
+3. current provider/version rows are explicit;
+
+4. every semantic-capable event/screen rule is sealed by human-reviewed
+   evidence;
+
+5. `sealed_by` points to the actual reviewed evidence/commit;
+
+6. Claude `Notification` variants have been enumerated and classified,
+   with unknown/unsealed variants remaining diagnostic only;
+
+7. initial provider noise catalog exists and relevant fixtures cite it;
+
+8. each ADR 0015 load-bearing fact points to:
+
+   * measured evidence,
+   * an earlier accepted invariant,
+   * or an explicitly non-load-bearing unresolved limitation;
+
+9. glossary / ARCHITECTURE / PRODUCT wording has been reconciled with:
+
+   * received Attested hook evidence may directly support its positive
+     claim;
+   * assurance is claim-scoped;
+   * capability-scoped support/release semantics;
+   * unverified versions mean Limited awareness, not inherited authority.
+
+Once those are true:
+
+→ acceptance reconciliation only
+→ proposed → accepted
+
+No reopening of Q1–Q34.
+
+## PR8 implementation status before ADR 0015 acceptance
+
+The work you described remains allowed under Q32.
+
+In particular these can exist on the branch before acceptance:
+
+* activity → Working mechanics
+* pure attention engine
+* journal
+* protocol/item identity
+* echo discount mechanics
+* history enumerator
+* continuation preflight framework
+* disclosure revision machinery
+
+provided unsealed provider-specific semantics remain incapable of granting
+semantic authority.
+
+So PR8b being developed on top of PR8a is fine.
+
+Neither PR may merge across an unaccepted load-bearing ADR boundary.
+
+## E2E binary contamination footgun
+
+Promote this from Follow-up to:
+
+PR8 MERGE GATE
+
+Reason:
+
+The test harness allowed a concurrently rebuilt production `corral`
+binary to be used by attention e2e tests.
+
+That caused tests intended to operate in isolated test state to reach the
+real user namespace and start a daemon using `~/.corral`.
+
+The observed damage was small:
+
+* log writes only
+* no registry mutation
+* no Session creation
+
+but the invariant violation is not small.
+
+A test suite must not depend on:
+
+“nobody happens to rebuild this binary while verify is running.”
+
+Before PR8a or PR8b merge, test support must ensure:
+
+1. both `corral` and `corrald` binaries used by e2e are validated as the
+   intended test-support build;
+
+2. a wrong/non-test binary causes the harness to fail BEFORE starting the
+   process;
+
+3. e2e execution cannot silently fall back to the user's canonical Corral
+   endpoint/state paths;
+
+4. concurrent ordinary `cargo build -p corral` cannot redirect an
+   in-progress test to a production binary;
+
+5. there is a permanent regression test for the wrong-binary case.
+
+The exact implementation may use:
+
+* immutable copied test binaries,
+* build-specific paths,
+* a test-only build marker/handshake,
+* or an equivalent fail-closed mechanism.
+
+Do not change production daemon identity/rendezvous semantics merely to fix
+the test harness.
+
+This is not a new Class C product decision.
+
+It is a correctness/isolation defect in verification infrastructure.
+
+Core invariant:
+
+A Corral e2e test must fail rather than touch the user's real Corral state
+when its expected test binaries or isolation contract are not present.
+
+所以当前状态我会记成：
+
+**ADR 0016：Q35 后可以收 accepted。ADR 0015：继续 proposed，等 Q21 matrix evidence 回来做最后一次 reconciliation。**
+
+另外，`task/pr8b-history` 现在继续开发没问题，但我不会让它先于 `task/pr8-attention` 合并；而那个 test-support footgun 要在两条 PR 任何一条 merge 前修掉。它已经证明 `verify` 的隔离正确性存在实际竞态，不应留到后续。
+
+## What round 5 leaves open
+
+ADR 0015 only: the Q21 acceptance reconciliation against the nine conditions
+above. ADR 0016 is closed. Q35's answer is implemented on
+`task/pr8b-history`; the store operation and spawn that a history-row
+continuation still needs are ordinary PR8b work under it.

@@ -6,6 +6,7 @@
 //! reads, and binds a disclosure to the exact decision it was made for.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use corral_core::{CorralSessionId, ExternalId, Provenance};
@@ -61,10 +62,82 @@ pub(crate) enum LiveRun {
 /// conversation something else may still be using.
 pub(crate) const HISTORY_LIVE_STATE_UNKNOWN: &str = "history-live-state-unknown";
 
+/// Why a requested continuation directory cannot be used.
+///
+/// Each of these is a refusal rather than an occasion to choose a directory:
+/// a provider resumes wherever it is started, so picking one for the person
+/// would decide, silently, where their agent runs (Q35).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DirectoryRefusal {
+    NotSupplied,
+    /// A relative path would resolve against whatever working directory this
+    /// daemon happens to have, which is the ambient fallback Q35 forbids.
+    Relative(PathBuf),
+    Missing(PathBuf),
+    NotADirectory(PathBuf),
+}
+
+impl std::fmt::Display for DirectoryRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSupplied => f.write_str(
+                "Corral needs to be told which directory to continue this session in; it will \
+                 not choose one",
+            ),
+            Self::Relative(path) => write!(
+                f,
+                "the directory to continue in has to be an absolute path, and {} is not",
+                path.display()
+            ),
+            Self::Missing(path) => write!(f, "{} does not exist", path.display()),
+            Self::NotADirectory(path) => write!(f, "{} is not a directory", path.display()),
+        }
+    }
+}
+
+/// The directory a continuation will run in, or why there is none.
+///
+/// Checked again on the way to a spawn, because a preflight's answer is about
+/// the moment it was asked; a directory that has since gone fails the
+/// continuation rather than falling back to another one (Q35).
+pub(crate) fn usable_directory(requested: Option<&Path>) -> Result<PathBuf, DirectoryRefusal> {
+    let Some(requested) = requested.filter(|path| !path.as_os_str().is_empty()) else {
+        return Err(DirectoryRefusal::NotSupplied);
+    };
+    if !requested.is_absolute() {
+        return Err(DirectoryRefusal::Relative(requested.to_path_buf()));
+    }
+    let metadata = std::fs::metadata(requested)
+        .map_err(|_| DirectoryRefusal::Missing(requested.to_path_buf()))?;
+    if !metadata.is_dir() {
+        return Err(DirectoryRefusal::NotADirectory(requested.to_path_buf()));
+    }
+    Ok(requested.to_path_buf())
+}
+
+/// What a person is told before a history row is continued (ADR 0016 D4).
+///
+/// Three facts, and no fourth: liveness elsewhere is unknown, another
+/// provider process will be started, and this is exactly where.
+pub(crate) fn disclosure_text(provider: KnownProvider, directory: &Path) -> String {
+    format!(
+        "Corral can't tell whether this session is still running somewhere else. Continuing \
+         starts another {} process for this session in {}.",
+        product_name(provider),
+        directory.display()
+    )
+}
+
 /// Decide, without spawning anything.
+///
+/// `requested` is the directory the initiating client says it wants the
+/// continuation to run in. It governs a history row, which has no location of
+/// its own; a Session Corral launched keeps the working directory Corral
+/// recorded for it, which the ladder reads from the runtime.
 pub(crate) async fn decide(
     state: &Arc<DaemonState>,
     session: CorralSessionId,
+    requested: Option<&Path>,
 ) -> Result<Decision, corral_state::StateError> {
     let refused = match resume_plan(state, session).await? {
         Ok(plan) => return Ok(Decision::Eligible(plan)),
@@ -73,7 +146,7 @@ pub(crate) async fn decide(
     if let ResumeRefused::IdentityUnknown = refused
         && let Some(Some(row)) = state.with_runtime(|runtime| runtime.history.row(session).cloned())
     {
-        return Ok(history_row(session, &row));
+        return Ok(history_row(session, &row, requested));
     }
     let live = match refused {
         ResumeRefused::EndUnverifiable | ResumeRefused::RunStillLive => {
@@ -88,22 +161,28 @@ pub(crate) async fn decide(
 }
 
 /// The fourth rung: no Run is known, so nothing says the conversation is not
-/// in use elsewhere. Eligible with that said — once the matrix has sealed
-/// that the provider resumes an id from a directory other than the one it
-/// was started in, because Corral does not know that directory and will not
-/// guess it (ADR 0016 D3).
-fn history_row(session: CorralSessionId, row: &history::HistoryRow) -> Decision {
+/// in use elsewhere. Eligible with that said, in the directory the client
+/// asked for — the store holds no location, and both providers resume an id
+/// from anywhere and carry on there (ADR 0016, measured), so the directory is
+/// Corral's to be told and never to guess (Q35).
+fn history_row(
+    session: CorralSessionId,
+    row: &history::HistoryRow,
+    requested: Option<&Path>,
+) -> Decision {
     let provider = row.entry.provider;
-    if !history::resume_location_sealed(provider) {
-        return Decision::Refused {
-            code: ErrorCode::SessionNotContinuable,
-            reason: format!(
-                "Corral found this session in {}'s history but doesn't know where it ran, so it \
-                 can't continue it yet.",
-                product_name(provider)
-            ),
-        };
-    }
+    let directory = match usable_directory(requested) {
+        Ok(directory) => directory,
+        Err(refusal) => {
+            return Decision::Refused {
+                code: ErrorCode::SessionNotContinuable,
+                reason: format!(
+                    "Corral found this session in {}'s history, and {refusal}.",
+                    product_name(provider)
+                ),
+            };
+        }
+    };
     let last_active = row
         .entry
         .last_active
@@ -112,11 +191,7 @@ fn history_row(session: CorralSessionId, row: &history::HistoryRow) -> Decision 
     Decision::EligibleWithDisclosure {
         disclosure: Disclosure {
             code: HISTORY_LIVE_STATE_UNKNOWN,
-            text: format!(
-                "Corral can't tell whether this session is still running somewhere else. \
-                 Continuing here starts another {} process for this session.",
-                product_name(provider)
-            ),
+            text: disclosure_text(provider, &directory),
         },
         revision: revision(
             session,
@@ -124,6 +199,7 @@ fn history_row(session: CorralSessionId, row: &history::HistoryRow) -> Decision 
             provider,
             &row.entry.external_id,
             last_active,
+            &directory,
         ),
     }
 }
@@ -157,6 +233,7 @@ pub(crate) fn revision(
     provider: KnownProvider,
     external_id: &ExternalId,
     last_active_unix_ms: u64,
+    directory: &Path,
 ) -> String {
     let mut hasher = DefaultHasher::new();
     session.to_string().hash(&mut hasher);
@@ -164,6 +241,7 @@ pub(crate) fn revision(
     provider.as_str().hash(&mut hasher);
     external_id.as_str().hash(&mut hasher);
     last_active_unix_ms.hash(&mut hasher);
+    directory.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 

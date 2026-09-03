@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 read_when:
   - listing a session Corral has never seen run
   - reading a provider's session store or history directory for any purpose
@@ -7,10 +7,12 @@ read_when:
   - adding a provider whose session store has a different shape
 ---
 
-> Structural rulings founder-accepted 2026-09-02, rounds 1–4
-> (`docs/decisions/2026-09-02-pr8-attention-grill.md`); the ADR stays
-> proposed until the PR8 matrix measures the load-bearing facts below and
-> an acceptance reconciliation finds grill Q32's closing conditions met.
+> Accepted 2026-09-03. Structural rulings founder-accepted 2026-09-02,
+> rounds 1–4; the working-directory policy in D5 is round 5's Q35
+> (`docs/decisions/2026-09-02-pr8-attention-grill.md`). The load-bearing
+> store and resume facts are measured, version-specific, and durable in
+> `docs/evidence/pr8b-history-store-and-resume-2026-09-02.md`: they seal
+> Claude Code 2.1.258 and Codex 0.152.0 and no other version.
 
 # History-enumerated sessions: what a provider's own store may claim, and when Continue in Corral is offered
 
@@ -150,15 +152,19 @@ external Run open (discovered, Attested)    unavailable in this phase:
                                             unavailable while this
                                             session remains live."
 last Run ended Exited (any origin)          eligible
-no Run known (a history row)                eligible with a disclosure:
-                                            "Corral can't tell whether
-                                            this session is still running
-                                            somewhere else. Continuing
-                                            here starts another <Provider>
-                                            process for this session."
+no Run known (a history row)                eligible with a disclosure,
+                                            in the directory the client
+                                            stated (D5): "Corral can't
+                                            tell whether this session is
+                                            still running somewhere else.
+                                            Continuing starts another
+                                            <Provider> process for this
+                                            session in <directory>."
                                             — possible concurrency, never
                                             a claim another process
-                                            exists (grill Q33)
+                                            exists (grill Q33); refused
+                                            outright if no usable
+                                            directory was stated
 ```
 
 The second row is a phase limitation, and it is never written down as the
@@ -199,6 +205,30 @@ flag was rejected because it cannot say *which* disclosure a client
 showed, and a stale one would let a person continue under yesterday's
 answer.
 
+**Where a history row is continued (grill Q35).** A store entry supplies no
+directory, and the measured providers resume an id from anywhere and then
+run *in the directory they were started in*
+(`docs/evidence/pr8b-history-store-and-resume-2026-09-02.md`). So identity
+does not imply location, and the location is stated by the initiating
+client: `session.continuation` and `session.resume` both carry a
+`working_directory`, and the daemon never substitutes its own working
+directory, a path decoded from the provider's store label, the store file's
+location, the account home, or a previous guess. A continuation that needs a
+directory and was given none is refused, not defaulted. The directory must
+be absolute, exist, and be a directory; it is checked again on the way to a
+spawn, and a directory that has since gone fails the continuation rather
+than falling back to another one. Which directory a client asks for is that
+client's policy — the CLI and the TUI send their own working directory — and
+a later directory picker replaces that default without changing any of this.
+A Session Corral launched keeps the working directory Corral recorded for
+it; a requested directory neither overrides that nor is silently adopted
+from it.
+
+The requested directory is one of the facts the decision is computed from,
+so it is one of the facts the revision covers: changing directory after the
+preflight is a different decision, and the resume is refused rather than
+starting a process somewhere nobody was shown.
+
 The revision means one thing: the client obtained the disclosure
 associated with this exact continuation decision. A client convenience
 that skips its own confirmation step — `corral continue --yes` — still
@@ -230,8 +260,12 @@ when one was needed would be a client deriving eligibility.
 
 ## Load-bearing facts, measured and open
 
-Measured 2026-09-02 (`docs/references/2026-09-02-pr8-attention-matrix.md`,
-"Session stores"):
+Measured 2026-09-02, durable in
+`docs/evidence/pr8b-history-store-and-resume-2026-09-02.md` (narrative in
+`docs/references/2026-09-02-pr8-attention-matrix.md`). Every fact below is
+sealed for **Claude Code 2.1.258 and Codex 0.152.0 only**; a version whose
+layout has not been measured is not enumerated, and the founder's macOS
+installs (2.1.252, 0.145.0) inherit nothing (grill Q28):
 
 - Claude 2.1.258 files one `<uuid>.jsonl` per session, headless `-p`
   runs included, beside a `memory/` directory; no sub-agent files
@@ -248,15 +282,14 @@ Measured 2026-09-02 (`docs/references/2026-09-02-pr8-attention-matrix.md`,
   separate ruling grill Q9/Q25 reserved.
 
 Resume from a directory other than the session's, measured 2026-09-02 on
-the same versions (matrix record, "Resume from a directory other than the
-session's"): both providers resolve the id without its directory, append
-the new turn to the original file, keep the id, and carry on with the new
-directory as the working directory — Codex records it in the rollout,
-Claude files a `memory/` under the new directory's project name. So D4's
-fourth rung is mechanically possible from anywhere, and the directory a
-history row is continued in is Corral's choice, not the store's; D5's
-disclosure has to name it. Which directory, and who supplies it, is
-grill Q35 and is not decided here.
+these versions and recorded in
+`docs/evidence/pr8b-history-store-and-resume-2026-09-02.md`: both providers
+resolve the id without its directory, append the new turn to the original
+file, keep the id, and carry on with the new directory as the working
+directory — Codex records it in the rollout, Claude files a `memory/` under
+the new directory's project name. So D4's fourth rung is mechanically
+possible from anywhere, and the directory is not the store's to supply;
+D5 says whose it is and that the disclosure names it.
 
 Still open, and none of it load-bearing for the decisions above: whether
 resuming touches Claude's file time; how a headless Codex rollout is told

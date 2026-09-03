@@ -548,7 +548,7 @@ async fn continuing_a_live_external_session_is_refused_without_asserting_it_runs
         .expect("looked up")
         .expect("a session");
 
-    let decision = crate::continuation::decide(&registry.state, session)
+    let decision = crate::continuation::decide(&registry.state, session, None)
         .await
         .expect("decided");
     let crate::continuation::Decision::Refused { reason, .. } = decision else {

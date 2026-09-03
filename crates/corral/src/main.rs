@@ -478,7 +478,15 @@ async fn continue_session(connection: &mut Connection, session: &str, yes: bool)
     } else {
         corral_tui::Shown::NotYet
     };
-    let continued = match corral_tui::continue_session(connection, &resolved, shown).await {
+    let directory = corral_tui::working_directory();
+    let continued = match corral_tui::continue_session(
+        connection,
+        &resolved,
+        shown,
+        directory.as_deref(),
+    )
+    .await
+    {
         Ok(corral_tui::Continued::Started { started, disclosed }) => {
             if let Some(disclosed) = disclosed {
                 eprintln!("{disclosed}");

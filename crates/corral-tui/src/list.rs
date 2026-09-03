@@ -419,6 +419,9 @@ async fn continue_into(
     session: &str,
     keys: &mut LocalKeys,
 ) -> Option<String> {
+    // The TUI's own working directory, read before the borrow below: client
+    // policy, and the only directory this surface may ask for (Q35).
+    let directory = crate::launch::working_directory();
     let continued = {
         let connection = match daemon.connection() {
             Ok(connection) => connection,
@@ -426,7 +429,12 @@ async fn continue_into(
         };
         match tokio::time::timeout(
             ANSWER,
-            crate::launch::continue_session(connection, session, crate::launch::Shown::NotYet),
+            crate::launch::continue_session(
+                connection,
+                session,
+                crate::launch::Shown::NotYet,
+                directory.as_deref(),
+            ),
         )
         .await
         {
