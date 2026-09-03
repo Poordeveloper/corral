@@ -701,7 +701,6 @@ async fn a_journal_that_lost_a_record_it_could_not_mark_refuses_to_report() {
             },
         )],
     );
-    std::fs::set_permissions(&diagnostics, PermissionsExt::from_mode(0o700)).expect("restore");
 
     assert!(
         registry.state.journal_unreportable(),
@@ -711,6 +710,74 @@ async fn a_journal_that_lost_a_record_it_could_not_mark_refuses_to_report() {
         error_code(dispatch(&request(method::ATTENTION_REPORT, None), &registry.state).await).0,
         ErrorCode::Busy
     );
+    std::fs::set_permissions(&diagnostics, PermissionsExt::from_mode(0o700)).expect("restore");
+}
+
+/// The mark is the only durable thing that says a record is missing, so the
+/// refusal has to end by writing it, never by the process that noticed going
+/// away. A restart used to clear an in-memory flag and let the day read as a
+/// complete count of what happened — the quietly smaller number this whole
+/// path exists to prevent (ADR 0015 D8).
+#[tokio::test]
+async fn a_mark_that_could_not_be_written_lands_when_it_can_and_survives_a_restart() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let registry = Registry::new("journal-mark-retried");
+    let diagnostics = registry.directory.join("diagnostics");
+    let opened = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_788_350_400);
+    registry.state.attach_journal(
+        crate::attention::Journal::open(&diagnostics, crate::attention::Budget::default(), opened)
+            .expect("journal"),
+    );
+    let dispute = || {
+        vec![crate::attention::Record::Dispute(
+            crate::attention::DisputeRecord {
+                session: corral_core::CorralSessionId::mint(),
+                item: None,
+                stale: false,
+            },
+        )]
+    };
+    registry.state.journal_append(opened, dispute());
+
+    let next_day = opened + std::time::Duration::from_secs(24 * 60 * 60);
+    std::fs::set_permissions(&diagnostics, PermissionsExt::from_mode(0o500)).expect("chmod");
+    registry.state.journal_append(next_day, dispute());
+    assert_eq!(
+        error_code(dispatch(&request(method::ATTENTION_REPORT, None), &registry.state).await).0,
+        ErrorCode::Busy,
+        "nothing on disk says the record is missing"
+    );
+
+    // The filesystem comes back. The refusal ends by the mark landing.
+    std::fs::set_permissions(&diagnostics, PermissionsExt::from_mode(0o700)).expect("restore");
+    let value =
+        result_value(dispatch(&request(method::ATTENTION_REPORT, None), &registry.state).await);
+    let marked = value["days"]
+        .as_array()
+        .expect("days")
+        .iter()
+        .find(|day| day["incomplete"] == true)
+        .expect("the day whose record was lost")
+        .clone();
+    assert_eq!(marked["disputes"], 0);
+
+    // A restart: another daemon, the same diagnostics directory. The day it
+    // reads is the day the mark made, not a complete one.
+    let restarted = Registry::new("journal-mark-restarted");
+    restarted.state.attach_journal(
+        crate::attention::Journal::open(&diagnostics, crate::attention::Budget::default(), opened)
+            .expect("journal"),
+    );
+    let after =
+        result_value(dispatch(&request(method::ATTENTION_REPORT, None), &restarted.state).await);
+    let still = after["days"]
+        .as_array()
+        .expect("days")
+        .iter()
+        .find(|day| day["date"] == marked["date"])
+        .expect("the same day");
+    assert_eq!(still["incomplete"], true, "a restart repairs nothing");
 }
 
 /// The scenario the marker exists for: a day is written, a later record

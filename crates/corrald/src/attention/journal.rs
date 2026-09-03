@@ -87,9 +87,13 @@ pub enum Record {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Appended {
     Written,
-    /// The day's budget is exhausted; the record was not written and the
-    /// day is marked incomplete.
-    Incomplete,
+    /// This record is the one the day's budget could not fit: it was not
+    /// written, and the day is marked. Said once per day, on the record that
+    /// crossed the line.
+    BudgetExhausted,
+    /// The day was already partial before this record arrived, so it was not
+    /// written either. Not a new fact about the day.
+    DayAlreadyIncomplete,
 }
 
 /// The journal writer for this daemon.
@@ -98,6 +102,13 @@ pub struct Journal {
     budget: Budget,
     seq: u64,
     day: Option<OpenDay>,
+    /// Days known to be partial whose marker could not be written yet.
+    ///
+    /// The only durable statement that a record is missing is the marker on
+    /// disk, so a day in here is a day no report may describe. Retried until
+    /// it lands, because the filesystem problem that lost the record is
+    /// usually not permanent — and a restart is not what repairs it.
+    unmarked: std::collections::BTreeSet<CivilDate>,
 }
 
 struct OpenDay {
@@ -117,6 +128,7 @@ impl Journal {
             budget,
             seq: 0,
             day: None,
+            unmarked: std::collections::BTreeSet::new(),
         };
         journal.prune(now)?;
         Ok(journal)
@@ -145,10 +157,10 @@ impl Journal {
             });
         }
         let Some(day) = self.day.as_mut() else {
-            return Ok(Appended::Incomplete);
+            return Ok(Appended::DayAlreadyIncomplete);
         };
         if day.incomplete {
-            return Ok(Appended::Incomplete);
+            return Ok(Appended::DayAlreadyIncomplete);
         }
         self.seq += 1;
         let mut line = encode(&record, now, self.seq).to_string();
@@ -158,7 +170,7 @@ impl Journal {
             // records away: the marker says the day's evidence is partial.
             day.incomplete = true;
             write_marker(&self.dir, date)?;
-            return Ok(Appended::Incomplete);
+            return Ok(Appended::BudgetExhausted);
         }
         day.file.write_all(line.as_bytes())?;
         day.written += line.len() as u64;
@@ -174,13 +186,34 @@ impl Journal {
     /// no report can describe honestly (ADR 0015 D8).
     pub fn mark_incomplete(&mut self, now: SystemTime) -> std::io::Result<()> {
         let date = CivilDate::of(now);
-        write_marker(&self.dir, date)?;
-        if let Some(day) = self.day.as_mut()
-            && day.date == date
-        {
-            day.incomplete = true;
+        match write_marker(&self.dir, date) {
+            Ok(()) => {
+                self.unmarked.remove(&date);
+                Ok(())
+            }
+            Err(source) => {
+                // Held so it can be tried again. Until it lands there is
+                // nothing on disk saying this day is short a record, and the
+                // daemon must not let a report claim otherwise.
+                self.unmarked.insert(date);
+                Err(source)
+            }
         }
-        Ok(())
+    }
+
+    /// Try again to mark every day still waiting for one, and answer how many
+    /// are still unmarked.
+    ///
+    /// Called wherever the answer matters — before a report is served — so a
+    /// filesystem that recovers turns into a day the report calls INCOMPLETE
+    /// rather than into a daemon that refuses forever.
+    pub fn settle_marks(&mut self) -> usize {
+        for date in std::mem::take(&mut self.unmarked) {
+            if write_marker(&self.dir, date).is_err() {
+                self.unmarked.insert(date);
+            }
+        }
+        self.unmarked.len()
     }
 
     /// Remove every day past retention, marker included.

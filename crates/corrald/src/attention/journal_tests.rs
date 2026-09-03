@@ -132,8 +132,16 @@ fn exhausting_the_day_budget_marks_the_day_incomplete_and_keeps_earlier_records(
         );
     }
     assert!(outcomes.contains(&Appended::Written));
-    assert!(outcomes.contains(&Appended::Incomplete));
-    assert_eq!(outcomes.last(), Some(&Appended::Incomplete));
+    // Said once, on the record that crossed the line; every record after it
+    // is refused for a day already known to be partial.
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|o| **o == Appended::BudgetExhausted)
+            .count(),
+        1
+    );
+    assert_eq!(outcomes.last(), Some(&Appended::DayAlreadyIncomplete));
     let written = outcomes.iter().filter(|o| **o == Appended::Written).count();
     let file =
         std::fs::read_to_string(dir.join("attention-journal-2026-09-02.jsonl")).expect("file");

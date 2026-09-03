@@ -136,8 +136,6 @@ pub struct DaemonState {
     /// directory that could not be made — and derivation carries on either
     /// way: diagnostics never gate product state.
     journal: Mutex<Option<crate::attention::Journal>>,
-    /// Set when a record was lost and the day could not be marked.
-    journal_unreportable: AtomicBool,
     /// The sessions this daemon is running, and the tokens it has issued for
     /// their terminals.
     ///
@@ -206,7 +204,6 @@ impl DaemonState {
             commands: InFlightCommands::new(),
             detection: crate::detection::load_built_in(Some(&state_dir.join("manifests"))),
             journal: Mutex::new(None),
-            journal_unreportable: AtomicBool::new(false),
             runtime: Mutex::new(Runtime::default()),
         })
     }
@@ -244,8 +241,6 @@ impl DaemonState {
         records: Vec<crate::attention::Record>,
     ) {
         let Ok(mut slot) = self.journal.lock() else {
-            // Nobody can write the day, and nobody can mark it either.
-            self.journal_unreportable.store(true, Ordering::Release);
             return;
         };
         // No journal attached is not a journal that failed: a daemon without
@@ -257,12 +252,17 @@ impl DaemonState {
         for record in records {
             match journal.append(now, record) {
                 Ok(crate::attention::Appended::Written) => {}
-                Ok(crate::attention::Appended::Incomplete) => {
+                Ok(crate::attention::Appended::BudgetExhausted) => {
                     tracing::warn!(
                         "the attention journal's day budget is exhausted; \
                          the day's records stop here and it is marked incomplete"
                     );
                 }
+                // Already known and already said. Repeating it every record
+                // until the day rolls over would bury the one that mattered,
+                // and for a day marked by an I/O failure it would name the
+                // wrong cause.
+                Ok(crate::attention::Appended::DayAlreadyIncomplete) => {}
                 Err(source) => {
                     tracing::warn!(%source, "an attention journal record could not be written");
                     // The record is gone, and nothing on disk would say so.
@@ -273,23 +273,35 @@ impl DaemonState {
                         tracing::warn!(
                             %marker,
                             "the attention journal could not be marked incomplete; \
-                             reporting is refused until this daemon restarts"
+                             reporting is refused until the mark lands"
                         );
-                        self.journal_unreportable.store(true, Ordering::Release);
                     }
                 }
             }
         }
     }
 
-    /// Whether a record was lost with nothing left on disk to say so.
+    /// Whether a record was lost with nothing on disk to say so, after one
+    /// more attempt to put it there.
     ///
-    /// Sticky for the daemon's life: the day it happened cannot be repaired,
-    /// and a report that omitted it would be the silently incomplete evidence
-    /// D8 forbids. `attention.report` refuses rather than answering a smaller
-    /// count.
+    /// Not a flag this process sets and clears: the condition is a day whose
+    /// marker has not landed, and the answer is derived from that each time.
+    /// A filesystem that recovers therefore turns into a day the report calls
+    /// INCOMPLETE — durably, across restarts — instead of a daemon that
+    /// refuses forever or, worse, one that forgets on the way up. A journal
+    /// lock nobody can take is the same case: nothing can be written and
+    /// nothing can be marked.
+    ///
+    /// What no daemon can carry across a restart is a mark that was never
+    /// written at all, because a filesystem that refuses the marker refuses
+    /// every other byte too. The window is bounded by how soon it recovers,
+    /// not by how long this process happens to live.
     pub fn journal_unreportable(&self) -> bool {
-        self.journal_unreportable.load(Ordering::Acquire)
+        let Ok(mut slot) = self.journal.lock() else {
+            return true;
+        };
+        slot.as_mut()
+            .is_some_and(|journal| journal.settle_marks() > 0)
     }
 
     /// This node's identity.
