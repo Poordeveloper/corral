@@ -19,6 +19,15 @@ pub const ENUMERATION_CADENCE: Duration = Duration::from_secs(30);
 
 /// One pass over every sealed provider's store.
 pub async fn enumerate_once(state: &Arc<DaemonState>, now: SystemTime) {
+    pass(state, now, sealed_here).await;
+}
+
+/// One pass, told how to decide whether a provider's layout is sealed here.
+///
+/// The decision is a parameter because it is the whole of what makes a store
+/// readable, and a test that cannot change it can only ever exercise this
+/// machine's installation.
+async fn pass(state: &Arc<DaemonState>, now: SystemTime, sealed: impl Fn(KnownProvider) -> bool) {
     let Some(home) = state.provider_home() else {
         return;
     };
@@ -29,7 +38,13 @@ pub async fn enumerate_once(state: &Arc<DaemonState>, now: SystemTime) {
         // 0016 D1). An install Corral cannot version is unsealed for the
         // same reason — not knowing which layout is on disk is not a
         // licence to assume the measured one.
-        if !sealed_here(provider) {
+        if !sealed(provider) {
+            // Retracted, not merely skipped. What a previous pass learned was
+            // supported by the layout sealed at the version installed then;
+            // an install that is no longer sealed takes that support away, and
+            // rows kept past it stay listable and continuable on evidence
+            // this daemon can no longer stand behind (ADR 0016 D1).
+            state.with_runtime(|runtime| runtime.history.retract(provider));
             continue;
         }
         let root = store_root(provider, &home);
@@ -109,3 +124,7 @@ pub async fn enumerate_until_shutdown(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "task_tests.rs"]
+mod tests;
