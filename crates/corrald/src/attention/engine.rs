@@ -145,7 +145,25 @@ pub fn derive(
         };
     }
 
-    let fresh: Vec<&Observed> = entitled
+    // Contradiction is an ordering fact, not a freshness one: once a later
+    // entitled claim asserted a different state, the earlier one is over, and
+    // the later claim's own rot does not bring it back. Activity is the one
+    // source that contradicts nothing — the flow that draws a blocker is the
+    // flow that would otherwise read as work — so it neither supersedes nor
+    // is superseded here.
+    let standing: Vec<&Observed> = entitled
+        .iter()
+        .copied()
+        .filter(|observed| {
+            !entitled.iter().any(|other| {
+                other.claim.source != EvidenceSource::PtyActivity
+                    && other.ordinal > observed.ordinal
+                    && other.claim.asserts != observed.claim.asserts
+            })
+        })
+        .collect();
+
+    let fresh: Vec<&Observed> = standing
         .iter()
         .copied()
         .filter(|observed| {
@@ -170,14 +188,12 @@ pub fn derive(
 
     // Activity is the default and a blocker the exception (D4): the prompt
     // that blocks the agent is drawn by the same output flow that would
-    // otherwise read as work. The exception reaches only a blocker nothing
-    // has since contradicted — activity cannot revive one a later entitled
-    // claim cleared, because older evidence never revives a state.
+    // otherwise read as work. Only a blocker still standing is one, so
+    // activity never revives one a later claim cleared.
     let blocker = fresh
         .iter()
-        .filter(|observed| observed.claim.source != EvidenceSource::PtyActivity)
-        .max_by_key(|observed| observed.ordinal)
-        .filter(|observed| observed.claim.asserts == SemanticState::NeedsYou);
+        .filter(|observed| observed.claim.asserts == SemanticState::NeedsYou)
+        .max_by_key(|observed| observed.ordinal);
     let rests_on = match blocker {
         Some(blocker) if newest.claim.source == EvidenceSource::PtyActivity => **blocker,
         _ => **newest,

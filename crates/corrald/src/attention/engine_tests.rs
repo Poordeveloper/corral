@@ -238,3 +238,36 @@ fn activity_does_not_revive_a_blocker_a_later_claim_cleared() {
         MainState::Working
     );
 }
+
+/// Contradiction is an ordering fact, not a freshness one. A blocker a later
+/// claim cleared stays cleared once that later claim rots: rot means the newer
+/// fact expired, never that the older one became true again (ADR 0015 D4).
+#[test]
+fn a_blocker_stays_cleared_after_the_claim_that_cleared_it_rots() {
+    let blocker = observed(EvidenceSource::ProviderHook, SemanticState::NeedsYou, 1, 60);
+    let cleared = observed(EvidenceSource::InBandSignal, SemanticState::Working, 2, 30);
+    let activity = observed(EvidenceSource::PtyActivity, SemanticState::Working, 3, 0);
+    assert_eq!(
+        derive_running(&[blocker, cleared, activity]).main,
+        MainState::Working
+    );
+}
+
+/// A later claim asserting the same state is agreement, not contradiction:
+/// when the screen's reading of the blocker rots, the hook's identical blocker
+/// still stands until its own horizon.
+#[test]
+fn a_blocker_stands_when_a_later_claim_agreed_and_then_rotted() {
+    let hook_blocker = observed(EvidenceSource::ProviderHook, SemanticState::NeedsYou, 1, 60);
+    let screen_blocker = observed(
+        EvidenceSource::ScreenDetection,
+        SemanticState::NeedsYou,
+        2,
+        30,
+    );
+    let activity = observed(EvidenceSource::PtyActivity, SemanticState::Working, 3, 0);
+    assert_eq!(
+        derive_running(&[hook_blocker, screen_blocker, activity]).main,
+        MainState::NeedsYou
+    );
+}
