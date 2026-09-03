@@ -59,7 +59,11 @@ pub fn tick_once(state: &Arc<DaemonState>, now: SystemTime) -> Vec<Change> {
                         sealing: reading.sealing,
                         asserts: reading.asserts,
                     },
-                    now,
+                    // Dated by the screen thread, not by this clock: the
+                    // reading is only as current as the last moment the screen
+                    // was known to support it, and a screen being redrawn
+                    // faster than it settles supports nothing.
+                    reading.at,
                 );
             }
             for (session, drawn) in activity {

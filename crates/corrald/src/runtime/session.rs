@@ -931,6 +931,19 @@ struct ScreenRules {
 
 /// Evaluate the manifest against the screen as it stands and publish the
 /// result, or its absence.
+/// Nothing has been drawn since the reading was evaluated, so the screen still
+/// says what it said. Dating it forward is what keeps a claim from rotting
+/// under a dialog that is still there, and doing it only here is what stops a
+/// screen nobody could read from re-stamping a reading it may have outlived
+/// (ADR 0015 D4).
+fn date_reading_forward(published: &Published) {
+    if let Ok(mut slot) = published.reading.lock()
+        && let Some(reading) = slot.as_mut()
+    {
+        reading.at = std::time::SystemTime::now();
+    }
+}
+
 fn read_screen(
     terminal: &super::terminal::AuthoritativeTerminal,
     detect: Option<&ScreenRules>,
@@ -994,6 +1007,8 @@ fn serve_screen(
                 if unread {
                     unread = false;
                     read_screen(&terminal, detect, published);
+                } else {
+                    date_reading_forward(published);
                 }
                 continue;
             }

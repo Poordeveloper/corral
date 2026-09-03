@@ -643,6 +643,30 @@ fn the_last_output_instant_is_published_once_the_child_draws() {
     assert!(drawn <= std::time::SystemTime::now());
 }
 
+/// A session running `script` under a manifest whose one rule matches the word
+/// the script prints.
+fn detecting_session(script: &str) -> super::SessionHandle {
+    let (manifest, _) = crate::detection::manifest::parse(
+        "schema = 1\nmin_engine_version = 1\nversion = \"t\"\nprovider = \"test\"\n[[rule]]\nid = \"hello\"\nasserts = \"turn_complete\"\nregion = \"whole_screen\"\nall = [\"hello\"]\n",
+    )
+    .expect("manifest");
+    let pending = spawn_session(&request("/bin/sh", &["-c", script]), GEOMETRY)
+        .expect("spawn")
+        .detect_with(std::sync::Arc::new(manifest), Some("2.1.258".to_owned()));
+    let (observations, _observed) = observe_runs();
+    std::mem::forget(_observed);
+    pending.serve(CorralSessionId::mint(), RunId::mint(), observations)
+}
+
+/// Wait for the first reading and answer when it was evaluated.
+fn settled_reading(handle: &super::SessionHandle) -> std::time::SystemTime {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while handle.reading().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    handle.reading().expect("a reading").at
+}
+
 /// With a manifest, the screen thread publishes what the screen matches once
 /// output settles, dated by the evaluation, so the tick can turn it into a
 /// claim without asking the screen.
@@ -697,4 +721,40 @@ fn the_echo_of_written_input_is_not_the_child_drawing() {
     // `cat` echoes the newline within the window as well; the assertion
     // above holds for the same reason.
     let _ = handle.last_output_at();
+}
+
+/// A reading is dated at the last moment the screen was known to support it
+/// (ADR 0015 D4). While nothing is drawn, the screen still says what it said,
+/// so the reading stays current and the claim built from it does not rot under
+/// a dialog that is still on screen.
+#[test]
+fn a_quiet_screen_keeps_its_reading_current() {
+    let handle = detecting_session("printf hello; sleep 30");
+    let first = settled_reading(&handle);
+    std::thread::sleep(Duration::from_millis(600));
+    let second = handle.reading().expect("a reading").at;
+    assert!(
+        second > first,
+        "an unchanged screen still supports its reading: {first:?} -> {second:?}"
+    );
+    handle.shut_down();
+}
+
+/// Output the screen thread has not been able to read is a screen the reading
+/// may no longer describe. Its date must stop moving, so the claim ages and
+/// rots rather than being re-stamped as new evidence for a dialog that may
+/// already be gone — the stale Needs You the horizons exist to bound.
+#[test]
+fn a_screen_being_redrawn_stops_dating_its_reading_forward() {
+    let handle = detecting_session("printf hello; sleep 1; while :; do printf .; sleep 0.05; done");
+    settled_reading(&handle);
+    std::thread::sleep(Duration::from_millis(1400));
+    let during = handle.reading().expect("a reading").at;
+    std::thread::sleep(Duration::from_millis(600));
+    let later = handle.reading().expect("a reading").at;
+    assert_eq!(
+        during, later,
+        "a screen that never settles cannot re-date what it last matched"
+    );
+    handle.shut_down();
 }
