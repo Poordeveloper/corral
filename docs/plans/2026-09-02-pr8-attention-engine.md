@@ -286,9 +286,14 @@ built-in stands, sessions keep deriving. Rule unsealed → runs, counts,
 asserts nothing. Screen poisoned → no readings; hook and activity evidence
 continue; the row already says "Screen unavailable". Hook dropped →
 missed transition tolerated; the screen carries a managed session, an
-external one rots honestly. Stale Needs You after a native approval on an
-external session → stands until fresher evidence, a later event, or rot
-(grill Q7's recorded limitation; the journal measures it). Unknown
+external one rots honestly. Stale Needs You after a native approval →
+stands until fresher evidence, a later event, or rot (grill Q7's recorded
+limitation; the journal measures it). This is not confined to external
+sessions: Claude's approval is followed by `PostToolUse`, which PR8 does
+not consume, and no other entitled source may assert Working — screen
+Working is refused by D3 and activity never clears a blocker — so a
+managed Claude session also stands at Needs You from the permission
+`Notification` until `Stop`, measured at roughly 30 s in matrix C2. Unknown
 notification type → nothing asserted. Heuristic binding → secondary only,
 never an item. Daemon restart → every Session Unknown until it acts;
 items and acknowledgements gone, nothing replayed; journal keeps its
@@ -314,8 +319,9 @@ once; diagnostics never gate product state.
   and refusal reporting.
 - Integration (MUST): managed Claude via the mock-provider harness through
   a real PTY and the real emulator — prompt submitted → Working from
-  activity; permission capture replayed → Needs You; approval → Working;
-  `Stop` → Ready; silence → Ready holds; process exit with a standing
+  activity; permission capture replayed → Needs You; approval → the blocker
+  stands until `Stop`, which is the limitation above and not the behaviour
+  this line first claimed; `Stop` → Ready; silence → Ready holds; process exit with a standing
   Needs You → Exited override; hook Needs You then screen clear → resolved
   item. Managed Codex: turn-complete → Ready; approval capture → Needs
   You. External Claude (token-less deliveries on the deterministic
@@ -597,7 +603,11 @@ semantic-capable rule exists merely because code preceded evidence.
 - A push notification on the client protocol for item transitions, when
   the tray lands; polling at 1 Hz carries PR8.
 - `PostToolUse` in the entry sets, decided on the journal's stale-Needs-You
-  evidence and a measured interference cost (grill Q7).
+  evidence and a measured interference cost (grill Q7). This is what closes
+  the managed-Claude approval window: until an entitled source may say the
+  turn resumed, a managed session reads Needs You from the permission
+  `Notification` until `Stop`. Deciding it needs the evidence; asserting
+  Working from the screen instead would change D3's authority order.
 - Durable `AttentionItem` identity, and with it durable acknowledgement
   (grill Q6).
 - Matrix expansion automation (grill Q13, Q22, Q28): a credentialed
