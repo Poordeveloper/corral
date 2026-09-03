@@ -651,12 +651,13 @@ pub fn spawn_session(
 }
 
 impl PendingSession {
-    /// Evaluate this manifest against the screen once output settles.
+    /// Read this session's screen against a provider manifest once output
+    /// settles, at the version the runtime is running.
+    ///
+    /// The version is half of what seals a reading, so it travels with the
+    /// manifest rather than being looked up later from a runtime that may
+    /// have been upgraded underneath.
     #[must_use]
-    /// Read this session's screen against a provider manifest, at the version
-    /// the runtime is running. The version is half of what seals a reading, so
-    /// it travels with the manifest rather than being looked up later from a
-    /// runtime that may have been upgraded underneath.
     pub fn detect_with(
         mut self,
         manifest: Arc<crate::detection::Manifest>,

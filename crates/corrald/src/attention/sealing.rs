@@ -19,10 +19,6 @@ use crate::provider::{AgentFactKind, KnownProvider};
 /// turn facts are. `version` is the provider version bound to the runtime the
 /// fact came from — `None` when it could not be established, which seals
 /// nothing (grill Q12).
-#[cfg(test)]
-#[path = "sealing_tests.rs"]
-mod tests;
-
 #[must_use]
 pub fn hook_fact_claim(
     provider: KnownProvider,
@@ -83,3 +79,7 @@ fn sealed(provider: KnownProvider, fact: AgentFactKind, version: Option<&str>) -
         Sealing::Unsealed
     }
 }
+
+#[cfg(test)]
+#[path = "sealing_tests.rs"]
+mod tests;
