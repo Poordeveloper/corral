@@ -80,3 +80,60 @@ fn a_sealed_screen_reading_becomes_the_sessions_main_state() {
     });
     let _ = std::fs::remove_dir_all(directory);
 }
+
+/// What the tick writes down is what the derivation concluded: the claim the
+/// state rests on, its horizon, how far past it a rot ran, and the provider
+/// version bound to the runtime that produced the evidence. A record missing
+/// them is a day of evidence that cannot answer why a state changed
+/// (ADR 0015 D8, grill Q15).
+#[test]
+fn a_journaled_transition_carries_the_horizon_the_expiry_and_the_version() {
+    let rotted = Change {
+        session: CorralSessionId::mint(),
+        from: MainState::Working,
+        to: MainState::Unknown,
+        transition: crate::attention::Transition::StateChanged {
+            from: MainState::Working,
+            to: MainState::Unknown,
+        },
+        decided_by: Some(corral_core::Claim {
+            source: corral_core::EvidenceSource::PtyActivity,
+            association: corral_core::Assurance::Deterministic,
+            channel: corral_core::Channel::CorralOwnedPty,
+            sealing: corral_core::Sealing::Sealed,
+            asserts: corral_core::SemanticState::Working,
+        }),
+        horizon: Some(Duration::from_secs(3)),
+        expired_after: Some(Duration::from_millis(400)),
+        at: SystemTime::UNIX_EPOCH,
+    };
+
+    let crate::attention::Record::Transition(written) = record(&rotted, Some("2.1.258".to_owned()))
+    else {
+        panic!("a transition record");
+    };
+    assert_eq!(written.horizon, Some(Duration::from_secs(3)));
+    assert_eq!(written.expired_after, Some(Duration::from_millis(400)));
+    assert_eq!(written.provider_version.as_deref(), Some("2.1.258"));
+    assert_eq!(
+        written.source,
+        Some(corral_core::EvidenceSource::PtyActivity)
+    );
+    assert_eq!(written.sealed, Some(true));
+    assert_eq!(
+        written.contradicted_first,
+        Some(false),
+        "the horizon ran out; nothing contradicted it"
+    );
+
+    let contradicted = Change {
+        to: MainState::Ready,
+        expired_after: None,
+        ..rotted
+    };
+    let crate::attention::Record::Transition(written) = record(&contradicted, None) else {
+        panic!("a transition record");
+    };
+    assert_eq!(written.contradicted_first, Some(true));
+    assert_eq!(written.provider_version, None);
+}

@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use corral_core::{
-    Assurance, Channel, Claim, CorralSessionId, EvidenceSource, Sealing, SemanticState,
+    Assurance, Channel, Claim, CorralSessionId, EvidenceSource, MainState, Sealing, SemanticState,
 };
 use tokio::sync::watch;
 use tracing::debug;
 
-use super::{Change, ItemEnd, Record, Transition, TransitionRecord};
+use super::{Change, Record, Transition, TransitionRecord};
 use crate::runtime::ExecutionState;
 use crate::state::DaemonState;
 
@@ -89,7 +89,7 @@ pub fn tick_once(state: &Arc<DaemonState>, now: SystemTime) -> Vec<Change> {
                 .iter()
                 .filter_map(|candidate| candidate.identified().map(|identified| identified.session))
                 .collect();
-            runtime.attention.tick(now, |session| {
+            let changes = runtime.attention.tick(now, |session| {
                 managed
                     .get(&session)
                     .copied()
@@ -98,16 +98,36 @@ pub fn tick_once(state: &Arc<DaemonState>, now: SystemTime) -> Vec<Change> {
                     } else {
                         ExecutionState::Unknown
                     })
-            })
+            });
+            // The version bound to the runtime that produced the evidence, as
+            // the launch boundary established it — read here rather than
+            // carried on every claim, and absent where this daemon never
+            // bound one, which is unknown and not a version (grill Q12).
+            changes
+                .into_iter()
+                .map(|change| {
+                    let version = runtime
+                        .reported
+                        .get(change.session)
+                        .and_then(|reported| reported.provider_version.clone());
+                    (change, version)
+                })
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default();
     if !changes.is_empty() {
-        state.journal_append(now, changes.iter().map(record).collect());
+        state.journal_append(
+            now,
+            changes
+                .iter()
+                .map(|(change, version)| record(change, version.clone()))
+                .collect(),
+        );
     }
-    changes
+    changes.into_iter().map(|(change, _)| change).collect()
 }
 
-fn record(change: &Change) -> Record {
+fn record(change: &Change, provider_version: Option<String>) -> Record {
     let (item, item_end, notifiable) = match change.transition {
         Transition::ItemBorn(item) => (Some(item), None, true),
         Transition::ItemEnded { item, end } => (Some(item), Some(end), false),
@@ -122,13 +142,16 @@ fn record(change: &Change) -> Record {
         sealed: change
             .decided_by
             .map(|claim| claim.sealing == Sealing::Sealed),
-        provider_version: None,
-        horizon: None,
-        expired_after: None,
-        contradicted_first: match item_end {
-            Some(ItemEnd::Resolved) => Some(true),
-            Some(ItemEnd::Rotted) => Some(false),
-            Some(ItemEnd::Exited) | None => None,
+        provider_version,
+        horizon: change.horizon,
+        expired_after: change.expired_after,
+        // Which of the two ways a claim can stop standing happened here: a
+        // horizon ran out, or something fresher said otherwise. An exit is
+        // neither, and neither is a state no claim decided.
+        contradicted_first: match (change.to, change.expired_after) {
+            (_, Some(_)) => Some(false),
+            (MainState::Exited, None) => None,
+            (_, None) => change.decided_by.map(|_| true),
         },
         item,
         item_end,

@@ -7,11 +7,11 @@
 //! journal records.
 
 use std::collections::HashMap;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use corral_core::{
     AttentionItemId, AttentionReason, AttentionState, Claim, CorralSessionId, EvidenceSource,
-    MainState, SemanticState,
+    MainState,
 };
 use corral_protocol::method::{AttentionCount, AttentionSummaryResult};
 
@@ -25,8 +25,15 @@ pub struct Change {
     pub from: MainState,
     pub to: MainState,
     pub transition: Transition,
-    /// The claim the new state rests on, when a claim decided it.
+    /// The claim the new state rests on, when a claim decided it — or the
+    /// one that rotted, when a horizon did.
     pub decided_by: Option<Claim>,
+    /// The horizon that claim lives under (grill Q15).
+    pub horizon: Option<Duration>,
+    /// How far past that horizon the claim had run when the clock noticed.
+    /// Only a rot has one: it is the difference between the horizon a claim
+    /// was configured for and the moment its expiry was acted on.
+    pub expired_after: Option<Duration>,
     pub at: SystemTime,
 }
 
@@ -95,22 +102,27 @@ impl Ledger {
             if transition == Transition::Unchanged {
                 continue;
             }
-            let decided_by = SemanticState::try_from(derived.main)
-                .ok()
-                .and_then(|state| {
-                    tracked
-                        .claims
-                        .iter()
-                        .filter(|held| held.claim.asserts == state)
-                        .max_by_key(|held| held.ordinal)
-                        .map(|held| held.claim)
-                });
+            let horizon = derived.rests_on.map(|observed| {
+                self.horizons
+                    .of(observed.claim.source, observed.claim.asserts)
+            });
+            // A rot is the one transition whose cause is the passage of time,
+            // so it is the one that has a distance past the horizon to report.
+            let expired_after = match (derived.main, derived.rests_on, horizon) {
+                (MainState::Unknown, Some(observed), Some(horizon)) => now
+                    .duration_since(observed.observed_at)
+                    .ok()
+                    .and_then(|age| age.checked_sub(horizon)),
+                _ => None,
+            };
             changes.push(Change {
                 session: *session,
                 from,
                 to: derived.main,
                 transition,
-                decided_by,
+                decided_by: derived.rests_on.map(|observed| observed.claim),
+                horizon,
+                expired_after,
                 at: now,
             });
         }

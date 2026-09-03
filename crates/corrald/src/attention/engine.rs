@@ -31,6 +31,16 @@ pub struct Derived {
     pub main: MainState,
     /// The last reliable fact, carried only when `main` is Unknown.
     pub last_known: Option<LastKnown>,
+    /// The observation the state rests on: the claim that decided it, or —
+    /// beneath an Unknown a horizon caused — the claim that rotted. `None`
+    /// where no claim is involved at all: an ended runtime, or one whose
+    /// execution Corral cannot place.
+    ///
+    /// Derivation says which claim carried the state because derivation is
+    /// what knows. A later search for "the newest claim asserting this
+    /// state" would answer with evidence entitlement refused, which is
+    /// exactly the opposite of what happened (ADR 0015 D8).
+    pub rests_on: Option<Observed>,
 }
 
 impl Derived {
@@ -110,6 +120,7 @@ pub fn derive(
         return Derived {
             main: MainState::Exited,
             last_known: None,
+            rests_on: None,
         };
     }
 
@@ -125,9 +136,12 @@ pub fn derive(
         .map(|observed| LastKnown::new(observed.claim.asserts.into(), observed.observed_at));
 
     if execution == ExecutionState::Unknown {
+        // Not a rot: the claims may be perfectly fresh. What cannot be
+        // placed is the runtime.
         return Derived {
             main: MainState::Unknown,
             last_known,
+            rests_on: None,
         };
     }
 
@@ -142,26 +156,33 @@ pub fn derive(
         .collect();
 
     let Some(newest) = fresh.iter().max_by_key(|observed| observed.ordinal) else {
+        // Nothing is fresh, so the newest entitled claim is the one whose
+        // horizon ran out: the rot the journal records by how far past it ran.
         return Derived {
             main: MainState::Unknown,
             last_known,
+            rests_on: entitled
+                .iter()
+                .max_by_key(|observed| observed.ordinal)
+                .map(|observed| **observed),
         };
     };
 
     // Activity is the default and a blocker the exception (D4): the prompt
     // that blocks the agent is drawn by the same output flow that would
     // otherwise read as work.
-    let blocked = fresh
+    let blocker = fresh
         .iter()
-        .any(|observed| observed.claim.asserts == SemanticState::NeedsYou);
-    let main = if newest.claim.source == EvidenceSource::PtyActivity && blocked {
-        MainState::NeedsYou
-    } else {
-        newest.claim.asserts.into()
+        .filter(|observed| observed.claim.asserts == SemanticState::NeedsYou)
+        .max_by_key(|observed| observed.ordinal);
+    let rests_on = match blocker {
+        Some(blocker) if newest.claim.source == EvidenceSource::PtyActivity => **blocker,
+        _ => **newest,
     };
     Derived {
-        main,
+        main: rests_on.claim.asserts.into(),
         last_known: None,
+        rests_on: Some(rests_on),
     }
 }
 

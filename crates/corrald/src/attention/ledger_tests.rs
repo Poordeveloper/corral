@@ -220,3 +220,61 @@ fn a_change_names_the_claim_that_decided_it() {
         Some(Sealing::Sealed)
     );
 }
+
+/// The claim named is one entitlement let through. An unsealed reading of
+/// the same state is not a weaker version of the fact that decided the
+/// state — it decided nothing — and a journal that named it would be
+/// evidence for the opposite of what happened (ADR 0015 D3, D8).
+#[test]
+fn a_change_never_names_a_claim_nothing_was_entitled_to_make() {
+    let mut ledger = Ledger::new(Horizons::default());
+    let session = CorralSessionId::mint();
+    ledger.observe(session, hook(SemanticState::Ready), later(1));
+    ledger.observe(
+        session,
+        Claim {
+            source: EvidenceSource::ScreenDetection,
+            sealing: Sealing::Unsealed,
+            ..hook(SemanticState::Ready)
+        },
+        later(2),
+    );
+    let changes = ledger.tick(later(3), running);
+    assert_eq!(changes[0].to, MainState::Ready);
+    assert_eq!(
+        changes[0].decided_by.map(|claim| claim.source),
+        Some(EvidenceSource::ProviderHook),
+        "the unsealed reading is not what the state rests on"
+    );
+    assert_eq!(
+        changes[0].decided_by.map(|claim| claim.sealing),
+        Some(Sealing::Sealed)
+    );
+}
+
+/// A rot is the one transition whose cause is a duration, so the change
+/// carries both numbers the journal records: the horizon the claim lived
+/// under, and how long past it the claim was when the clock noticed
+/// (grill Q15, ADR 0015 D8).
+#[test]
+fn a_rotted_claim_reports_its_horizon_and_how_far_past_it_ran() {
+    let mut ledger = Ledger::new(Horizons::default());
+    let session = CorralSessionId::mint();
+    ledger.observe(session, activity(), later(10));
+    ledger.tick(later(11), running);
+    let changes = ledger.tick(later(14), running);
+    assert_eq!(changes[0].to, MainState::Unknown);
+    assert_eq!(changes[0].horizon, Some(Horizons::default().activity_quiet));
+    assert_eq!(changes[0].expired_after, Some(Duration::from_secs(1)));
+}
+
+/// The horizon travels with every change a claim decided, not only a rot.
+#[test]
+fn a_decided_change_carries_the_horizon_its_claim_lives_under() {
+    let mut ledger = Ledger::new(Horizons::default());
+    let session = CorralSessionId::mint();
+    ledger.observe(session, hook(SemanticState::NeedsYou), later(1));
+    let changes = ledger.tick(later(2), running);
+    assert_eq!(changes[0].horizon, Some(Horizons::default().hook_needs_you));
+    assert_eq!(changes[0].expired_after, None);
+}

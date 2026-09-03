@@ -15,6 +15,7 @@ fn asserted(main: MainState) -> Derived {
     Derived {
         main,
         last_known: None,
+        rests_on: None,
     }
 }
 
@@ -22,6 +23,7 @@ fn unknown(last_known: Option<LastKnown>) -> Derived {
     Derived {
         main: MainState::Unknown,
         last_known,
+        rests_on: None,
     }
 }
 
