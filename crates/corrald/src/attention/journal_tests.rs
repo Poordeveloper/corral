@@ -226,3 +226,32 @@ fn the_report_counts_transitions_and_names_incomplete_days() {
     assert_eq!(tomorrow.transitions, 1);
     assert_eq!(tomorrow.into_needs_you, 0);
 }
+
+/// A line the reader cannot parse is a record it cannot count, and a day it
+/// cannot count is not a complete evidence day. Reporting the smaller number
+/// as if it were the whole day is exactly the silent incompleteness the budget
+/// marker exists to prevent (ADR 0015 D8, grill Q26).
+#[test]
+fn a_day_holding_a_record_that_will_not_parse_is_reported_incomplete() {
+    let dir = scratch();
+    let mut journal = Journal::open(&dir, Budget::default(), noon()).expect("open");
+    journal
+        .append(
+            noon(),
+            transition(CorralSessionId::mint(), MainState::NeedsYou),
+        )
+        .expect("append");
+    // A write the daemon did not finish: the process died mid-line.
+    let path = dir.join("attention-journal-2026-09-02.jsonl");
+    let mut partial = std::fs::read_to_string(&path).expect("file");
+    partial.push_str("{\"kind\":\"transi");
+    std::fs::write(&path, partial).expect("truncated write");
+
+    let report = report(&dir).expect("report");
+    let day = report.days.first().expect("a day");
+    assert_eq!(day.transitions, 1, "the record that parsed still counts");
+    assert!(
+        day.incomplete,
+        "a day with a record nobody can read is not a complete evidence day"
+    );
+}

@@ -358,6 +358,10 @@ pub fn report(dir: &Path) -> std::io::Result<Report> {
         };
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             let Ok(value) = serde_json::from_str::<Value>(line) else {
+                // A record nobody can read is a record nobody can count, so
+                // the day stops claiming to be complete rather than reporting
+                // the smaller number as the whole of it.
+                day.incomplete = true;
                 continue;
             };
             match value["kind"].as_str() {
