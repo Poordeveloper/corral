@@ -533,7 +533,7 @@ async fn continuing_a_live_external_session_is_refused_without_asserting_it_runs
         KnownProvider::Claude,
         identity("session-outside"),
         reached(4321, at(500)),
-        at(900),
+        observed(900),
         None,
     )
     .await
