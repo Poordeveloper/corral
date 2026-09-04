@@ -379,6 +379,35 @@ pub enum NativeResumeEligibility {
     IdentityContested,
 }
 
+impl BindingKind {
+    /// Every kind, so a consumer that must enumerate them cannot silently
+    /// miss one a later change adds.
+    pub const ALL: [Self; 4] = [
+        Self::ProviderSession,
+        Self::Runtime,
+        Self::Terminal,
+        Self::History,
+    ];
+
+    /// Whether this kind's external id is the provider's own session
+    /// identity, rather than a name for something else Corral bound.
+    ///
+    /// Resolution looks an identity up across the kinds this is true of, so
+    /// one conversation met as a history file and again as a live provider
+    /// session is one Session (ADR 0016 D2). A runtime incarnation and a
+    /// terminal id share the `(node, provider)` namespace without naming the
+    /// same thing, so they are matched by their whole key and never by the id
+    /// alone — a coincidental string would otherwise join two unrelated
+    /// Sessions.
+    #[must_use]
+    pub fn names_a_provider_session(self) -> bool {
+        match self {
+            Self::ProviderSession | Self::History => true,
+            Self::Runtime | Self::Terminal => false,
+        }
+    }
+}
+
 impl fmt::Display for BindingKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {

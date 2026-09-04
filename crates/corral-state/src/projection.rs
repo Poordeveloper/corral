@@ -263,10 +263,31 @@ pub(crate) fn binding_by_external_id(
 ) -> Result<Option<Binding>, StateError> {
     query_binding(
         connection,
-        "WHERE node_id = ?1 AND provider = ?2 AND external_id = ?3 \
-         ORDER BY (kind = 'provider-session') DESC, created_at_ms, id",
+        &format!(
+            // Only the kinds whose external id is a provider session identity:
+            // a runtime incarnation shares this namespace without naming the
+            // same thing. The list is derived from the kinds themselves, so a
+            // kind added later is classified rather than quietly omitted.
+            "WHERE node_id = ?1 AND provider = ?2 AND external_id = ?3 \
+             AND kind IN ({}) \
+             ORDER BY (kind = '{}') DESC, created_at_ms, id",
+            provider_session_kinds(),
+            crate::encoding::binding_kind_token(BindingKind::ProviderSession),
+        ),
         params![node.to_string(), provider.as_str(), external_id.as_str(),],
     )
+}
+
+/// The stored tokens of every kind whose external id names a provider
+/// session, as a SQL list. Built from tokens this crate owns, never from user
+/// input.
+fn provider_session_kinds() -> String {
+    BindingKind::ALL
+        .into_iter()
+        .filter(|kind| kind.names_a_provider_session())
+        .map(|kind| format!("'{}'", crate::encoding::binding_kind_token(kind)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The binding this Session may currently drive control through, if any.

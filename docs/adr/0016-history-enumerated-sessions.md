@@ -106,6 +106,16 @@ first Attested identity (ADR 0014 D5). A daemon restart re-enumerates
 rather than replays. Nothing is fabricated to avoid an empty list, and
 nothing is hidden to make one shorter than the recent window.
 
+Resolution is a property of the store, not of one caller: `bind` and
+`resolve_or_create_session` both look an identity up across the kinds whose
+external id *is* a provider session identity, and a runtime incarnation or a
+terminal id — which share the `(node, provider)` namespace without naming the
+same thing — are matched by their whole key. A key that is free can still
+name a conversation another Session holds, and that is refused rather than
+bound: a Corral-launched agent that resumes, from inside itself, a
+conversation Corral had already enumerated is one conversation, and merging
+two Sessions is not an operation this store has.
+
 ## D3 — What a history-claimed identity is entitled to: assurance is claim-scoped
 
 A `HistoryBinding` whose external id was read from the provider's own store

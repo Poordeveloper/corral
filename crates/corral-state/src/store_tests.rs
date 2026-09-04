@@ -201,6 +201,95 @@ fn identity_survives_the_process_that_created_it() {
 
 /// Re-scanning resolves a previously seen external identity to its existing
 /// Session through binding uniqueness — never to a second Session.
+/// The same provider session, met a second time under a different kind of
+/// binding, is the same Session.
+///
+/// Enumeration files a history binding for an id the store named; the hook
+/// then reports that id live and files a provider-session binding for it.
+/// Both name one conversation, so resolution looks the identity up across
+/// kinds and the provider-session binding wins where several name it — the
+/// alternative is two rows for one agent, which is the duplication a binding
+/// key exists to prevent (ADR 0016 D2).
+#[test]
+fn one_provider_session_met_under_two_binding_kinds_is_one_session() {
+    let mut store = TestStore::new("cross-kind");
+    let node = store.node();
+
+    let SessionResolution::Created { session: known, .. } = store
+        .resolve_or_create_session(
+            key(node, BindingKind::History, "sess-x"),
+            Provenance::Discovered,
+            evidence(EvidenceSource::HistoryRecord, Assurance::Attested),
+            instant(10),
+        )
+        .expect("resolved")
+    else {
+        panic!("an identity nothing claims is a new Session");
+    };
+
+    let discovered = store
+        .resolve_or_create_session(
+            key(node, BindingKind::ProviderSession, "sess-x"),
+            Provenance::Discovered,
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+            instant(20),
+        )
+        .expect("resolved");
+
+    let (SessionResolution::Created { session, .. } | SessionResolution::Existing { session, .. }) =
+        discovered;
+    assert_eq!(
+        session.id(),
+        known.id(),
+        "discovery minted a second Session for a provider session the store already knew"
+    );
+}
+
+/// Binding a conversation another Session already holds is refused, even
+/// when the key itself is free.
+///
+/// A history row names a provider session; a Corral-launched agent then
+/// resumes that same conversation from inside itself and its hook reports the
+/// id. The provider-session key is unused, so the exact-key check passes —
+/// and adding the edge would put one agent behind two rows, which is what
+/// binding uniqueness exists to stop (`ARCHITECTURE.md` §1).
+#[test]
+fn a_conversation_another_session_holds_is_not_bound_to_a_second_one() {
+    let mut store = TestStore::new("cross-kind-bind");
+    let node = store.node();
+    let SessionResolution::Created { session: known, .. } = store
+        .resolve_or_create_session(
+            key(node, BindingKind::History, "sess-y"),
+            Provenance::Discovered,
+            evidence(EvidenceSource::HistoryRecord, Assurance::Attested),
+            instant(10),
+        )
+        .expect("resolved")
+    else {
+        panic!("an identity nothing claims is a new Session");
+    };
+    let (other, _) = managed_session(&mut store, "run-elsewhere");
+
+    let refused = store.bind(
+        other,
+        key(node, BindingKind::ProviderSession, "sess-y"),
+        Provenance::Discovered,
+        evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+        instant(20),
+    );
+
+    assert!(
+        matches!(
+            refused,
+            Err(StateError::Refused(Refusal::BindingClaimedByAnotherSession {
+                session,
+                ..
+            })) if session == known.id()
+        ),
+        "{refused:?}"
+    );
+}
+
 #[test]
 fn re_discovery_never_duplicates_a_session() {
     let mut store = TestStore::new("rediscovery");

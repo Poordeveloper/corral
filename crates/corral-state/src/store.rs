@@ -739,7 +739,21 @@ impl Store {
         self.write(move |transaction| {
             let at = encoding::as_stored(at)?;
             let evidence = as_stored_evidence(evidence)?;
-            if let Some(binding) = projection::binding_by_key(transaction, &key)? {
+            // Across kinds when the key names a provider session, by the whole
+            // key otherwise: one conversation met as a history file and again
+            // as a live provider session is one Session, and only an identity
+            // nothing already claims mints a new one (ADR 0016 D2).
+            let existing = if key.kind().names_a_provider_session() {
+                projection::binding_by_external_id(
+                    transaction,
+                    key.node(),
+                    key.provider(),
+                    key.external_id(),
+                )?
+            } else {
+                projection::binding_by_key(transaction, &key)?
+            };
+            if let Some(binding) = existing {
                 let session =
                     projection::session(transaction, binding.session())?.ok_or_else(|| {
                         FatalState::Unreadable {
@@ -809,6 +823,7 @@ impl Store {
 
             let binding = Binding::new(BindingId::mint(), session, key, provenance, evidence, at);
             refuse_reserved_namespace(&binding)?;
+            refuse_an_identity_another_session_claims(transaction, &binding, session)?;
             refuse_second_control_capable_runtime_binding(transaction, &binding)?;
             refuse_second_provider_session_binding(transaction, &binding)?;
             Ok(Written::recording(
@@ -1563,6 +1578,47 @@ fn refuse_reserved_namespace(binding: &Binding) -> Result<(), StateError> {
         }
         .into()
     })
+}
+
+/// A provider session another Session already claims is not bound again.
+///
+/// The exact-key check above answers "is this key taken"; this answers "is
+/// this conversation taken", which is the guarantee binding uniqueness
+/// actually makes (`ARCHITECTURE.md` §1). A history binding and a
+/// provider-session binding name one conversation under two kinds (ADR 0016
+/// D2), so a key that is free can still name an identity another Session
+/// holds — a Corral-launched agent that resumed, from inside itself, a
+/// conversation Corral had already enumerated.
+///
+/// Refused rather than repaired: merging two Sessions is not an operation
+/// this store has, and quietly adding the second edge is what puts one agent
+/// behind two rows.
+fn refuse_an_identity_another_session_claims(
+    connection: &Connection,
+    candidate: &Binding,
+    session: CorralSessionId,
+) -> Result<(), StateError> {
+    if !candidate.key().kind().names_a_provider_session() {
+        return Ok(());
+    }
+    let key = candidate.key();
+    let Some(held) = projection::binding_by_external_id(
+        connection,
+        key.node(),
+        key.provider(),
+        key.external_id(),
+    )?
+    else {
+        return Ok(());
+    };
+    if held.session() == session {
+        return Ok(());
+    }
+    Err(Refusal::BindingClaimedByAnotherSession {
+        binding: held.id(),
+        session: held.session(),
+    }
+    .into())
 }
 
 /// At most one control-capable runtime binding is active per Session.
