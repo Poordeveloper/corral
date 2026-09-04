@@ -8,8 +8,18 @@
 //! The daemon does not interpret input. A client encodes keystrokes from its
 //! own replica's live mode bits and the daemon writes the bytes through — the
 //! wire stays dumb on purpose (`ARCHITECTURE.md` §3).
+//!
+//! One channel is two tasks with two halves of the socket. The *subscriber
+//! writer* owns the write half and the viewer it drains; the *read loop* owns
+//! the read half and nothing else. Backlog has exactly one owner: the viewer's
+//! delivery state in `stream.rs`, with its byte budget. There is no second
+//! queue between that state and the socket, because a second queue is a
+//! second, unrelated notion of "slow": the PR9 spike measured a channel closed
+//! in nine of twelve sustained storms by an eight-frame queue that read
+//! ordinary jitter as a client that had stopped reading (grill Q5/Q10).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use corral_core::{CorralSessionId, RunId};
 use corral_protocol::terminal::{FrameKind, TerminalFrame};
@@ -22,35 +32,36 @@ use crate::runtime::{
 };
 use crate::state::DaemonState;
 
-/// How many encoded frames may wait for a client that is not reading.
+/// How long the writer waits for one byte of socket progress before deciding
+/// the client has stopped reading.
 ///
-/// Small on purpose, because a snapshot is the one frame with no small bound:
-/// this depth times the frame ceiling is what one connection can hold, so the
-/// number is kept low rather than generous. Deltas are one PTY read each — at
-/// most 8 KiB — and the per-viewer budget in `stream.rs` already bounds how
-/// many of those pile up. What the depth really buys is the difference between
-/// "the socket is momentarily full" and "this client has stopped reading", and
-/// the second is not something to wait on.
-const OUTBOUND_FRAMES: usize = 8;
+/// Counted only while there is a frame to write and nothing of it leaves; a
+/// quiet channel is not a stalled one. Brief jitter is absorbed by the wait;
+/// a client that reads but cannot keep up is handled by the viewer's byte
+/// budget, not by this clock. Initial operational policy, not a wire
+/// guarantee (grill Q10).
+const NO_PROGRESS_DEADLINE: Duration = Duration::from_secs(2);
 
 /// How long a channel that has ended waits for its last frame to leave.
 ///
 /// The last frame is usually a channel error saying why this ended, and a
 /// client that is reading should get it. A client that is *not* reading is
-/// the reason most channels end this way, and waiting on one would hold the
+/// the reason many channels end this way, and waiting on one would hold the
 /// connection — and its write half — open for as long as it stayed connected.
-const FLUSH_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+/// Same number as the deadline above by coincidence of policy, not by
+/// definition: one is how long a frame may fail to move, the other how long a
+/// finished channel lingers.
+const FLUSH_GRACE: Duration = Duration::from_secs(2);
 
 /// Serve a channel until the client goes away or the session does.
 ///
-/// Writes leave through a task of their own, never from the loop below. A
-/// client that stops reading fills its socket buffer, and a `write_all` awaited
-/// inside a `select!` branch owns that loop while it blocks — so the daemon
-/// would stop reading that client at exactly the moment the client is waiting
-/// for the daemon to read. Both sides then wait forever, with no timeout on
-/// either. The loop can only *queue*; a queue that will not take another frame
-/// is a client that is not draining, which ends its channel rather than the
-/// daemon's progress.
+/// The read loop below never touches the socket's write half. A write awaited
+/// inside the loop that also reads would stop reading this client at exactly
+/// the moment the client waits for the daemon to read — both sides then wait
+/// forever. So writes belong to a task of their own, which may block on the
+/// socket without anyone else noticing: not the PTY reader, not the
+/// authoritative screen, not another viewer, and not this client's own
+/// `Input` and `Resize`.
 pub async fn serve(
     reader: &mut OwnedReadHalf,
     writer: OwnedWriteHalf,
@@ -59,122 +70,163 @@ pub async fn serve(
     run: RunId,
     state: &Arc<DaemonState>,
 ) {
-    let (outbound, mut queued) = tokio::sync::mpsc::channel::<Vec<u8>>(OUTBOUND_FRAMES);
-    let writing = tokio::spawn(async move {
-        let mut writer = writer;
-        while let Some(bytes) = queued.recv().await {
-            if writer.write_all(&bytes).await.is_err() {
-                return;
-            }
-        }
-    });
-    let outcome = serve_frames(reader, &outbound, leftover, session, run, state).await;
-    // Dropped so the writer finishes what is queued and ends. Then waited for,
-    // but only briefly: a client that is reading gets the last frame, and one
-    // that is not is exactly why this channel ended — waiting on it would hold
-    // the connection open for as long as it stayed silently connected.
-    drop(outbound);
-    let mut writing = writing;
-    if tokio::time::timeout(FLUSH_GRACE, &mut writing)
-        .await
-        .is_err()
-    {
-        writing.abort();
-    }
-    outcome
-}
-
-async fn serve_frames(
-    reader: &mut OwnedReadHalf,
-    writer: &Outbound,
-    leftover: Vec<u8>,
-    session: CorralSessionId,
-    run: RunId,
-    state: &Arc<DaemonState>,
-) {
     let Some(attachment) = attach(session, run, state).await else {
         return;
     };
-    // Recorded once the attachment exists, and once per channel rather than
-    // once per snapshot: a resync or a reflow gives this connection a fresh
-    // attachment, and none of those is a person arriving. Advisory throughout
-    // — no holder, no client identity, nothing enforced (grill Q7).
     let _attached = ActiveAttachment::began(run, state);
-    if !send_snapshot(writer, &attachment).await {
-        return;
-    }
-    // Open succeeded: the channel is bound and the first screen served. That
-    // is what acknowledges a Ready item — and never a Needs You one — rather
-    // than the attach request that preceded it (grill Q18).
-    state.with_runtime(|runtime| runtime.attention.opened(session));
-    let mut serving = Serving {
+
+    // Unbounded because it carries one message per client event — a resync
+    // request, a refusal to relay — and never terminal output. Sending never
+    // waits, so the read loop cannot be held by a writer that is.
+    let (control, controlled) = tokio::sync::mpsc::unbounded_channel::<Control>();
+    let writing = tokio::spawn(subscriber_writer(
+        writer,
+        attachment,
+        controlled,
         session,
         run,
-        state,
-        attachment,
-        told_run_ended: false,
-    };
+        Arc::clone(state),
+    ));
 
-    // Bytes the client sent in the same write as its hello already belong to
-    // this framing, and dropping them would lose a first keystroke.
-    let mut pending = leftover;
-    let mut buffer = [0_u8; 8192];
-
-    // Acted on before waiting. A client that pipelines its hello with a resync
-    // and then waits for the snapshot would otherwise deadlock: this loop
-    // waits for a read that the client is waiting for an answer to make.
-    match consume_pending(&mut pending, writer, &mut serving).await {
-        Handled::Continue => {}
-        Handled::Close => return,
-    }
-
-    loop {
-        // Output the daemon produced and frames the client sent are
-        // independent; whichever is ready is handled, so a quiet client never
-        // holds up a busy screen and a busy client never starves it.
-        tokio::select! {
-            delivered = next_delivery(serving.attachment.viewer.as_mut()) => {
-                match delivered {
-                    // The stream ended: the session opened a new epoch, or its
-                    // screen is gone. Either way this viewer is owed a fresh
-                    // snapshot rather than more deltas.
-                    None => {
-                        match attach(serving.session, serving.run, serving.state).await {
-                            Some(fresh) => {
-                                serving.attachment = fresh;
-                                if !send_snapshot(writer, &serving.attachment).await {
-                                    return;
-                                }
-                            }
-                            None => return,
-                        }
-                    }
-                    Some(delivery) => {
-                        let frame = TerminalFrame {
-                            kind: FrameKind::Delta,
-                            epoch: delivery.epoch,
-                            sequence: delivery.sequence,
-                            payload: delivery.bytes.to_vec(),
-                        };
-                        if !send(writer, &frame).await {
-                            return;
-                        }
-                    }
-                }
-            }
-            read = reader.read(&mut buffer) => {
-                let read = match read {
-                    Ok(0) | Err(_) => return,
-                    Ok(read) => read,
-                };
-                pending.extend_from_slice(&buffer[..read]);
-
-                match consume_pending(&mut pending, writer, &mut serving).await {
-                    Handled::Continue => {}
-                    Handled::Close => return,
-                }
+    let mut writing = writing;
+    tokio::select! {
+        () = read_client(reader, &control, leftover, session, run, state) => {
+            // The client left. Dropped so the writer finishes what it is
+            // sending and ends; then waited for, but only briefly: a client
+            // that is reading gets the last frame, and one that is not is
+            // exactly why many channels end — waiting on it would hold the
+            // connection open for as long as it stayed silently connected.
+            drop(control);
+            if tokio::time::timeout(FLUSH_GRACE, &mut writing)
+                .await
+                .is_err()
+            {
+                writing.abort();
             }
         }
+        _ = &mut writing => {
+            // The writer ended first: the client stopped reading, its socket
+            // failed, or the run is gone. A channel that can say nothing more
+            // is over, however long the client keeps its end open.
+        }
+    }
+}
+
+/// What the read loop asks of the writer. Never terminal output.
+enum Control {
+    /// The client discarded its replica and wants a fresh snapshot.
+    Resync,
+    /// Tell the client why the daemon refused, without ending its channel.
+    Error(String),
+}
+
+/// Drain one viewer to one socket, for as long as both exist.
+///
+/// The viewer is the only backlog this channel has. When it ends — the screen
+/// reshaped and opened a new epoch, this viewer fell past its byte budget, the
+/// run finished — the writer rejoins the stream and sends the snapshot that
+/// supersedes whatever was still queued. That snapshot is the resync barrier
+/// ADR 0003 names: a client never receives an interior gap followed by deltas
+/// presented as valid; it receives deltas up to a point, then a screen.
+async fn subscriber_writer(
+    mut writer: OwnedWriteHalf,
+    mut attachment: Attachment,
+    mut control: tokio::sync::mpsc::UnboundedReceiver<Control>,
+    session: CorralSessionId,
+    run: RunId,
+    state: Arc<DaemonState>,
+) {
+    if !send_snapshot(&mut writer, &attachment).await {
+        return;
+    }
+    state.with_runtime(|runtime| runtime.attention.opened(session));
+
+    // Set once the session can no longer be rejoined. What the viewer still
+    // holds is then the run's final output, and it is written out rather than
+    // discarded: a process's last words are not superseded by anything.
+    let mut draining = false;
+
+    loop {
+        tokio::select! {
+            delivered = next_delivery(attachment.viewer.as_mut()) => {
+                let Some(delivery) = delivered else {
+                    // The stream ended and is fully drained.
+                    if draining {
+                        return;
+                    }
+                    match attach(session, run, &state).await {
+                        Some(fresh) => {
+                            attachment = fresh;
+                            if !send_snapshot(&mut writer, &attachment).await {
+                                return;
+                            }
+                        }
+                        None => return,
+                    }
+                    continue;
+                };
+
+                // A viewer whose senders are gone holds deltas a fresh snapshot
+                // will supersede. Checked before writing, so a client that is
+                // behind is not made to read a stale backlog first.
+                let superseded = !draining
+                    && attachment.viewer.as_ref().is_some_and(Viewer::is_closed);
+                if superseded {
+                    match attach(session, run, &state).await {
+                        Some(fresh) => {
+                            attachment = fresh;
+                            if !send_snapshot(&mut writer, &attachment).await {
+                                return;
+                            }
+                            continue;
+                        }
+                        None => draining = true,
+                    }
+                }
+
+                if !write_frame(&mut writer, &delta(delivery)).await {
+                    return;
+                }
+            }
+            command = control.recv() => match command {
+                Some(Control::Resync) => {
+                    // The client threw its replica away; what was queued for
+                    // it is worthless to it. Rejoin and send a screen.
+                    match attach(session, run, &state).await {
+                        Some(fresh) => {
+                            attachment = fresh;
+                            if !send_snapshot(&mut writer, &attachment).await {
+                                return;
+                            }
+                        }
+                        None => return,
+                    }
+                }
+                Some(Control::Error(refusal)) => {
+                    let frame = TerminalFrame {
+                        kind: FrameKind::ChannelError,
+                        epoch: attachment.epoch,
+                        sequence: attachment.sequence,
+                        payload: refusal.into_bytes(),
+                    };
+                    if !write_frame(&mut writer, &frame).await {
+                        return;
+                    }
+                }
+                // The read loop ended: the client left or sent something
+                // unreadable. Nothing more will be asked of this writer.
+                None => return,
+            }
+        }
+    }
+}
+
+fn delta(delivery: Delivery) -> TerminalFrame {
+    TerminalFrame {
+        kind: FrameKind::Delta,
+        epoch: delivery.epoch,
+        sequence: delivery.sequence,
+        payload: delivery.bytes.to_vec(),
     }
 }
 
@@ -188,6 +240,43 @@ async fn next_delivery(viewer: Option<&mut Viewer>) -> Option<Delivery> {
     match viewer {
         Some(viewer) => viewer.recv().await,
         None => std::future::pending().await,
+    }
+}
+
+/// Read the client's frames until it goes away or sends something unreadable.
+async fn read_client(
+    reader: &mut OwnedReadHalf,
+    control: &tokio::sync::mpsc::UnboundedSender<Control>,
+    leftover: Vec<u8>,
+    session: CorralSessionId,
+    run: RunId,
+    state: &Arc<DaemonState>,
+) {
+    let mut serving = Serving {
+        session,
+        run,
+        state,
+        control,
+        told_run_ended: false,
+    };
+    let mut pending = leftover;
+    let mut buffer = [0_u8; 8192];
+
+    match consume_pending(&mut pending, &mut serving).await {
+        Handled::Continue => {}
+        Handled::Close => return,
+    }
+
+    loop {
+        let read = match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => read,
+        };
+        pending.extend_from_slice(&buffer[..read]);
+        match consume_pending(&mut pending, &mut serving).await {
+            Handled::Continue => {}
+            Handled::Close => return,
+        }
     }
 }
 
@@ -228,7 +317,7 @@ struct Serving<'a> {
     session: CorralSessionId,
     run: RunId,
     state: &'a Arc<DaemonState>,
-    attachment: Attachment,
+    control: &'a tokio::sync::mpsc::UnboundedSender<Control>,
     /// Whether this client has been told its run ended. Said once, not per
     /// keystroke: the message is written over the final screen the person is
     /// reading, and repeating it would destroy what they attached to see.
@@ -236,11 +325,7 @@ struct Serving<'a> {
 }
 
 /// Act on every complete frame in the buffer.
-async fn consume_pending(
-    pending: &mut Vec<u8>,
-    writer: &Outbound,
-    serving: &mut Serving<'_>,
-) -> Handled {
+async fn consume_pending(pending: &mut Vec<u8>, serving: &mut Serving<'_>) -> Handled {
     loop {
         match TerminalFrame::decode_from_client(pending) {
             Err(error) => {
@@ -250,7 +335,7 @@ async fn consume_pending(
             Ok(None) => return Handled::Continue,
             Ok(Some((frame, consumed))) => {
                 pending.drain(..consumed);
-                match handle(&frame, writer, serving).await {
+                match handle(&frame, serving).await {
                     Handled::Continue => {}
                     Handled::Close => return Handled::Close,
                 }
@@ -266,93 +351,45 @@ enum Handled {
 }
 
 /// Act on one client frame.
-async fn handle(frame: &TerminalFrame, writer: &Outbound, serving: &mut Serving<'_>) -> Handled {
+///
+/// A resize is not answered from here. It opens a new epoch on the session's
+/// stream, which ends every viewer's delivery — this client's writer notices,
+/// rejoins, and sends the new screen. Answering it here as well would send
+/// the same screen twice.
+async fn handle(frame: &TerminalFrame, serving: &mut Serving<'_>) -> Handled {
     match frame.kind {
-        // A kind this build does not know is skipped, not fatal: the length
-        // prefix said exactly how much to drop, and refusing would make every
-        // future frame kind a breaking change. The rule itself lives in the
-        // protocol crate so both receivers cannot drift apart on it.
         kind if kind.is_skippable() => Handled::Continue,
         FrameKind::Input => {
-            // The client-direction ceiling is applied at the decode boundary,
-            // where it stops a header from reserving the buffer — not here,
-            // where the bytes have already been held twice.
             let bytes = frame.payload.clone();
             match ask_session(serving, move |handle| handle.write_input(bytes)).await {
                 Some(Ok(())) => Handled::Continue,
-                // The run ended while this person was attached. Its final
-                // screen is still in front of them and still worth reading, so
-                // they are told once rather than disconnected.
                 Some(Err(InputRefused::RunEnded)) => {
                     if std::mem::replace(&mut serving.told_run_ended, true) {
                         return Handled::Continue;
                     }
-                    channel_error(
-                        writer,
-                        &serving.attachment,
-                        InputRefused::RunEnded.to_string(),
-                    )
-                    .await
+                    channel_error(serving, InputRefused::RunEnded.to_string())
                 }
-                // A session that no longer answers cannot receive keystrokes,
-                // and a channel that silently swallowed them would leave a
-                // person typing into nothing.
                 _ => Handled::Close,
             }
         }
         FrameKind::Resize => {
             let Some(geometry) = decode_geometry(&frame.payload) else {
-                // A size Corral will not build is ignored rather than acted
-                // on; the client keeps the geometry it has.
                 return Handled::Continue;
             };
-            // The client asked because its own desired geometry changed. It
-            // must never ask because it saw someone else's resize, or two
-            // viewers of different sizes would reassert forever (grill Q6).
             match ask_session(serving, move |handle| handle.resize(geometry)).await {
-                Some(Ok(Ok(_epoch))) => {
-                    // The reflow dropped every viewer, this one included. It
-                    // rejoins at the new shape with a snapshot that belongs
-                    // to it.
-                    match attach(serving.session, serving.run, serving.state).await {
-                        Some(fresh) => {
-                            serving.attachment = fresh;
-                            if send_snapshot(writer, &serving.attachment).await {
-                                Handled::Continue
-                            } else {
-                                Handled::Close
-                            }
-                        }
-                        None => Handled::Close,
-                    }
-                }
-                // The terminal refused the size. The client is told so it can
-                // stop believing its own geometry took, and the stream carries
-                // on at the size the child still has.
-                Some(Ok(Err(refused))) => {
-                    channel_error(writer, &serving.attachment, refused.to_string()).await
-                }
+                Some(Ok(Ok(_epoch))) => Handled::Continue,
+                Some(Ok(Err(refused))) => channel_error(serving, refused.to_string()),
                 _ => Handled::Close,
             }
         }
         FrameKind::ResyncRequest => {
-            match attach(serving.session, serving.run, serving.state).await {
-                Some(fresh) => {
-                    serving.attachment = fresh;
-                    if send_snapshot(writer, &serving.attachment).await {
-                        Handled::Continue
-                    } else {
-                        Handled::Close
-                    }
-                }
-                None => Handled::Close,
+            if serving.control.send(Control::Resync).is_ok() {
+                Handled::Continue
+            } else {
+                Handled::Close
             }
         }
-        // Frames only the daemon sends. A client sending one is confused about
-        // the channel's direction, which is not something to guess about.
         FrameKind::Snapshot | FrameKind::Delta | FrameKind::ChannelError => Handled::Close,
-        // Unreachable while every kind is either handled above or skippable;
-        // stated so a new kind has to decide rather than fall through.
         FrameKind::Unknown(_) => Handled::Continue,
     }
 }
@@ -405,14 +442,11 @@ async fn ask_session<T: Send + 'static>(
 }
 
 /// Send the snapshot an attachment carries, stamped with its own epoch.
-async fn send_snapshot(writer: &Outbound, attachment: &Attachment) -> bool {
+async fn send_snapshot(writer: &mut OwnedWriteHalf, attachment: &Attachment) -> bool {
     let payload = match &attachment.snapshot {
         Ok(snapshot) => snapshot.payload().to_vec(),
-        // A screen that cannot be expressed is said out loud rather than sent
-        // in pieces: a client given part of a viewport would render a screen
-        // that never existed (ADR 0003 D8).
         Err(error) => {
-            let _ = send(
+            let _ = write_frame(
                 writer,
                 &TerminalFrame {
                     kind: FrameKind::ChannelError,
@@ -425,16 +459,14 @@ async fn send_snapshot(writer: &Outbound, attachment: &Attachment) -> bool {
             return false;
         }
     };
-
-    send(
+    write_frame(
         writer,
         &TerminalFrame {
-            kind: FrameKind::Snapshot,
             // The epoch and position the snapshot actually belongs to. A
             // snapshot labelled with an epoch the client has left is discarded
-            // by any client that follows the rule, and one labelled sequence
-            // zero after thousands of chunks reads as a gap that never
-            // happened.
+            // by a client that tracks epochs, and one labelled zero after
+            // thousands of chunks reads as thousands of missed frames.
+            kind: FrameKind::Snapshot,
             epoch: attachment.epoch,
             sequence: attachment.sequence,
             payload,
@@ -443,48 +475,41 @@ async fn send_snapshot(writer: &Outbound, attachment: &Attachment) -> bool {
     .await
 }
 
-/// Tell this client why the daemon refused, without ending its channel.
-///
-/// Stamped with the attachment's own position so a client that tracks epochs
-/// does not read the message as a frame from a screen it has left.
-async fn channel_error(writer: &Outbound, attachment: &Attachment, refusal: String) -> Handled {
-    let frame = TerminalFrame {
-        kind: FrameKind::ChannelError,
-        epoch: attachment.epoch,
-        sequence: attachment.sequence,
-        payload: refusal.into_bytes(),
-    };
-    if send(writer, &frame).await {
+/// Ask the writer to tell this client why the daemon refused, without ending
+/// its channel. The writer stamps it with the position it is at, so a client
+/// that tracks epochs does not read the message as a frame from a screen it
+/// has left.
+fn channel_error(serving: &Serving<'_>, refusal: String) -> Handled {
+    if serving.control.send(Control::Error(refusal)).is_ok() {
         Handled::Continue
     } else {
         Handled::Close
     }
 }
 
-/// Where this channel's frames go: a queue the writing task drains.
-type Outbound = tokio::sync::mpsc::Sender<Vec<u8>>;
-
-/// Queue a frame for the client. Never waits.
+/// Write one frame to the client, waiting for the socket as long as it moves.
 ///
-/// `false` means this channel is over: the writer has gone, or the client has
-/// let its queue fill, which is the same fact as the slow-viewer policy in
-/// `stream.rs` — nothing a client does becomes a reason for the daemon to stop.
-async fn send(writer: &Outbound, frame: &TerminalFrame) -> bool {
-    match frame.encode() {
-        Ok(bytes) => writer.try_send(bytes).is_ok(),
+/// `false` means this channel is over: the frame could not be encoded, the
+/// socket failed, or no byte of it left within the deadline — the client has
+/// stopped reading, which is the one thing a writer may not wait on.
+async fn write_frame(writer: &mut OwnedWriteHalf, frame: &TerminalFrame) -> bool {
+    let bytes = match frame.encode() {
+        Ok(bytes) => bytes,
         Err(error) => {
             debug!(%error, "a terminal frame could not be encoded");
-            false
+            return false;
+        }
+    };
+    let mut rest = bytes.as_slice();
+    while !rest.is_empty() {
+        match tokio::time::timeout(NO_PROGRESS_DEADLINE, writer.write(rest)).await {
+            Ok(Ok(written)) if written > 0 => rest = &rest[written..],
+            _ => return false,
         }
     }
+    true
 }
 
-/// A resize payload is two big-endian u16s: rows then columns.
-///
-/// A size that is not one Corral will build is `None` and the frame is
-/// ignored, rather than reaching the emulator: four bytes from any attached
-/// client must not be able to ask for a 65535x65535 active area, and must not
-/// be able to ask for zero.
 fn decode_geometry(payload: &[u8]) -> Option<PtyGeometry> {
     if payload.len() < 4 {
         return None;
@@ -496,8 +521,6 @@ fn decode_geometry(payload: &[u8]) -> Option<PtyGeometry> {
     .ok()
 }
 
-/// Encode a geometry the way a client does, so the decoder above is tested
-/// against the format it actually meets rather than against itself.
 #[cfg(test)]
 fn encode_geometry(geometry: PtyGeometry) -> Vec<u8> {
     let mut payload = Vec::with_capacity(4);

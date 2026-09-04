@@ -33,9 +33,12 @@ pub const SUBSCRIBER_QUEUE_BYTES: usize = 4 * 1024 * 1024;
 ///
 /// A backstop under the byte budget, not the budget itself: it exists so a
 /// stream of one-byte deliveries cannot queue four million of them. Chosen
-/// above `SUBSCRIBER_QUEUE_BYTES / 8 KiB` so an ordinary PTY-sized delivery
-/// always runs out of bytes first.
-pub const SUBSCRIBER_QUEUE_FRAMES: usize = 1024;
+/// so that any delivery of 256 bytes or more runs out of bytes first. The
+/// PR9 spike measured what a PTY read actually delivers under sustained
+/// output on macOS — about 1 KiB, not the 8 KiB this bound was first sized
+/// against — and at 1 KiB the old 1 024 frames made the budget one megabyte
+/// rather than the four the policy states.
+pub const SUBSCRIBER_QUEUE_FRAMES: usize = SUBSCRIBER_QUEUE_BYTES / 256;
 
 /// Why a viewer stopped receiving.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
