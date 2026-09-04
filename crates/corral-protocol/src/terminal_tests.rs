@@ -108,11 +108,18 @@ fn a_stream_survives_an_unknown_kind_between_known_ones() {
 /// its grill required (docs/decisions/2026-09-05-adr-0017-grill.md Q5).
 #[test]
 fn the_geometry_and_palette_kinds_are_skipped_by_a_decoder_that_predates_them() {
-    let geometry = frame(FrameKind::from_byte(7), &[0, 30, 0, 100]).encode().expect("encode");
-    let palette = frame(FrameKind::from_byte(8), b"\x1b]4;1;rgb:12/34/56\x07\x1b]10;rgb:ff/ff/ff\x07")
+    let geometry = frame(FrameKind::from_byte(7), &[0, 30, 0, 100])
         .encode()
         .expect("encode");
-    let snapshot = frame(FrameKind::Snapshot, b"a screen").encode().expect("encode");
+    let palette = frame(
+        FrameKind::from_byte(8),
+        b"\x1b]4;1;rgb:12/34/56\x07\x1b]10;rgb:ff/ff/ff\x07",
+    )
+    .encode()
+    .expect("encode");
+    let snapshot = frame(FrameKind::Snapshot, b"a screen")
+        .encode()
+        .expect("encode");
     let mut stream = Vec::new();
     stream.extend_from_slice(&geometry);
     stream.extend_from_slice(&palette);
@@ -123,7 +130,11 @@ fn the_geometry_and_palette_kinds_are_skipped_by_a_decoder_that_predates_them() 
     while let Some((decoded, consumed)) =
         TerminalFrame::decode_from_daemon(&stream[offset..]).expect("decode")
     {
-        seen.push((decoded.kind.as_byte(), decoded.kind.is_skippable(), consumed));
+        seen.push((
+            decoded.kind.as_byte(),
+            decoded.kind.is_skippable(),
+            consumed,
+        ));
         offset += consumed;
     }
     assert_eq!(
