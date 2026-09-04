@@ -7,7 +7,8 @@
 //! attach and — because resync is the only recovery path — after every moment
 //! a session was already in trouble.
 
-use qwertty_term_vt::formatter::{Content, Options, TerminalExtra};
+use qwertty_term_vt::formatter::{Content, Format, FormatOpt, Options, TerminalExtra};
+use qwertty_term_vt::modes::Mode;
 use qwertty_term_vt::point::{Coordinate, Point, Tag};
 
 use super::terminal::{AuthoritativeTerminal, Poisoned};
@@ -229,15 +230,106 @@ fn render(terminal: &AuthoritativeTerminal, scrollback_rows: usize) -> Vec<u8> {
         .format_content(&Options::vt(), &extra, content)
         .into_bytes();
 
-    // The emulator tracks the title and its serializer does not re-emit it —
-    // the one gap S1 found. A field the daemon knows and the snapshot cannot
-    // express is a divergence the client has no way to detect, so Corral
-    // closes it here (ADR 0003 D3).
+    // The formatter never emits trailing blank rows, so a client scrolls
+    // fewer times than there are history rows and history lands on its
+    // screen (PR9 spike S2). The formatter itself says how many rows it
+    // emitted: the same range as plain text, one row per line, under the
+    // same trailing-blank rule. Each missing row becomes an LF past the last
+    // row, which is exactly one scroll, so the history rows end in history.
+    // A second pass over a range the budget already bounds (D7); once per
+    // attach, resync, or reflow.
+    let range_rows = total_rows.saturating_sub(first_row);
+    let emitted_rows = match content {
+        Content::None => 0,
+        _ => {
+            let plain = inner.format_content(
+                &Options {
+                    emit: FormatOpt(Format::Plain),
+                    unwrap: false,
+                    trim: false,
+                    ..Options::default()
+                },
+                &TerminalExtra::none(),
+                content,
+            );
+            if plain.is_empty() {
+                0
+            } else {
+                plain.matches('\n').count() + 1
+            }
+        }
+    };
+    // Everything that constrains movement is opened for the trailer and
+    // restored after it: the scrolling region (a line feed scrolls into
+    // history only at the bottom of a full-screen region), origin mode (so
+    // positioning is absolute), and left/right margins (which also bend the
+    // formatter's own tab-stop trailer: its `CHA`s are margin-relative, so
+    // the stops are restated absolutely below when margins are on).
+    let region = inner.scrolling_region;
+    let origin_mode = inner.modes.get(Mode::Origin);
+    let margins = inner.modes.get(Mode::EnableLeftAndRightMargin);
+    payload.extend_from_slice(b"\x1b[?6l\x1b[r");
+    if margins {
+        payload.extend_from_slice(b"\x1b[?69l");
+    }
+    if emitted_rows < range_rows {
+        // The extras have already moved the cursor, so the padding first
+        // returns to the last row that has content: the last screen row when
+        // the content overflowed, its own row otherwise.
+        let last_content_row = emitted_rows.clamp(1, viewport_rows);
+        payload.extend_from_slice(format!("\x1b[{last_content_row};1H").as_bytes());
+        for _ in emitted_rows..range_rows {
+            payload.extend_from_slice(b"\r\n");
+        }
+    }
+    if margins {
+        payload.extend_from_slice(b"\x1b[3g");
+        for col in (0..usize::from(inner.cols)).filter(|col| inner.tabstops.get(*col)) {
+            payload.extend_from_slice(format!("\x1b[{}G\x1bH", col + 1).as_bytes());
+        }
+        payload.extend_from_slice(
+            format!("\x1b[?69h\x1b[{};{}s", region.left + 1, region.right + 1).as_bytes(),
+        );
+    }
+    if region.top != 0 || usize::from(region.bottom) + 1 != viewport_rows {
+        payload.extend_from_slice(
+            format!("\x1b[{};{}r", region.top + 1, region.bottom + 1).as_bytes(),
+        );
+    }
+    if origin_mode {
+        payload.extend_from_slice(b"\x1b[?6h");
+    }
+
     if let Some(title) = terminal.title() {
         payload.extend_from_slice(b"\x1b]2;");
         payload.extend_from_slice(title);
         payload.push(0x07);
     }
+
+    // The formatter writes the cursor position before its tab-stop trailer,
+    // whose `CHA`s move the cursor and are never undone, so every client
+    // began on the last tab stop (PR9 spike S1). Corral restates position and
+    // visibility last, after everything that moves the cursor — the padding
+    // above included. The formatter is compensated for, not claimed fixed.
+    // Origin mode makes CUP relative to the region's corner, and the extras
+    // restored that mode, so the restated position is relative when it is on.
+    let cursor = &inner.screens.active().cursor;
+    let (row, col) = if origin_mode {
+        let left = if inner.modes.get(Mode::EnableLeftAndRightMargin) {
+            region.left
+        } else {
+            0
+        };
+        (cursor.y - region.top, cursor.x - left)
+    } else {
+        (cursor.y, cursor.x)
+    };
+    payload.extend_from_slice(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
+    payload.extend_from_slice(if inner.modes.get(Mode::CursorVisible) {
+        b"\x1b[?25h"
+    } else {
+        b"\x1b[?25l"
+    });
 
     payload
 }
@@ -264,3 +356,7 @@ impl std::error::Error for SnapshotError {}
 #[cfg(test)]
 #[path = "snapshot_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "snapshot_fidelity_tests.rs"]
+mod fidelity_tests;
