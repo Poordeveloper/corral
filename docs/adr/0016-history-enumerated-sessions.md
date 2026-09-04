@@ -272,14 +272,16 @@ The working directory is rechecked on the same path for the same reason:
 both are mutable state that the decision, not the enumeration, is
 answerable for.
 
-The check binds to a file, not to a name. A version is sealed on the
-executable it was read from, so that executable is what the continuation
-runs — carried into the launch rather than resolved again from the
-provider's program name, which an in-place upgrade would answer
-differently between the check and the exec. Continuations that rest on a
+The check binds to a resolved pathname, not to a program name. A version
+is sealed on the executable it was read from, and that pathname is
+carried into the launch rather than resolved again from the provider's
+program name, which an in-place upgrade would answer differently between
+the check and the exec. It is a pathname and not a file object: nothing
+here holds the inode open, so the file that pathname names at exec may
+not be the file the version was read from. Continuations that rest on a
 durable provider binding make no version claim and resolve the program
-the way any command does. What remains is the filesystem race between
-reading a file's version and executing it.
+the way any command does. What remains is exactly that: the filesystem
+race between reading a file's version and executing its pathname.
 
 That remainder is accepted rather than closed, and it is worth stating at
 its real size. It is not a tight read-then-exec: the decision's sealing
