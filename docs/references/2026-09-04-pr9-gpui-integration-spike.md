@@ -31,7 +31,10 @@ pacing and GPU present are absent. Scenario 3/4 tables below are those
 CPU-side numbers. The screen was unlocked later the same day and the whole
 pass was repeated under the real display link, launched through
 `launchctl bootstrap gui/<uid>`; that pass is the section "Display-link
-pass" and confirms the self-driven numbers.
+pass" and confirms the self-driven numbers. Evidence is layered (grill
+Q1): the self-driven numbers are diagnostic and comparative; only the
+display-link pass carries a performance claim, and any later performance
+gate uses a real display-link environment.
 
 ## Scenario 1 — replica fidelity
 
@@ -129,7 +132,7 @@ vt100 lacks title, palette, strikethrough, tab stops and has a DECSTBM defect.
 | gpui on crates.io | yes: 0.2.2 (ledger §8 says "not on crates.io; pin a rev") |
 | macOS cold build, dev profile, deps at `opt-level = 3`, hello-window crate | **4 m 28 s** wall (1 278 s user), 445 rlibs, target 2.3 GB, binary 8.3 MB |
 | same, before the Metal toolchain existed | fails at 3 m 25 s: `cannot execute tool 'metal' due to missing Metal Toolchain; use: xcodebuild -downloadComponent MetalToolchain` |
-| Metal toolchain | needed at **build** time only (gpui's `build.rs` compiles `shaders.metal`; the metallib is embedded). `xcodebuild -downloadComponent MetalToolchain`: 704.6 MB, 45 s, no admin prompt, "Metal Toolchain 17C7003j" |
+| Metal toolchain | needed at **build** time only (gpui's `build.rs` compiles `shaders.metal`; the metallib is embedded). The spike ran `xcodebuild -downloadComponent MetalToolchain` on Host A: 704.6 MB downloaded in 45 s, no admin prompt, "Metal Toolchain 17C7003j". This changed the development machine's Xcode toolchain state; it is not a repository artifact and stays installed because PR9's macOS build needs it (grill Q1) |
 | warm rebuild after a harness edit | 0.73 s; a fresh `cargo check` of the same tree 1 m 40 s |
 | harness with corral-client + corral-protocol + qwertty + tokio as path/registry deps | builds; Cargo.lock 712 packages; binary 11.5 MB |
 | duplicate-version conflicts with the workspace | none blocking; cargo-deny counts 64 duplicated crates in gpui's tree (3× `syn`, `hashbrown`, `getrandom`, `ttf-parser`; 4× `windows-sys`; 2× `rustix`, `nix`, `toml`, `thiserror`, …) |
