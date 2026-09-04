@@ -134,7 +134,7 @@ fn the_daemon_advertises_the_contracts_it_serves() {
 
     assert_eq!(
         response["outcome"]["result"]["capabilities"],
-        json!(["attention.v1", "managed-sessions"]),
+        json!(["attention.v1", "history-sessions.v1", "managed-sessions"]),
     );
 }
 

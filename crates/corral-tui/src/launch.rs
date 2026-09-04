@@ -120,6 +120,9 @@ pub async fn continue_session(
     show: &mut dyn FnMut(&str),
 ) -> Result<Continued, RequestError> {
     serves_managed_sessions(connection)?;
+    if !serves(connection, corral_protocol::capability::HISTORY_SESSIONS) {
+        return resume_without_preflight(connection, session_id).await;
+    }
     let working_directory = working_directory.map(|path| path.to_string_lossy().into_owned());
     let decision = connection
         .session_continuation(SessionContinuationParams {
@@ -231,6 +234,33 @@ pub enum Continued {
     },
 }
 
+/// Continue against a daemon that predates the preflight (ADR 0016).
+///
+/// The same request this client sent before `session.continuation` existed,
+/// and not a degraded form of the current one: such a daemon enumerates no
+/// history rows, so nothing it can continue has a disclosure to show, and the
+/// requested directory governs the history rung alone — a Session Corral
+/// launched runs where Corral recorded it, which is the answer both builds
+/// give. Sending the newer fields anyway would have them dropped as unknown,
+/// which is the silent substitution the directory rule exists to prevent
+/// (Q35); refusing instead would take a working command away from someone who
+/// upgraded one half of a pair.
+async fn resume_without_preflight(
+    connection: &mut Connection,
+    session_id: &str,
+) -> Result<Continued, RequestError> {
+    let command_id = uuid::Uuid::new_v4().as_hyphenated().to_string();
+    connection
+        .session_resume(SessionResumeParams {
+            command_id,
+            session_id: session_id.to_owned(),
+            disclosure_revision: None,
+            working_directory: None,
+        })
+        .await
+        .map(|started| Continued::Started { started })
+}
+
 /// Refuse before asking when the daemon does not serve managed agents.
 ///
 /// `session.resume` and a provider-named `session.new` are additive, so the
@@ -240,11 +270,7 @@ pub enum Continued {
 /// carries the answer in, and asking it is what turns that into a fact about
 /// the daemon.
 fn serves_managed_sessions(connection: &Connection) -> Result<(), RequestError> {
-    if connection
-        .peer()
-        .capabilities
-        .contains(corral_protocol::capability::MANAGED_SESSIONS)
-    {
+    if serves(connection, corral_protocol::capability::MANAGED_SESSIONS) {
         return Ok(());
     }
     Err(RequestError::Refused(ProtocolError::new(
@@ -252,4 +278,9 @@ fn serves_managed_sessions(connection: &Connection) -> Result<(), RequestError> 
         "the running Corral daemon does not start or continue agent sessions; it is older than \
          this build",
     )))
+}
+
+/// Whether the daemon named this contract in its hello.
+fn serves(connection: &Connection, capability: &str) -> bool {
+    connection.peer().capabilities.contains(capability)
 }

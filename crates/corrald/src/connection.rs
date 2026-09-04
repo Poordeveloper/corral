@@ -203,6 +203,12 @@ async fn bootstrap(
             let mut capabilities = BTreeSet::from([capability::ATTENTION.to_owned()]);
             if state.hook_endpoint_was_bound() {
                 capabilities.insert(capability::MANAGED_SESSIONS.to_owned());
+                // Under the same condition, not a second one: continuing a
+                // history row composes the same injected launch a managed one
+                // does, so a daemon that cannot serve managed sessions cannot
+                // serve this either, and two conditions would let a client
+                // believe in a surface half of which is missing.
+                capabilities.insert(capability::HISTORY_SESSIONS.to_owned());
             }
             capabilities
         },

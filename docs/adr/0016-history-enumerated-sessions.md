@@ -306,6 +306,28 @@ daemon that assumed a person had been told would be the fork without the
 disclosure that `PRODUCT.md` §3 forbids; a client that decided for itself
 when one was needed would be a client deriving eligibility.
 
+## Compatibility
+
+This surface has a capability name of its own, `history-sessions.v1`:
+`session.continuation`, `session.resume`'s working directory and disclosure
+revision, and history rows in `session.list`. `managed-sessions` cannot
+answer for it — that name was minted for the managed-agent surface and a
+daemon serving it may predate this one — so a client that read it as
+permission to preflight would meet `method_not_found` for a continuation
+that worked before it was upgraded, and for every managed Session rather
+than only the rows the preflight exists for.
+
+A client that finds the name absent continues the way it did before the
+preflight existed: `session.resume` with the Session alone. Not a degraded
+form of this decision — a daemon without the capability enumerates no
+history rows, so nothing it can continue has a disclosure to show, and a
+Session Corral launched runs where Corral recorded it either way.
+
+In the other direction a client that predates this decision resumes a
+history row without a revision, and is refused with `stale_disclosure`.
+Failing closed is correct: what the row needs shown, that client cannot
+show.
+
 ## Rejected
 
 - **Watching history files for live status.** ADR 0009 D1's rejection

@@ -665,6 +665,13 @@ fn a_history_row_carries_its_origin_and_recency() {
 #[test]
 fn a_continuation_preflight_carries_its_decision_and_revision() {
     assert_eq!(SESSION_CONTINUATION, "session.continuation");
+    // The name a client asks before it offers a person this method. A daemon
+    // serving `managed-sessions` may predate the whole surface, so nothing
+    // else in the hello can answer for it.
+    assert_eq!(
+        crate::hello::capability::HISTORY_SESSIONS,
+        "history-sessions.v1"
+    );
     let params: SessionContinuationParams =
         serde_json::from_value(json!({"session_id": "s", "working_directory": "/w"}))
             .expect("decode");

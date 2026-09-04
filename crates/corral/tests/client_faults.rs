@@ -11,6 +11,7 @@ mod support;
 
 use std::time::Duration;
 
+use corral_protocol::capability;
 use support::wire::{FakeBehaviour, hello_reply, spawn_fake_daemon};
 use support::{TestAccount, run, stderr};
 
@@ -98,4 +99,40 @@ fn a_daemon_that_vanishes_mid_request_is_reported_not_replayed() {
     assert!(message.contains("closed the connection"), "{message}");
     assert!(message.contains("not retried"), "{message}");
     assert_eq!(fake.connections(), 1);
+}
+
+/// A daemon that predates the continuation preflight still continues sessions.
+///
+/// Upgrading the CLI without restarting `corrald` is the ordinary mixed-version
+/// state, and `managed-sessions` cannot answer for a method minted after it:
+/// a client that asked such a daemon for a preflight would be told
+/// `method_not_found` for `corral continue`, which worked before the upgrade —
+/// and for every managed Session, not only the history rows the preflight
+/// exists for (`AGENTS.md` §Protocol).
+#[test]
+fn a_daemon_from_before_the_preflight_is_asked_to_resume_and_not_to_preflight() {
+    let session = "9f1a2b3c-4d5e-4f60-8a71-b2c3d4e5f607";
+    let account = TestAccount::new("older-daemon").with_activation_deadline(Duration::from_secs(3));
+    let fake = spawn_fake_daemon(
+        &account.socket(),
+        FakeBehaviour::OlderDaemon {
+            capabilities: vec![
+                capability::ATTENTION.to_owned(),
+                capability::MANAGED_SESSIONS.to_owned(),
+            ],
+            session: session.to_owned(),
+        },
+    );
+
+    run(account.corral().arg("continue").arg(session));
+
+    let asked = fake.methods();
+    assert!(
+        asked.iter().any(|method| method == "session.resume"),
+        "the continuation never reached session.resume: {asked:?}"
+    );
+    assert!(
+        !asked.iter().any(|method| method == "session.continuation"),
+        "a daemon that does not serve the preflight was asked for one: {asked:?}"
+    );
 }
