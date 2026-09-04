@@ -220,6 +220,26 @@ fn a_viewer_holding_more_frames_than_bytes_is_not_desynchronised() {
     drop(viewer);
 }
 
+/// The same, at the delivery size a PTY actually hands over under load
+/// (~1 KiB, measured by the PR9 spike): three thousand of them are 3 MiB,
+/// inside the byte budget, and must not be refused by the frame backstop.
+#[test]
+fn a_viewer_holding_three_thousand_pty_sized_deliveries_is_not_desynchronised() {
+    let mut stream = TerminalStream::new();
+    let viewer = stream.attach();
+    let chunk = vec![0_u8; 1024];
+    for _ in 0..3000 {
+        let sequence = stream.advance();
+        stream.deliver(sequence, &chunk);
+    }
+    assert_eq!(
+        stream.viewers(),
+        1,
+        "a viewer was dropped by the frame backstop while its byte budget was a quarter free"
+    );
+    drop(viewer);
+}
+
 /// And the byte budget does still refuse: it is the limit, not decoration.
 #[test]
 fn a_viewer_past_its_byte_budget_is_desynchronised() {

@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 class: B   # high-consequence: terminal data path, subscriber lifecycle, backpressure/resync (grill Q13)
 writes: [crates/corrald/src/terminal_channel.rs, crates/corrald/src/terminal_channel_tests.rs]
 reads: [crates/corrald/src/runtime/stream.rs, crates/corrald/src/runtime/session.rs, crates/corrald/src/connection.rs, crates/corral-protocol/src/terminal.rs, docs/adr/0003-terminal-snapshot-format.md, docs/decisions/2026-08-24-pr3-plan-grill.md, docs/decisions/2026-09-04-pr9-spike-grill.md, docs/references/2026-09-04-pr9-gpui-integration-spike.md]
@@ -175,3 +175,29 @@ Twenty lines over the target: one owner boundary (the channel's writer and
 reader) and the six regressions grill Q10 mandated, each of which names a
 distinct failure the fix must separate. Splitting the tests from the fix
 would ship the fix without the evidence that it separates them.
+
+## Closed 2026-09-05
+
+Landed as designed, with two things the plan did not foresee, both
+surfaced in the PR:
+
+- **The frame backstop was the binding budget.** `SUBSCRIBER_QUEUE_FRAMES`
+  was sized against 8 KiB deliveries; a PTY under sustained output hands
+  the daemon about 1 KiB per read (the spike's 69 MB over 67 304 frames),
+  so 1 024 frames made the effective budget one megabyte, not the four the
+  policy states, and a reader that keeps up on average was resynced eight
+  times in ten seconds. The backstop now sits at
+  `SUBSCRIBER_QUEUE_BYTES / 256`, so any delivery of 256 bytes or more runs
+  out of bytes first — `stream.rs`'s own stated intent, one line outside the
+  plan's `writes:`, with a regression at the measured size.
+- **A writer that ends, ends the channel.** With the write half owned by
+  the writer, a client that stopped reading but kept its socket open would
+  otherwise have held the read loop, and the attachment observation, for as
+  long as it liked. `serve` now returns when either task ends.
+
+The six regressions run the daemon on a reactor thread of its own, as in
+production; a client sharing the daemon's thread starved the writer every
+time it parsed a frame. Resync counts are printed, not asserted: a reader
+that lags for a moment is resynced, which is the channel working. Checked
+against the spike harness: six 9-second storms, 79 476–79 997 frames each,
+no close, no resync.
