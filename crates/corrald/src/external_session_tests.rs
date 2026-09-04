@@ -88,6 +88,58 @@ async fn a_corroborated_delivery_makes_a_session_visible() {
     assert_eq!(outcome, Some(Discovered::Session));
 }
 
+/// Discovery is the other place an enumerated identity becomes a Session, so
+/// it retires the history row the same way a continuation does.
+///
+/// A pass resolves its entries one at a time and publishes at the end. One
+/// that read this id while nothing claimed it would otherwise publish it
+/// under a second, minted id — beside the Session discovery just created,
+/// which is one agent on two rows (ADR 0016 D2).
+#[tokio::test]
+async fn a_discovered_identity_retires_the_history_row_that_stood_for_it() {
+    let registry = registry("discovery-retires");
+    let stale = registry
+        .state
+        .with_runtime(|runtime| {
+            runtime.history.replace(
+                KnownProvider::Claude,
+                vec![crate::history::HistoryEntry {
+                    provider: KnownProvider::Claude,
+                    external_id: identity("session-abc"),
+                    last_active: at(400),
+                    observed_at: at(400),
+                    store_label: "projects".to_owned(),
+                    path: std::path::PathBuf::from("/store/session-abc.jsonl"),
+                }],
+                Vec::new(),
+                0,
+            );
+            runtime.history.generation()
+        })
+        .expect("a runtime");
+
+    discovered(
+        &registry.state,
+        KnownProvider::Claude,
+        identity("session-abc"),
+        reached(4321, at(500)),
+        observed(900),
+        None,
+    )
+    .await
+    .expect("recorded");
+
+    let (rows, generation) = registry
+        .state
+        .with_runtime(|runtime| (runtime.history.rows().len(), runtime.history.generation()))
+        .expect("a runtime");
+    assert_eq!(rows, 0, "the row outlived the Session it became");
+    assert_ne!(
+        generation, stale,
+        "a pass that resolved before this would still publish"
+    );
+}
+
 /// The Run's start is the runtime's own. A process that began before this
 /// daemon existed still began when it began, and the moment Corral looked is
 /// never written as a start time.

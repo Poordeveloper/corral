@@ -106,6 +106,13 @@ first Attested identity (ADR 0014 D5). A daemon restart re-enumerates
 rather than replays. Nothing is fabricated to avoid an empty list, and
 nothing is hidden to make one shorter than the recent window.
 
+An identity stops being one a history row may stand for at either of the two
+places it becomes a Session: a continuation in Corral, and a discovery of a
+runtime already carrying it. Both say so, because a pass resolves its entries
+one at a time and publishes the lot at the end — so one that read the identity
+while nothing claimed it would otherwise publish it under a second, minted id,
+beside the Session that had just been created.
+
 Resolution is a property of the store, not of one caller: `bind` and
 `resolve_or_create_session` both look an identity up across the kinds whose
 external id *is* a provider session identity, and a runtime incarnation or a
