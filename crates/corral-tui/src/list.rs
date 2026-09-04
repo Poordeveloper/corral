@@ -477,7 +477,15 @@ async fn continue_into(
         };
         match tokio::time::timeout(
             ANSWER,
-            crate::launch::continue_session(connection, session, shown, directory.as_deref()),
+            crate::launch::continue_session(
+                connection,
+                session,
+                shown,
+                directory.as_deref(),
+                // This surface never answers in advance; it shows the
+                // disclosure and asks, which is the `NeedsDisclosure` arm.
+                &mut |_| {},
+            ),
         )
         .await
         {
@@ -493,7 +501,7 @@ async fn continue_into(
     };
 
     match continued {
-        Ok(crate::launch::Continued::Started { started, .. }) => {
+        Ok(crate::launch::Continued::Started { started }) => {
             match open(daemon, &started.session_id, keys).await {
                 Some(notice) => Answered::Notice(notice),
                 None => Answered::Nothing,

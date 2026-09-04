@@ -484,15 +484,13 @@ async fn continue_session(connection: &mut Connection, session: &str, yes: bool)
         &resolved,
         shown,
         directory.as_deref(),
+        // Printed at the moment the disclosure has to be shown, which is
+        // before the session is continued rather than after.
+        &mut |text| eprintln!("{text}"),
     )
     .await
     {
-        Ok(corral_tui::Continued::Started { started, disclosed }) => {
-            if let Some(disclosed) = disclosed {
-                eprintln!("{disclosed}");
-            }
-            started
-        }
+        Ok(corral_tui::Continued::Started { started }) => started,
         Ok(corral_tui::Continued::NeedsDisclosure { text, .. }) => {
             eprintln!("{text}");
             eprintln!("To continue anyway: corral continue --yes {resolved}");

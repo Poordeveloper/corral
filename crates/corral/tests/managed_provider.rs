@@ -1718,11 +1718,16 @@ fn the_command_line_continues_a_history_row_with_yes() {
     );
     let stderr = support::stderr(&continued);
     assert!(continued.status.success(), "{stderr}");
+    let disclosed = stderr
+        .find("still running somewhere else")
+        .expect("--yes still shows what it said yes to");
+    let started = stderr
+        .find(&format!("session {session}"))
+        .unwrap_or_else(|| panic!("{stderr}"));
     assert!(
-        stderr.contains("still running somewhere else"),
-        "--yes still shows what it said yes to: {stderr}"
+        disclosed < started,
+        "the disclosure comes before what it disclosed: {stderr}"
     );
-    assert!(stderr.contains(&format!("session {session}")), "{stderr}");
     wait_until(SETTLE, || script.launches().len() == 1);
     assert!(
         script.launches()[0].ends_with(&format!("--resume {STORED}")),
