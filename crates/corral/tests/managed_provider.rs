@@ -1196,7 +1196,7 @@ fn two_continuations_of_one_session_start_one_runtime() {
 /// An idempotent retry is answered from its own receipt, whatever else is
 /// happening to the Session.
 ///
-/// The command id is what makes a mutation idempotent (ADR 0002 D4), and the
+/// The command id is what makes a mutation idempotent (ADR 0002, Q12), and the
 /// per-Session continuation claim serializes *different* continuations. Asking
 /// for the claim before reading the receipt conflated the two: a client that
 /// lost its answer and retried, while an unrelated continuation of the same
@@ -1620,7 +1620,7 @@ fn a_session_only_the_providers_store_knows_is_listed_and_continued() {
     // the Session and the directory. Putting the revision in the fingerprint
     // instead would make the durable receipt unreplayable the moment the
     // disclosure moved, and a client that never learned what it started is
-    // worse off than one told what it already did (ADR 0002 D4).
+    // worse off than one told what it already did (ADR 0002, Q12).
     let replayed = client
         .request(
             20,

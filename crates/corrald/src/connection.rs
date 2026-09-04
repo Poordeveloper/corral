@@ -1617,7 +1617,9 @@ fn read_session_resume(request: &Request) -> Result<ResumeSession, ProtocolError
     // and a revision is momentary, and `already_started` refuses a receipt
     // whose fingerprint has moved — so a revision here would permanently
     // deny a client that lost its response, and correctly re-ran the
-    // preflight, any way to learn what it had already started (ADR 0002 D4).
+    // preflight, any way to learn what it had already started (ADR 0002, Q12;
+    // the same exclusion `docs/decisions/2026-08-25-session-new-fingerprint-
+    // excludes-geometry.md` made for terminal geometry).
     // It is checked instead where it belongs: against the decision being acted
     // on, in the execution that acts.
     let mut fingerprint = CommandFingerprint::builder(kind).input("session", session.to_string());
@@ -1807,7 +1809,7 @@ async fn execute_session_resume(
     // first would let an unrelated continuation of the same Session, running
     // right now, turn an idempotent retry into `Busy` — a client that lost its
     // response would be told to try later and would never reach the Run it
-    // already made (ADR 0002 D4).
+    // already made (ADR 0002, Q12).
     match state.completed_managed_session(command.clone()).await {
         Ok(Some(already)) => {
             return Ok(Concluded::Accepted {

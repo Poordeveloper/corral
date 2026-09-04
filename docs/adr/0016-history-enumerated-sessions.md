@@ -311,7 +311,11 @@ command is. `session.resume`'s command fingerprint is the Session and the
 directory, because those are what the command does; a receipt is durable
 and a revision is momentary, so binding the two would leave a client that
 lost its response and correctly re-ran the preflight permanently unable to
-learn what it had already started. The revision is checked against the
+learn what it had already started. This is ADR 0002's Q12 rule — a
+fingerprint covers what the command does and nothing else — applied to
+`session.resume`'s inputs, as
+`docs/decisions/2026-08-25-session-new-fingerprint-excludes-geometry.md`
+applied it to terminal geometry. The revision is checked against the
 decision being acted on, inside the execution that acts.
 
 ## Compatibility
