@@ -35,6 +35,11 @@ async fn pass(
     let Some(home) = state.provider_home() else {
         return;
     };
+    // Read before anything is resolved, so a claim made while this pass runs
+    // is one the pass can notice rather than overwrite (ADR 0016 D2).
+    let Some(resolved_at) = state.with_runtime(|runtime| runtime.history.generation()) else {
+        return;
+    };
     for provider in KnownProvider::ALL {
         // Nothing is enumerated for a layout the matrix has not sealed at
         // the version installed here: a row is a claim that a session
@@ -61,13 +66,13 @@ async fn pass(
             continue;
         };
         let mut unresolved: Vec<HistoryEntry> = Vec::new();
-        let mut resolved = Vec::new();
+        let mut resolved: Vec<(corral_core::CorralSessionId, HistoryEntry)> = Vec::new();
         for entry in entries {
             match state
                 .session_by_external_id(named.clone(), entry.external_id.clone())
                 .await
             {
-                Ok(Some(session)) => resolved.push((session, entry.last_active)),
+                Ok(Some(session)) => resolved.push((session, entry)),
                 Ok(None) => unresolved.push(entry),
                 Err(source) => {
                     // The store could not answer; the pass says nothing new
@@ -83,7 +88,17 @@ async fn pass(
             known = resolved.len(),
             "history enumerated",
         );
-        state.with_runtime(|runtime| runtime.history.replace(provider, unresolved, resolved));
+        let published = state.with_runtime(|runtime| {
+            runtime
+                .history
+                .replace(provider, unresolved, resolved, resolved_at)
+        });
+        if published == Some(super::Published::Stale) {
+            debug!(
+                provider = provider.as_str(),
+                "a session was claimed while this pass was resolving; its answers are dropped",
+            );
+        }
     }
 }
 

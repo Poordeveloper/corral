@@ -226,7 +226,7 @@ async fn a_history_row_is_eligible_once_the_client_says_where() {
         .with_runtime(|runtime| {
             runtime
                 .history
-                .replace(KnownProvider::Claude, vec![row], Vec::new());
+                .replace(KnownProvider::Claude, vec![row], Vec::new(), 0);
         })
         .expect("the runtime is available");
     let listed = registry

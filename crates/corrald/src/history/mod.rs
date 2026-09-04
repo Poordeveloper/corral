@@ -9,5 +9,5 @@ mod task;
 pub use enumerate::{
     HistoryEntry, Recent, SealedInstall, enumerate, sealed_here, sealed_now, store_root,
 };
-pub use rows::{HistoryRow, HistoryRows};
+pub use rows::{HistoryRow, HistoryRows, Published};
 pub use task::enumerate_until_shutdown;
