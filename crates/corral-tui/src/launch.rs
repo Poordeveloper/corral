@@ -117,6 +117,7 @@ pub async fn continue_session(
     session_id: &str,
     shown: Shown,
     working_directory: Option<&std::path::Path>,
+    show: &mut dyn FnMut(&str),
 ) -> Result<Continued, RequestError> {
     serves_managed_sessions(connection)?;
     let working_directory = working_directory.map(|path| path.to_string_lossy().into_owned());
@@ -126,8 +127,8 @@ pub async fn continue_session(
             working_directory: working_directory.clone(),
         })
         .await?;
-    let (disclosure_revision, disclosed) = match decision.decision.as_str() {
-        method::CONTINUATION_ELIGIBLE => (None, None),
+    let disclosure_revision = match decision.decision.as_str() {
+        method::CONTINUATION_ELIGIBLE => None,
         method::CONTINUATION_ELIGIBLE_WITH_DISCLOSURE => {
             let (Some(disclosure), Some(revision)) =
                 (decision.disclosure, decision.disclosure_revision)
@@ -137,12 +138,19 @@ pub async fn continue_session(
                 });
             };
             match shown {
-                Shown::InAdvance => (Some(revision), Some(disclosure.text)),
+                // Before the continuation, not after it. Answering in advance
+                // is answering a question the person is owed the text of;
+                // printing it once the provider is already running says what
+                // happened, which is not a disclosure (ADR 0016 D5).
+                Shown::InAdvance => {
+                    show(&disclosure.text);
+                    Some(revision)
+                }
                 // The decision moved between being shown and being answered
                 // — a directory changed, a Run appeared — so what the person
                 // said yes to is not what would happen. Asked again rather
                 // than carried over (ADR 0016 D5).
-                Shown::Accepted(seen) if seen == revision => (Some(revision), None),
+                Shown::Accepted(seen) if seen == revision => Some(revision),
                 Shown::NotYet | Shown::Accepted(_) => {
                     return Ok(Continued::NeedsDisclosure {
                         text: disclosure.text,
@@ -154,8 +162,17 @@ pub async fn continue_session(
         // `refused`, and any decision this build has no word for: acting on
         // an unknown decision would be acting on a guess.
         _ => {
+            // The daemon's own code where it sent one. A `busy` refusal is
+            // one the person may simply send again, and answering every
+            // refusal as `session_not_continuable` tells them the opposite.
+            // Absent means a daemon that predates the field, not a permanent
+            // refusal — but there is nothing better to say than the general
+            // case (`AGENTS.md` §Protocol).
+            let code = decision
+                .code
+                .map_or(ErrorCode::SessionNotContinuable, ErrorCode::from);
             return Err(RequestError::Refused(ProtocolError::new(
-                ErrorCode::SessionNotContinuable,
+                code,
                 decision
                     .reason
                     .unwrap_or_else(|| "Corral will not continue this session".to_owned()),
@@ -174,7 +191,7 @@ pub async fn continue_session(
             working_directory,
         })
         .await
-        .map(|started| Continued::Started { started, disclosed })
+        .map(|started| Continued::Started { started })
 }
 
 /// The directory this client asks a continuation to run in: its own working
@@ -205,14 +222,13 @@ pub enum Shown {
 pub enum Continued {
     Started {
         started: SessionResumeResult,
-        /// The disclosure the daemon required, when the person answered it
-        /// in advance: a `--yes` still renders what it said yes to (ADR
-        /// 0016 D5).
-        disclosed: Option<String>,
     },
     /// The daemon requires this be shown first. Carry `revision` back with
     /// [`Shown::Accepted`] once it has been.
-    NeedsDisclosure { text: String, revision: String },
+    NeedsDisclosure {
+        text: String,
+        revision: String,
+    },
 }
 
 /// Refuse before asking when the daemon does not serve managed agents.

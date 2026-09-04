@@ -676,6 +676,7 @@ fn a_continuation_preflight_carries_its_decision_and_revision() {
         serde_json::from_value(json!({"session_id": "s"})).expect("decode");
     assert_eq!(silent.working_directory, None);
     let result = SessionContinuationResult {
+        code: None,
         decision: CONTINUATION_ELIGIBLE_WITH_DISCLOSURE.to_owned(),
         reason: None,
         disclosure: Some(ContinuationDisclosure {
@@ -699,6 +700,18 @@ fn a_continuation_preflight_carries_its_decision_and_revision() {
     .expect("decode");
     assert_eq!(refused.decision, CONTINUATION_REFUSED);
     assert_eq!(refused.disclosure, None);
+    // A daemon that predates the field sends none, and a client that reads
+    // none has learned nothing about which refusal this is — not that it is
+    // permanent.
+    assert_eq!(refused.code, None);
+
+    let busy: SessionContinuationResult = serde_json::from_value(json!({
+        "decision": "refused", "code": "busy",
+        "reason": "the registry is held by another writer",
+        "unknown_field": 1
+    }))
+    .expect("decode");
+    assert_eq!(busy.code.as_deref(), Some("busy"));
 }
 
 /// A resume may carry the revision of the disclosure the client showed; an

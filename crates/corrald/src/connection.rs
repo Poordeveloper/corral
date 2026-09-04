@@ -1652,6 +1652,7 @@ async fn session_continuation(request: &Request, state: &Arc<DaemonState>) -> Di
     let result = match decision {
         continuation::Decision::Eligible(_) => SessionContinuationResult {
             decision: method::CONTINUATION_ELIGIBLE.to_owned(),
+            code: None,
             reason: None,
             disclosure: None,
             disclosure_revision: None,
@@ -1662,6 +1663,7 @@ async fn session_continuation(request: &Request, state: &Arc<DaemonState>) -> Di
             ..
         } => SessionContinuationResult {
             decision: method::CONTINUATION_ELIGIBLE_WITH_DISCLOSURE.to_owned(),
+            code: None,
             reason: None,
             disclosure: Some(ContinuationDisclosure {
                 code: disclosure.code.to_owned(),
@@ -1669,8 +1671,12 @@ async fn session_continuation(request: &Request, state: &Arc<DaemonState>) -> Di
             }),
             disclosure_revision: Some(revision),
         },
-        continuation::Decision::Refused { reason, .. } => SessionContinuationResult {
+        // The code the daemon decided, not one the client infers: a refusal
+        // it could retry and a refusal it never can are different answers,
+        // and only this end knows which this is.
+        continuation::Decision::Refused { code, reason } => SessionContinuationResult {
             decision: method::CONTINUATION_REFUSED.to_owned(),
+            code: Some(code.as_str().to_owned()),
             reason: Some(reason),
             disclosure: None,
             disclosure_revision: None,
@@ -1733,7 +1739,10 @@ async fn continue_history_row(
             message: format!("{} is not a provider id", plan.provider),
         });
     };
-    let history = corral_core::BindingKey::history(state.node(), named, plan.external_id.clone());
+    let observed = corral_state::HistoryObservation {
+        key: corral_core::BindingKey::history(state.node(), named, plan.external_id.clone()),
+        observed_at: plan.observed_at,
+    };
     let geometry = PtyGeometry::expect_valid(24, 80);
     let committed = managed_launch::spawn_and_commit(
         state,
@@ -1745,10 +1754,10 @@ async fn continue_history_row(
         |began, at| {
             let state = Arc::clone(state);
             let command = command.clone();
-            let history = history.clone();
+            let observed = observed.clone();
             async move {
                 state
-                    .continue_history_session(command, session, run, history, began, at)
+                    .continue_history_session(command, session, run, observed, began, at)
                     .await
             }
         },

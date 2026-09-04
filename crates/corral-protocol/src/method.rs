@@ -752,6 +752,13 @@ pub struct ContinuationDisclosure {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionContinuationResult {
     pub decision: String,
+    /// Which refusal this is, so a client acts on the daemon's answer rather
+    /// than on one of its own. Absent from a daemon that predates the field
+    /// and from every decision that is not a refusal; a client that reads no
+    /// code has learned nothing about the kind, not that the kind is
+    /// permanent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     /// Why a refusal, in the person's words. Absent when there is nothing
     /// to explain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
