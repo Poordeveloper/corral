@@ -119,6 +119,36 @@ fn an_unknown_frame_writes_nothing() {
     assert!(out.is_empty());
 }
 
+/// ADR 0017's `Geometry` (7) and `Palette` (8), applied by the build that
+/// predates them: nothing of either reaches the person's terminal, and the
+/// snapshot that follows still does. The pre-ADR acceptance check
+/// (docs/decisions/2026-09-05-adr-0017-grill.md Q5).
+#[test]
+fn geometry_and_palette_frames_write_nothing_and_the_snapshot_after_them_still_applies() {
+    let mut out = Vec::new();
+    for (kind, payload) in [
+        (7, b"\x00\x1e\x00\x64".to_vec()),
+        (8, b"\x1b]4;1;rgb:12/34/56\x07".to_vec()),
+    ] {
+        let frame = TerminalFrame {
+            kind: FrameKind::from_byte(kind),
+            epoch: Epoch(3),
+            sequence: Sequence(9),
+            payload,
+        };
+        apply(&frame, &mut out).expect("applied");
+        assert!(out.is_empty(), "kind {kind} reached the terminal");
+    }
+    let snapshot = TerminalFrame {
+        kind: FrameKind::Snapshot,
+        epoch: Epoch(3),
+        sequence: Sequence(9),
+        payload: b"the screen".to_vec(),
+    };
+    apply(&snapshot, &mut out).expect("applied");
+    assert!(out.ends_with(b"the screen"));
+}
+
 #[test]
 fn a_resize_frame_carries_this_clients_own_geometry() {
     let geometry = Geometry {
