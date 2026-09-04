@@ -1,5 +1,5 @@
 ---
-status: active
+status: done   # reference: docs/references/2026-09-04-pr9-gpui-integration-spike.md
 class: B
 writes: [docs/references]
 reads: [docs/adr/0003-terminal-snapshot-format.md, docs/references/architecture-benchmarks.md, docs/references/2026-08-23-s1-vt-serialization.md, docs/decisions/2026-08-22-surface-sequencing.md, crates/corral-protocol, crates/corral-client]
@@ -132,3 +132,16 @@ may not perform) is recorded as unmeasurable with the blocking fact.
   ledger by this spike.
 - The reference lands with this plan moving to `done/`; the PR9 plan then
   cites it.
+
+## Closed 2026-09-04
+
+Reference: `docs/references/2026-09-04-pr9-gpui-integration-spike.md`.
+Method deviation: the Mac's console session was locked throughout, so no
+GPUI window could start its display link; scenarios 3 and 4 were measured by
+driving `Window::draw` from a 16.7 ms ticker (real text system, no vsync or
+present), and the display-link pass is recorded as unmeasured with its
+script ready. Scenario 2 met a stop it did not expect — Xcode 26 ships
+without the Metal toolchain — and performed the 705 MB download to
+proceed. The spike found six daemon-side defects (five in snapshot minting,
+one channel close under sustained output) and one ledger correction; all are
+addressed to the PR9 plan in the reference, none edited here.
