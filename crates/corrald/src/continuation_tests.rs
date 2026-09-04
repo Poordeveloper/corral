@@ -296,3 +296,37 @@ fn sealed_at(provider: KnownProvider) -> Option<crate::history::SealedInstall> {
         version: "2.1.259".to_owned(),
     })
 }
+
+/// The directory check runs off the reactor.
+///
+/// `corrald` has one reactor thread, and `metadata` on a stalled mount holds
+/// whichever thread asks it. On that one it would hold every other client,
+/// hook delivery, and timer with it — the same reason the sealing probe is
+/// asked off it.
+#[tokio::test]
+async fn the_directory_is_checked_off_the_reactor() {
+    static CHECKED_ON: std::sync::Mutex<Option<std::thread::ThreadId>> =
+        std::sync::Mutex::new(None);
+
+    fn recording(requested: Option<&Path>) -> Result<PathBuf, DirectoryRefusal> {
+        *CHECKED_ON.lock().expect("the recorder") = Some(std::thread::current().id());
+        usable_directory(requested)
+    }
+
+    let answer = usable_directory_now(
+        Some(std::path::PathBuf::from("/definitely/not/here")),
+        recording,
+    )
+    .await;
+
+    assert!(matches!(answer, Some(Err(DirectoryRefusal::Missing(_)))));
+    let checked = CHECKED_ON
+        .lock()
+        .expect("the recorder")
+        .expect("it was asked");
+    assert_ne!(
+        checked,
+        std::thread::current().id(),
+        "the reactor thread waited on the filesystem"
+    );
+}

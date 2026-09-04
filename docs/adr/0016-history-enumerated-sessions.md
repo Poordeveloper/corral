@@ -106,6 +106,19 @@ first Attested identity (ADR 0014 D5). A daemon restart re-enumerates
 rather than replays. Nothing is fabricated to avoid an empty list, and
 nothing is hidden to make one shorter than the recent window.
 
+Retracting a provider's rows is a revocation, and a pass still resolving
+against the sealed version it confirmed must not install its answers over
+one. Publishing is not: a pass that installs one provider's fresh rows says
+nothing about anyone else's evidence and invalidates nothing.
+
+Everything a continuation decision reads from the filesystem — whether the
+installed version is sealed, and whether the stated directory is usable — is
+read off the reactor. `corrald` runs one reactor thread, and a stalled mount
+holds whichever thread asks it; on that one it would hold every other client,
+hook delivery, and timer with it. A check that could not be run at all is
+answered as transient and retryable, never as a fact about the directory
+nobody looked at.
+
 An identity stops being one a history row may stand for at either of the two
 places it becomes a Session: a continuation in Corral, and a discovery of a
 runtime already carrying it. Both say so, because a pass resolves its entries

@@ -45,7 +45,8 @@ pub struct HistoryRows {
     /// own: a file that is deleted or ages out of the window stops saying
     /// anything, and a map only ever added to could never say so.
     known: HashMap<(KnownProvider, ExternalId), HistoryRow>,
-    /// Bumped whenever an identity stops being one a history row may stand
+    /// Bumped whenever an identity, or a whole provider's evidence, stops
+    /// being something a history row may stand
     /// for. A pass resolves each entry against the registry one at a time and
     /// publishes the lot at the end; a continuation that lands in between has
     /// already given that identity a Session, and the pass's answer for it is
@@ -86,7 +87,7 @@ impl HistoryRows {
                 .map_or_else(CorralSessionId::mint, |row| row.session);
             fresh.insert(key, HistoryRow { session, entry });
         }
-        self.retract(provider);
+        self.drop_rows_of(provider);
         self.rows.extend(fresh);
         self.known
             .extend(resolved.into_iter().map(|(session, entry)| {
@@ -106,6 +107,21 @@ impl HistoryRows {
     /// let a row learned under a sealed version stay listable — and
     /// continuable — after an in-place upgrade to an unmeasured one.
     pub fn retract(&mut self, provider: KnownProvider) {
+        self.drop_rows_of(provider);
+        // A pass that is resolving right now confirmed this provider sealed
+        // before it started. It no longer is, so its answers are from before
+        // the revocation and republishing them would put back rows this
+        // daemon has just said it will not act on.
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Clear one provider's rows without saying anything about its evidence.
+    ///
+    /// What `replace` does on its way to installing a fresh pass, and the
+    /// reason it is not `retract`: a publication is not a revocation, and
+    /// bumping the generation for one would invalidate work that is still
+    /// perfectly current.
+    fn drop_rows_of(&mut self, provider: KnownProvider) {
         self.rows.retain(|(held, _), _| *held != provider);
         self.known.retain(|(held, _), _| *held != provider);
     }

@@ -175,6 +175,50 @@ fn retracting_a_provider_takes_back_its_rows_and_its_recency() {
     assert_eq!(listed.len(), 2, "and everything Codex's still is, is");
 }
 
+/// A pass that confirmed a provider sealed does not republish its rows after
+/// the daemon has learned it no longer is.
+///
+/// The revocation lands while the pass is resolving. Its answers were read
+/// under the sealed version, so installing them would put back rows the
+/// continuation path has just said this daemon will not act on — one cadence
+/// of listing something it has already refused (ADR 0016 D1).
+#[test]
+fn a_pass_that_resolved_before_sealing_was_revoked_does_not_publish() {
+    let mut rows = HistoryRows::default();
+    rows.replace(KnownProvider::Claude, vec![entry("a", 10)], Vec::new(), 0);
+
+    let resolved_at = rows.generation();
+    rows.retract(KnownProvider::Claude);
+
+    assert_eq!(
+        rows.replace(
+            KnownProvider::Claude,
+            vec![entry("a", 10)],
+            Vec::new(),
+            resolved_at
+        ),
+        Published::Stale
+    );
+    assert!(rows.rows().is_empty(), "a retracted provider was relisted");
+}
+
+/// Publishing is not revoking. A pass that installs one provider's rows must
+/// not invalidate work that is still current.
+#[test]
+fn installing_a_pass_does_not_invalidate_the_next_one() {
+    let mut rows = HistoryRows::default();
+    let before = rows.generation();
+
+    rows.replace(
+        KnownProvider::Claude,
+        vec![entry("a", 10)],
+        Vec::new(),
+        before,
+    );
+
+    assert_eq!(rows.generation(), before);
+}
+
 /// A pass resolves each entry against the registry one at a time and
 /// publishes the lot at the end. A continuation that lands in between gives
 /// one of those identities a Session and forgets its row — and the pass's

@@ -137,6 +137,28 @@ pub(crate) fn usable_directory(requested: Option<&Path>) -> Result<PathBuf, Dire
     Ok(requested.to_path_buf())
 }
 
+/// The same question, asked off the reactor.
+///
+/// `corrald` runs one reactor thread. `metadata` on a stalled mount — NFS, a
+/// FUSE filesystem, a volume that went away — holds whichever thread asks for
+/// as long as the mount takes to answer, and on that thread it would hold
+/// every other client, every hook delivery, and every timer with it. The
+/// sealing probe is asked off the reactor for exactly this reason and this is
+/// the same filesystem on the same request path.
+///
+/// `None` is the check not having run at all — the blocking pool is gone,
+/// which is what a daemon on its way out looks like. Deliberately not a
+/// `DirectoryRefusal`: none of those is true of the directory, and reporting
+/// one would tell a person something about their path that nobody looked at.
+pub(crate) async fn usable_directory_now(
+    requested: Option<PathBuf>,
+    check: fn(Option<&Path>) -> Result<PathBuf, DirectoryRefusal>,
+) -> Option<Result<PathBuf, DirectoryRefusal>> {
+    tokio::task::spawn_blocking(move || check(requested.as_deref()))
+        .await
+        .ok()
+}
+
 /// What a person is told before a history row is continued (ADR 0016 D4).
 ///
 /// Three facts, and no fourth: liveness elsewhere is unknown, another
@@ -206,7 +228,20 @@ pub(crate) async fn decide_with(
                 ),
             });
         };
-        return Ok(history_row(session, &row, requested, install.executable));
+        let directory =
+            match usable_directory_now(requested.map(Path::to_path_buf), usable_directory).await {
+                Some(directory) => directory,
+                // Transient and about this daemon, not about the request, so it
+                // is the one refusal on this rung a client may simply send again.
+                None => {
+                    return Ok(Decision::Refused {
+                        code: ErrorCode::Busy,
+                        reason: "Corral could not check this session just now; try again"
+                            .to_owned(),
+                    });
+                }
+            };
+        return Ok(history_row(session, &row, directory, install.executable));
     }
     let live = match refused {
         ResumeRefused::EndUnverifiable | ResumeRefused::RunStillLive => {
@@ -228,11 +263,11 @@ pub(crate) async fn decide_with(
 fn history_row(
     session: CorralSessionId,
     row: &history::HistoryRow,
-    requested: Option<&Path>,
+    directory: Result<PathBuf, DirectoryRefusal>,
     executable: PathBuf,
 ) -> Decision {
     let provider = row.entry.provider;
-    let directory = match usable_directory(requested) {
+    let directory = match directory {
         Ok(directory) => directory,
         Err(refusal) => {
             return Decision::Refused {
