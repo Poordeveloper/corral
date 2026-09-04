@@ -279,8 +279,23 @@ provider's program name, which an in-place upgrade would answer
 differently between the check and the exec. Continuations that rest on a
 durable provider binding make no version claim and resolve the program
 the way any command does. What remains is the filesystem race between
-reading a file's version and executing it, which is a different and much
-smaller thing.
+reading a file's version and executing it.
+
+That remainder is accepted rather than closed, and it is worth stating at
+its real size. It is not a tight read-then-exec: the decision's sealing
+check, the launch composition, and the spawn each run off the reactor, so
+the window spans several blocking-pool hops and whatever scheduling delay
+the daemon is under. It is accepted anyway because sealing answers
+accidental version drift, not a local writer who can rewrite an
+installation at will — one who can do that can rewrite it before the
+check as easily as after, and every layer of this model rests on the
+installation being non-adversarial. Closing it means launching from a
+file descriptor rather than a pathname, which is platform work this phase
+does not take on. Detecting it after the fact is a different proposal
+with its own cost: the unmeasured process has run by then, and the
+version bound at the launch boundary reads `None` whenever the
+installation's metadata changed after the process started, so a correct
+launch followed closely by an upgrade would be killed as a wrong one.
 
 Enumeration reads the sealed shape, not an approximation of it. A tree of
 the right depth ending in a plausible identity is not what was measured:

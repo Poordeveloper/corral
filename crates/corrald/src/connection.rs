@@ -1731,8 +1731,11 @@ async fn continue_history_row(
         managed_launch::LaunchTarget {
             provider: plan.provider,
             // The file the sealing check read the version from, never the
-            // program name resolved afresh: this is the launch that claims a
-            // measured layout, so it runs what was measured (ADR 0016 D4).
+            // program name resolved afresh, which an in-place upgrade would
+            // answer differently between the check and the exec. Binding to
+            // the file does not settle that file's contents at exec: the race
+            // between reading a version and running it is the remainder D4
+            // names and accepts, not a guarantee this launch makes.
             program: plan.executable.as_os_str(),
             working_directory: &plan.working_directory,
             intent: provider::LaunchIntent::Continue {
