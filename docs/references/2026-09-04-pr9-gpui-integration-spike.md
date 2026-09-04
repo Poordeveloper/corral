@@ -27,9 +27,11 @@ and a window draws exactly once — at creation. Wrapping the harness in an
 gui/<uid>` changed nothing. So the harness drives `Window::draw` itself on a
 16.7 ms ticker whenever a view asked to be notified (`--drive-frames`); text
 shaping and rasterisation go through the real `MacTextSystem`, only vsync
-pacing and GPU present are absent. Scenario 3/4 numbers are therefore
-CPU-side frame costs; the display-link pass is listed as unmeasured, with
-the script ready.
+pacing and GPU present are absent. Scenario 3/4 tables below are those
+CPU-side numbers. The screen was unlocked later the same day and the whole
+pass was repeated under the real display link, launched through
+`launchctl bootstrap gui/<uid>`; that pass is the section "Display-link
+pass" and confirms the self-driven numbers.
 
 ## Scenario 1 — replica fidelity
 
@@ -247,21 +249,41 @@ prerequisites.
 - Two clients on one run: B resizes to 30×100; A receives a second snapshot
   (`snapshots=2`) without asking — and, per S5, no geometry with it.
 
+## Display-link pass (screen unlocked, same day)
+
+Same harness, no `--drive-frames`; the window is driven by gpui 0.2.2's
+CVDisplayLink on macOS 26.5. `ticks` counts `on_next_frame` callbacks per
+view (twelve views register twelve chains, so divide by the view count).
+
+| run | ticks (per view, per s) | paints | paint p50/p95/max | arrival→paint p50/p95 | notes |
+|---|---|---|---|---|---|
+| idle 80×24, 8 s | 65 | 3 | 38 / 40 µs | — | the link keeps ticking while the window is visible; nothing is repainted |
+| storm 80×24, coalesce 4 | 66 | 221 | 204 / 260 µs | 16.9 / 17.5 ms | channel closed at 5.7 s (S6) |
+| storm 200×60, coalesce 4 | 60 | 537 | **1 161 / 1 343 µs** (max 16.9 ms) | 18.0 / 18.8 ms | 82 482 frames, 84.4 MB, full run |
+| storm 200×60, no coalescing | 66 | 8 | — | — | channel closed at 2.1 s (S6); no comparison possible |
+| interactive echo + resync | 65 | 14 | 755 / 925 µs | 17.8 / 27.0 ms | echo arrival p50 0.67 ms; echo painted p50 18.2 ms; resync 1.31 ms |
+| twelve plain, storm on one | 62 | storm 436, each idle **436** | idle 35 / 50 µs | 17.0 / 33.2 ms | channel closed at 11.7 s (S6) |
+| twelve `cached` | 60 | storm 467, each idle **3** | — | 16.9 / 33.6 ms | full run |
+| two standalone windows | 66 | storm 26, idle **2** | — | — | channel closed at 2.4 s (S6) |
+
+Verdicts stand: paint p95 1.34 ms at 200×60 under vsync (budget 8 ms);
+arrival-to-paint is vsync-bound at 17–19 ms p50; `cached` views isolate;
+standalone windows are independent. CVDisplayLink works on macOS 26.5 for
+this gpui version. S6 recurred in four of six sustained storms in this pass
+(2.1, 2.4, 5.7, 11.7 s), which makes it the most reproducible defect the
+spike found.
+
 ## Unmeasured
 
-- **Display-link pacing, present cost, and window activation** on macOS
-  26.5 with gpui 0.2.2's CVDisplayLink (an API deprecated since macOS 15):
-  screen locked for the entire spike. The harness and `run-desk-gui.sh`
-  (`.app` + `launchctl bootstrap gui/<uid>`) are ready; the check is whether
-  `display-link ticks` climbs above 1 and paints track vsync.
 - Linux rendering (no display on `ne`).
 - Release-profile frame numbers (dev profile only; deps optimised).
+- GPU present cost as a separate number (the pass above includes it in the
+  vsync-bound latency, not in `paint`).
 
 ## Findings addressed to the PR9 plan and the ledger
 
 1. Ledger §8 "gpui not on crates.io; pin a rev" is out of date: pin
-   `gpui = "0.2.2"` (and note the CVDisplayLink question above; a newer rev
-   may be wanted for macOS 26).
+   `gpui = "0.2.2"`; its CVDisplayLink runs at 60 Hz on macOS 26.5.
 2. Xcode 26 ships without the Metal toolchain; the PR9 plan's dev-loop
    section must name the download (build-time only).
 3. `deny.toml` cannot admit gpui as it stands (25 licences, 7 unmaintained
@@ -273,7 +295,8 @@ prerequisites.
    TUI today (S1 on every attach); S5 needs an additive protocol change
    before a Desktop can host a second viewer. Follow-ups, not spike edits.
 6. Channel close under load (S6) is a daemon defect that PR9 would ship on
-   top of; its fix precedes dogfood with a Desktop.
+   top of — nine of twelve sustained storms across both passes closed the
+   channel; its fix precedes dogfood with a Desktop.
 7. 4 ms coalescing, `AnyView::cached` per terminal, tokio-on-a-thread with an
    unbounded futures channel: all hold; numbers above.
 
