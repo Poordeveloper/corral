@@ -226,3 +226,44 @@ fn a_linked_project_or_session_is_outside_the_store_and_is_not_enumerated() {
         .collect();
     assert_eq!(ids, vec![C], "only the file the store itself holds");
 }
+
+/// Three levels deep and a uuid on the end is not the sealed shape. What D1
+/// sealed is the shape itself, because that is what tells a session apart
+/// from everything else a provider keeps in its store (grill Q25) — so a
+/// directory tree that is not a date, and a rollout whose time is not one,
+/// are files Corral has not measured and does not claim.
+#[test]
+fn a_codex_path_that_is_not_the_measured_shape_is_not_a_session() {
+    let home = scratch("codex-shape");
+    let root = store_root(KnownProvider::Codex, &home);
+    let real = root.join("2026/09/02");
+    touch(
+        &real.join(format!("rollout-2026-09-02T12-49-39-{A}.jsonl")),
+        now(),
+    );
+
+    // A tree of the right depth whose names are not a date.
+    touch(
+        &root
+            .join("whatever/foo/bar")
+            .join(format!("rollout-2026-09-02T12-49-39-{B}.jsonl")),
+        now(),
+    );
+    // The date tree, with a name whose time is not one.
+    touch(&real.join(format!("rollout-garbage-{C}.jsonl")), now());
+    // And a rollout with no time at all before the identity.
+    touch(
+        &real.join(format!(
+            "rollout-{}.jsonl",
+            "0f9b6c1a-4444-4444-8444-000000000004"
+        )),
+        now(),
+    );
+
+    let entries = enumerate(KnownProvider::Codex, &root, now(), &Recent::default());
+    let ids: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry.external_id.as_str())
+        .collect();
+    assert_eq!(ids, vec![A], "only the file the measured shape describes");
+}

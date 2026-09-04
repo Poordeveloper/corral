@@ -200,11 +200,15 @@ fn session_files(provider: KnownProvider, root: &Path) -> Vec<(PathBuf, String)>
                     .map(move |path| (path, label.clone()))
             })
             .collect(),
-        // `<root>/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`.
-        KnownProvider::Codex => directories(root)
+        // `<root>/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`. The date
+        // components are checked rather than counted: three levels deep and a
+        // uuid suffix is an approximation of the sealed shape, and what D1
+        // seals is the shape itself — it is what tells a session apart from
+        // everything else a provider keeps in its store (grill Q25).
+        KnownProvider::Codex => named(root, 4)
             .into_iter()
-            .flat_map(|year| directories(&year))
-            .flat_map(|month| directories(&month))
+            .flat_map(|year| named(&year, 2))
+            .flat_map(|month| named(&month, 2))
             .flat_map(|day| {
                 let label = day
                     .strip_prefix(root)
@@ -233,13 +237,49 @@ fn identity_in_name(provider: KnownProvider, path: &Path) -> Option<ExternalId> 
         KnownProvider::Codex => {
             let rest = stem.strip_prefix("rollout-")?;
             let cut = rest.len().checked_sub(36)?;
-            if !rest.is_char_boundary(cut) || (cut > 0 && !rest[..cut].ends_with('-')) {
+            if !rest.is_char_boundary(cut) || !rest[..cut].ends_with('-') {
+                return None;
+            }
+            if !looks_like_rollout_time(&rest[..cut - 1]) {
                 return None;
             }
             &rest[cut..]
         }
     };
     looks_like_uuid(candidate).then(|| ExternalId::new(candidate).ok())?
+}
+
+/// `YYYY-MM-DDTHH-MM-SS`, the time Codex writes into a rollout's name.
+fn looks_like_rollout_time(text: &str) -> bool {
+    let mut parts = text.split('T');
+    let (Some(date), Some(time), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let date: Vec<&str> = date.split('-').collect();
+    let time: Vec<&str> = time.split('-').collect();
+    date.len() == 3
+        && time.len() == 3
+        && date
+            .iter()
+            .zip([4, 2, 2])
+            .chain(time.iter().zip([2, 2, 2]))
+            .all(|(part, len)| digits(part, len))
+}
+
+/// The subdirectories whose names are exactly `len` digits.
+fn named(dir: &Path, len: usize) -> Vec<PathBuf> {
+    directories(dir)
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| digits(name, len))
+        })
+        .collect()
+}
+
+fn digits(text: &str, len: usize) -> bool {
+    text.len() == len && text.chars().all(|c| c.is_ascii_digit())
 }
 
 fn looks_like_uuid(text: &str) -> bool {
