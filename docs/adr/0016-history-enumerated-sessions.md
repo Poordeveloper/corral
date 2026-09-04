@@ -79,6 +79,23 @@ one row, and a discovered session whose Run is still open and its history
 file are one row, because discovery is idempotent and the provider-id-keyed
 record wins (`ARCHITECTURE.md` §1).
 
+A decorated Session is still a row. Nothing live outlives the daemon that
+held it, so once a continued Session's Run has ended and that daemon is
+gone, the store is the only thing left saying the Session exists — and a
+session that vanished from the list by having been continued once is the
+disappearance this rule exists to prevent. The store's rows are therefore
+listed under the identities they resolved to, and the ones a live tier is
+already showing are dropped there rather than never produced.
+
+Resolution and publication are one answer. A pass resolves its entries
+against the registry one at a time and publishes them together; a
+continuation landing in between gives one of those identities a Session,
+and the pass's answer for it is older than that. Publishing it anyway
+would mint a second id for a provider session that now has one — and
+offer it for Continue, where the provider process is spawned before the
+store refuses the duplicate. A pass whose answers were overtaken is
+dropped, and the next one reads the store as it stands.
+
 An identity that resolves to nothing is a **history row**: live daemon
 state, origin `history`, with no Run, no runtime, and no durable Session.
 It enters the durable log at its first durable-grade fact — the person's
@@ -213,6 +230,12 @@ durable provider binding make no version claim and resolve the program
 the way any command does. What remains is the filesystem race between
 reading a file's version and executing it, which is a different and much
 smaller thing.
+
+Enumeration reads the sealed shape, not an approximation of it. A tree of
+the right depth ending in a plausible identity is not what was measured:
+Codex's dated directories are dates and its rollout names carry the time
+the measurement recorded, and a file that does not have that shape is one
+of the other things a provider keeps in its store (grill Q25).
 
 Enumeration follows no symlink. The sealed layouts describe what a
 provider writes *under* its store; a link is a name in the store pointing

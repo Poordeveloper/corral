@@ -525,6 +525,10 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
         );
     };
 
+    let shown_above: Vec<CorralSessionId> = described
+        .iter()
+        .map(|(session, ..)| session.session)
+        .collect();
     let mut sessions: Vec<serde_json::Value> = described
         .into_iter()
         .map(|(session, reported, attention, last_active)| {
@@ -543,10 +547,29 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
     );
     // Last, in their own non-live tier by recency (grill Q18): what the
     // providers' stores hold that nothing above already showed.
+    //
+    // "Already showed" is the whole of the filter, and it is why a Session
+    // Corral holds durably still has a row here once its Run has ended and
+    // the daemon that ran it is gone: the store is the only thing left saying
+    // it exists, and a session that vanished from the list by having been
+    // continued once is exactly the disappearance D2 forbids.
+    let shown: std::collections::HashSet<CorralSessionId> = shown_above
+        .into_iter()
+        .chain(
+            external
+                .iter()
+                .filter_map(|candidate| candidate.identified().map(|known| known.session)),
+        )
+        .collect();
     let history = state
         .with_runtime(|runtime| runtime.history.rows())
         .unwrap_or_default();
-    sessions.extend(history.iter().map(encode_history));
+    sessions.extend(
+        history
+            .iter()
+            .filter(|row| !shown.contains(&row.session))
+            .map(encode_history),
+    );
     match serde_json::to_value(SessionListResult { sessions }) {
         Ok(value) => Frame::result(id, value),
         Err(source) => Frame::error(

@@ -1626,7 +1626,38 @@ fn a_session_only_the_providers_store_knows_is_listed_and_continued() {
         "{kinds:?}"
     );
 
-    drop(daemon);
+    // The Run ends, and then the daemon that ran it goes away. Nothing live is
+    // left saying this Session exists — the runtime is a daemon's own and a
+    // restart starts with none — so the store is the only evidence, and the
+    // store still holds the file. A session that disappeared from the list by
+    // having been continued once is the vanishing D2 forbids: a managed
+    // session that exited and its history file are one row.
+    wait_until(SETTLE, || {
+        recorded_runs(&account.registry())
+            .first()
+            .is_some_and(|(_, end)| end.is_some())
+    });
+    daemon.signal(rustix::process::Signal::TERM);
+    let (_status, _log) = daemon.wait();
+    wait_until(SETTLE, || !support::lock_is_held(&account.lock()));
+    let restarted = daemon_running(&account, &script);
+
+    let mut after = RawClient::connect(&account.socket());
+    after.establish();
+    let row = wait_for(&mut after, |listed| {
+        listed["session_id"] == session.as_str()
+    });
+    assert_eq!(
+        row["provider"]["external_id"], STORED,
+        "the same provider session, under the id Corral minted for it: {row}"
+    );
+    assert_eq!(
+        sessions(&mut after, 7).len(),
+        1,
+        "one row, not the Session beside a fresh history row"
+    );
+
+    drop(restarted);
 }
 
 /// Wait for one listed session matching a predicate, and return it.
