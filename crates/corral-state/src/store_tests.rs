@@ -138,8 +138,11 @@ fn opened(
     store.start_managed_session(
         command,
         CorralSessionId::mint(),
-        RunId::mint(),
-        OccurrenceTime::Authoritative(at),
+        LaunchedRun {
+            run: RunId::mint(),
+            started: OccurrenceTime::Authoritative(at),
+            working_directory: std::path::PathBuf::from("/w"),
+        },
         at,
     )
 }
@@ -201,6 +204,54 @@ fn identity_survives_the_process_that_created_it() {
 
 /// Re-scanning resolves a previously seen external identity to its existing
 /// Session through binding uniqueness — never to a second Session.
+/// A Run Corral launched records where it ran; one Corral found does not.
+///
+/// The directory outlives the daemon that held the handle, which is what lets
+/// the next one continue the Session (Q35). Absent means unknown — a Run
+/// Corral did not start — and is never filled in from anywhere else.
+#[test]
+fn a_launched_run_records_where_it_ran_and_a_discovered_one_does_not() {
+    let mut store = TestStore::new("run-directory");
+    let launched = store
+        .start_managed_session(
+            &command("cmd-dir", "/w"),
+            CorralSessionId::mint(),
+            LaunchedRun {
+                run: RunId::mint(),
+                started: OccurrenceTime::Authoritative(instant(10)),
+                working_directory: std::path::PathBuf::from("/projects/corral"),
+            },
+            instant(10),
+        )
+        .expect("started");
+
+    let run = store.run(launched.run()).expect("read").expect("a Run");
+    assert_eq!(
+        run.working_directory(),
+        Some(std::path::Path::new("/projects/corral"))
+    );
+
+    let (session, binding) = managed_session(&mut store, "run-found");
+    let _ = session;
+    let discovered = store
+        .record_run_started(
+            RunId::mint(),
+            binding,
+            EvidenceSource::NodeRuntimeObservation,
+            OccurrenceTime::Authoritative(instant(20)),
+        )
+        .expect("recorded");
+    assert_eq!(
+        store
+            .run(discovered.run().id())
+            .expect("read")
+            .expect("a Run")
+            .working_directory(),
+        None,
+        "a Run Corral found was given a directory nobody observed"
+    );
+}
+
 /// The same provider session, met a second time under a different kind of
 /// binding, is the same Session.
 ///
@@ -2280,8 +2331,11 @@ fn opening_a_managed_session_refuses_a_run_id_the_log_holds() {
         .start_managed_session(
             &command("cmd-2", "/elsewhere"),
             CorralSessionId::mint(),
-            taken.run(),
-            OccurrenceTime::Authoritative(instant(20)),
+            LaunchedRun {
+                run: taken.run(),
+                started: OccurrenceTime::Authoritative(instant(20)),
+                working_directory: std::path::PathBuf::from("/w"),
+            },
             instant(20),
         )
         .expect_err("refused");
@@ -2589,8 +2643,11 @@ fn resume(
     store.resume_managed_session(
         command,
         session,
-        RunId::mint(),
-        OccurrenceTime::Authoritative(at),
+        LaunchedRun {
+            run: RunId::mint(),
+            started: OccurrenceTime::Authoritative(at),
+            working_directory: std::path::PathBuf::from("/w"),
+        },
         at,
     )
 }
@@ -3176,8 +3233,11 @@ fn a_continuation_never_lands_on_a_runtime_corral_only_discovered() {
     let continued = store.resume_managed_session(
         &continuation(),
         session,
-        RunId::mint(),
-        OccurrenceTime::Authoritative(instant(200)),
+        LaunchedRun {
+            run: RunId::mint(),
+            started: OccurrenceTime::Authoritative(instant(200)),
+            working_directory: std::path::PathBuf::from("/w"),
+        },
         instant(200),
     );
 
@@ -3320,12 +3380,15 @@ fn continuing_a_history_row_records_the_session_its_history_binding_and_its_run(
         .continue_history_session(
             &command("continue-1", "/w"),
             session,
-            run,
+            LaunchedRun {
+                run,
+                started: OccurrenceTime::Authoritative(at),
+                working_directory: std::path::PathBuf::from("/w"),
+            },
             HistoryObservation {
                 key: history.clone(),
                 observed_at: observed,
             },
-            OccurrenceTime::Authoritative(at),
             at,
         )
         .expect("recorded");
@@ -3399,12 +3462,15 @@ fn a_retried_history_continuation_replays_its_receipt() {
         .continue_history_session(
             &command,
             CorralSessionId::mint(),
-            RunId::mint(),
+            LaunchedRun {
+                run: RunId::mint(),
+                started: OccurrenceTime::Authoritative(at),
+                working_directory: std::path::PathBuf::from("/w"),
+            },
             HistoryObservation {
                 key: history.clone(),
                 observed_at: observed,
             },
-            OccurrenceTime::Authoritative(at),
             at,
         )
         .expect("recorded");
@@ -3413,12 +3479,15 @@ fn a_retried_history_continuation_replays_its_receipt() {
         .continue_history_session(
             &command,
             CorralSessionId::mint(),
-            RunId::mint(),
+            LaunchedRun {
+                run: RunId::mint(),
+                started: OccurrenceTime::Authoritative(at),
+                working_directory: std::path::PathBuf::from("/w"),
+            },
             HistoryObservation {
                 key: history.clone(),
                 observed_at: observed,
             },
-            OccurrenceTime::Authoritative(at),
             at,
         )
         .expect("replayed");

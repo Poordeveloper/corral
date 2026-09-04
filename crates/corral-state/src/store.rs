@@ -81,6 +81,20 @@ impl RecordedRun {
     }
 }
 
+/// The episode a Corral launch creates: its id, when it began, and where.
+///
+/// The three together, because the launch paths take all three and none of
+/// them may take only two: a Run recorded without where it ran is one the
+/// next daemon cannot continue, and the directory is not a thing to
+/// substitute later (Q35). Non-optional here on purpose — a Run Corral
+/// started always has one, and only a Run Corral *found* does not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchedRun {
+    pub run: RunId,
+    pub started: OccurrenceTime,
+    pub working_directory: std::path::PathBuf,
+}
+
 /// What resolving an external identity found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionResolution {
@@ -373,10 +387,14 @@ impl Store {
         &mut self,
         command: &Command,
         session: CorralSessionId,
-        run: RunId,
-        started: OccurrenceTime,
+        launched: LaunchedRun,
         at: SystemTime,
     ) -> Result<StartedManagedSession, StateError> {
+        let LaunchedRun {
+            run,
+            started,
+            working_directory,
+        } = launched;
         let node = self.node;
         // Inside the write, not before it: a store that has already concluded
         // it cannot vouch must answer that, not a refusal a caller would read
@@ -441,6 +459,7 @@ impl Store {
                         run,
                         runtime_binding: binding.id(),
                         started_at: started.authoritative(),
+                        working_directory: Some(working_directory),
                     },
                     SessionEvent::CommandAccepted {
                         command: command.id().clone(),
@@ -474,11 +493,15 @@ impl Store {
         &mut self,
         command: &Command,
         session: CorralSessionId,
-        run: RunId,
+        launched: LaunchedRun,
         observed: HistoryObservation,
-        started: OccurrenceTime,
         at: SystemTime,
     ) -> Result<StartedManagedSession, StateError> {
+        let LaunchedRun {
+            run,
+            started,
+            working_directory,
+        } = launched;
         let HistoryObservation {
             key: history,
             observed_at,
@@ -567,6 +590,7 @@ impl Store {
                         run,
                         runtime_binding: runtime.id(),
                         started_at: started.authoritative(),
+                        working_directory: Some(working_directory),
                     },
                     SessionEvent::CommandAccepted {
                         command: command.id().clone(),
@@ -600,10 +624,14 @@ impl Store {
         &mut self,
         command: &Command,
         session: CorralSessionId,
-        run: RunId,
-        started: OccurrenceTime,
+        launched: LaunchedRun,
         at: SystemTime,
     ) -> Result<StartedManagedSession, StateError> {
+        let LaunchedRun {
+            run,
+            started,
+            working_directory,
+        } = launched;
         let outcome = self.write(move |transaction| {
             let at = encoding::as_stored(at)?;
             let started = as_stored_occurrence(started)?;
@@ -642,6 +670,7 @@ impl Store {
                         run,
                         runtime_binding: binding,
                         started_at: started.authoritative(),
+                        working_directory: Some(working_directory),
                     },
                     SessionEvent::CommandAccepted {
                         command: command.id().clone(),
@@ -1084,6 +1113,10 @@ impl Store {
                 run: id,
                 runtime_binding,
                 started_at: started.authoritative(),
+                // A Run Corral found rather than launched. Where it runs is
+                // knowable from the OS and has not been looked at, so the
+                // fact is absent rather than guessed.
+                working_directory: None,
             }];
             if let Some((end, at)) = ending {
                 let at = as_stored_occurrence(at)?;

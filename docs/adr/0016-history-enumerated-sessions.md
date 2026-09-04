@@ -304,7 +304,13 @@ client's policy — the CLI and the TUI send their own working directory — and
 a later directory picker replaces that default without changing any of this.
 A Session Corral launched keeps the working directory Corral recorded for
 it; a requested directory neither overrides that nor is silently adopted
-from it.
+from it. Recorded means recorded: every Run Corral starts writes its
+directory into the durable log, so the next daemon reads it rather than a
+handle the last one held, and a Session does not stop being continuable by
+having outlived the process that continued it. A Run Corral *found* records
+none — where a discovered process runs is knowable from the OS and this
+phase does not look — and that continuation is refused rather than given a
+directory nobody observed.
 
 The requested directory is one of the facts the decision is computed from,
 so it is one of the facts the revision covers: changing directory after the
@@ -418,3 +424,18 @@ History parsing, indexing, search, and the history library (M2). Archive
 and delete. Deleting anything provider-owned, ever. The recent window's
 value (tuning). The left-behind-branch surface for continuing a live
 external session (follow-up, after S3). Remote nodes' stores (M3).
+
+**What a continuation whose provider mints a different id means.** Corral
+asks to continue X and the hook reports Y. The identity question is asked
+against the Session's provider-session binding, and a Session continued
+from a history row has none yet, so Y is established as its first live
+identity. Nothing false is recorded — D3 keeps the two claims apart, "the
+store holds X" and "the runtime here carries Y" are both true, and a
+resume reads the live binding, never the history one — but nothing records
+that the conversation moved, either. Contest is not the answer: it
+withdraws a live claim, and there is no live claim here to withdraw.
+ADR 0002 D4's `ContextHandoff` — a new Session with a lineage edge — is
+the shape that fits, and building it is a phase this one does not own.
+Not reachable in the measured behaviour: `--resume` keeps the id and
+Corral never passes `--fork-session`. Left open deliberately rather than
+answered by whichever code path happened to run first.

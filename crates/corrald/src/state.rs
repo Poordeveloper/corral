@@ -455,12 +455,11 @@ impl DaemonState {
         self: &Arc<Self>,
         command: Command,
         session: CorralSessionId,
-        run: RunId,
-        started: OccurrenceTime,
+        launched: corral_state::LaunchedRun,
         at: SystemTime,
     ) -> Result<StartedManagedSession, StateError> {
         self.off_the_reactor(move |store| {
-            store.start_managed_session(&command, session, run, started, at)
+            store.start_managed_session(&command, session, launched, at)
         })
         .await
     }
@@ -488,13 +487,12 @@ impl DaemonState {
         self: &Arc<Self>,
         command: Command,
         session: CorralSessionId,
-        run: RunId,
+        launched: corral_state::LaunchedRun,
         observed: corral_state::HistoryObservation,
-        started: OccurrenceTime,
         at: SystemTime,
     ) -> Result<StartedManagedSession, StateError> {
         self.off_the_reactor(move |store| {
-            store.continue_history_session(&command, session, run, observed, started, at)
+            store.continue_history_session(&command, session, launched, observed, at)
         })
         .await
     }
@@ -503,12 +501,11 @@ impl DaemonState {
         self: &Arc<Self>,
         command: Command,
         session: CorralSessionId,
-        run: RunId,
-        started: OccurrenceTime,
+        launched: corral_state::LaunchedRun,
         at: SystemTime,
     ) -> Result<StartedManagedSession, StateError> {
         self.off_the_reactor(move |store| {
-            store.resume_managed_session(&command, session, run, started, at)
+            store.resume_managed_session(&command, session, launched, at)
         })
         .await
     }

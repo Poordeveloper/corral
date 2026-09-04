@@ -1685,6 +1685,26 @@ fn a_session_only_the_providers_store_knows_is_listed_and_continued() {
         "one row, not the Session beside a fresh history row"
     );
 
+    // And it can be continued again. The daemon that ran it is gone, so where
+    // it ran is a fact only the store can supply — which is the whole reason
+    // a Run records it. D4 says `last Run ended Exited (any origin) →
+    // eligible`, and a Session that dropped out of that by having been
+    // continued once would be D2's disappearance seen from the control side.
+    let again = after
+        .request(
+            21,
+            "session.continuation",
+            Some(json!({
+                "session_id": session,
+                "working_directory": workspace.to_string_lossy(),
+            })),
+        )
+        .expect("session.continuation answered");
+    assert_eq!(
+        again["outcome"]["result"]["decision"], "eligible",
+        "a restart made a continued history row uncontinuable: {again}"
+    );
+
     drop(restarted);
 }
 

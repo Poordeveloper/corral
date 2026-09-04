@@ -109,17 +109,22 @@ pub(crate) fn apply(
             run,
             runtime_binding,
             started_at,
+            working_directory,
         } => {
             tx.execute(
                 "INSERT INTO runs
-                     (id, session_id, runtime_binding_id, accepted_seq, started_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                     (id, session_id, runtime_binding_id, accepted_seq, started_at_ms,
+                      working_directory)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     run.to_string(),
                     session.to_string(),
                     runtime_binding.to_string(),
                     accepted_seq,
                     started_at.map(millis).transpose()?,
+                    working_directory
+                        .as_deref()
+                        .and_then(std::path::Path::to_str),
                 ],
             )?;
         }
@@ -433,13 +438,14 @@ pub(crate) fn recorded_run(connection: &Connection, id: RunId) -> Result<Option<
 }
 
 const RUN_COLUMNS: &str = "SELECT id, session_id, runtime_binding_id, started_at_ms, \
-                           ended_at_ms, end_state FROM runs";
+                           working_directory, ended_at_ms, end_state FROM runs";
 
 type RunRow = (
     String,
     String,
     String,
     Option<i64>,
+    Option<String>,
     Option<i64>,
     Option<String>,
 );
@@ -452,17 +458,21 @@ fn run_row(row: &Row<'_>) -> rusqlite::Result<RunRow> {
         row.get(3)?,
         row.get(4)?,
         row.get(5)?,
+        row.get(6)?,
     ))
 }
 
 fn run_from(row: RunRow) -> Result<Run, StateError> {
-    let (id, session, binding, started, ended, end_state) = row;
-    let run = Run::started(
+    let (id, session, binding, started, directory, ended, end_state) = row;
+    let mut run = Run::started(
         id.parse().map_err(FatalState::from)?,
         session.parse().map_err(FatalState::from)?,
         binding.parse().map_err(FatalState::from)?,
         occurrence(started),
     );
+    if let Some(directory) = directory {
+        run = run.ran_in(std::path::PathBuf::from(directory));
+    }
     Ok(match end_state {
         None => run,
         Some(token) => run.ended(run_end_from_token(&token)?, occurrence(ended)),

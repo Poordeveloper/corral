@@ -67,12 +67,14 @@ fn every_event(session: CorralSessionId) -> Vec<SessionEvent> {
             run,
             runtime_binding: binding.id(),
             started_at: Some(instant(41)),
+            working_directory: Some(std::path::PathBuf::from("/w")),
         },
         SessionEvent::RunStarted {
             session,
             run,
             runtime_binding: binding.id(),
             started_at: None,
+            working_directory: None,
         },
         SessionEvent::RunAttached {
             session,
@@ -192,6 +194,7 @@ fn an_absent_occurrence_time_decodes_as_absent() {
         run: RunId::mint(),
         runtime_binding: BindingId::mint(),
         started_at: None,
+        working_directory: None,
     };
 
     let payload = encode(&event).expect("encodable");
@@ -201,6 +204,32 @@ fn an_absent_occurrence_time_decodes_as_absent() {
         decoded,
         SessionEvent::RunStarted {
             started_at: None,
+            ..
+        }
+    ));
+}
+
+/// A `run-started` written before Runs carried a directory decodes as one
+/// whose directory is unknown.
+///
+/// The same answer a Run Corral found gets, and deliberately so: both mean
+/// Corral cannot say where the episode ran, which refuses a continuation
+/// rather than choosing a directory for it (Q35).
+#[test]
+fn a_run_started_without_a_directory_decodes_as_unknown() {
+    let session = session();
+    let older = serde_json::json!({
+        "run_id": RunId::mint().to_string(),
+        "runtime_binding_id": BindingId::mint().to_string(),
+        "started_at_ms": 41_000,
+    });
+
+    let decoded = decode(session, "run-started", &older).expect("decodable");
+
+    assert!(matches!(
+        decoded,
+        SessionEvent::RunStarted {
+            working_directory: None,
             ..
         }
     ));

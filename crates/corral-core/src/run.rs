@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::id::{BindingId, CorralSessionId, RunId};
@@ -72,6 +73,11 @@ pub struct Run {
     runtime_binding: BindingId,
     ordinal: Option<RunOrdinal>,
     started: OccurrenceTime,
+    /// Where this episode was started, when Corral is the one that started
+    /// it. `None` is a Run Corral found rather than launched, and means the
+    /// directory is unknown — never that there was none, and never an
+    /// invitation to substitute one (Q35).
+    working_directory: Option<PathBuf>,
     ended: Option<(RunEnd, OccurrenceTime)>,
 }
 
@@ -89,8 +95,20 @@ impl Run {
             runtime_binding,
             ordinal: None,
             started,
+            working_directory: None,
             ended: None,
         }
+    }
+
+    /// Record where Corral started this Run.
+    ///
+    /// Said by the launch paths and by nothing else: a Run Corral did not
+    /// start has no directory Corral can state, and the next daemon reads
+    /// this rather than a handle the last one held.
+    #[must_use]
+    pub fn ran_in(mut self, directory: PathBuf) -> Self {
+        self.working_directory = Some(directory);
+        self
     }
 
     /// Give this Run its position within its Session.
@@ -135,6 +153,12 @@ impl Run {
     #[must_use]
     pub fn started_at(&self) -> OccurrenceTime {
         self.started
+    }
+
+    /// The directory this Run was started in, if Corral started it.
+    #[must_use]
+    pub fn working_directory(&self) -> Option<&Path> {
+        self.working_directory.as_deref()
     }
 
     #[must_use]

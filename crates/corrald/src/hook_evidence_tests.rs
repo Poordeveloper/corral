@@ -159,8 +159,11 @@ async fn a_managed_runtimes_global_entry_never_mints_a_session_whichever_arrives
             .start_managed_session(
                 command(name),
                 scope.session,
-                scope.run,
-                corral_core::OccurrenceTime::Authoritative(at(500)),
+                corral_state::LaunchedRun {
+                    run: scope.run,
+                    started: corral_core::OccurrenceTime::Authoritative(at(500)),
+                    working_directory: std::path::PathBuf::from("/w"),
+                },
                 at(500),
             )
             .await

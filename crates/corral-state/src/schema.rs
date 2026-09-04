@@ -20,7 +20,7 @@ use crate::error::{FatalState, StateError};
 /// No migration exists yet: `STORAGE_EPOCH` is `dev`, development databases
 /// are disposable, and the first migration is written by the change that
 /// needs one. A store at any other version is refused rather than guessed at.
-pub(crate) const SCHEMA_VERSION: u32 = 4;
+pub(crate) const SCHEMA_VERSION: u32 = 5;
 
 /// How long an operation waits for another writer before giving up.
 ///
@@ -96,6 +96,11 @@ CREATE TABLE runs (
     -- implicit rowid a VACUUM may renumber.
     accepted_seq       INTEGER NOT NULL,
     started_at_ms      INTEGER,
+    -- Where Corral started this episode. NULL for a Run Corral found rather
+    -- than launched, and for one whose path this store cannot hold: the
+    -- directory is unknown, which refuses a continuation rather than choosing
+    -- one (Q35).
+    working_directory  TEXT,
     ended_at_ms        INTEGER,
     end_state          TEXT
 ) STRICT;

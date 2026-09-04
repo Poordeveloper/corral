@@ -324,9 +324,8 @@ pub(crate) fn shown(required: Option<&str>, carried: Option<&str>) -> Shown {
 
 fn refused_code(refused: &ResumeRefused) -> ErrorCode {
     match refused {
-        ResumeRefused::RuntimeUnavailable => ErrorCode::Busy,
         ResumeRefused::UnknownProvider(_) => ErrorCode::UnknownProvider,
-        ResumeRefused::NotThisDaemon
+        ResumeRefused::DirectoryUnknown
         | ResumeRefused::IdentityUnknown
         | ResumeRefused::Eligibility(_)
         | ResumeRefused::RunStillLive

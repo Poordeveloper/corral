@@ -1509,12 +1509,12 @@ async fn execute_session_new(
         launch,
         geometry,
         injected,
-        |began, at| {
+        |launched, at| {
             let state = Arc::clone(state);
             let command = command.clone();
             async move {
                 state
-                    .start_managed_session(command, session, run, began, at)
+                    .start_managed_session(command, session, launched, at)
                     .await
             }
         },
@@ -1769,13 +1769,13 @@ async fn continue_history_row(
         launch,
         geometry,
         injected,
-        |began, at| {
+        |launched, at| {
             let state = Arc::clone(state);
             let command = command.clone();
             let observed = observed.clone();
             async move {
                 state
-                    .continue_history_session(command, session, run, observed, began, at)
+                    .continue_history_session(command, session, launched, observed, at)
                     .await
             }
         },
@@ -1900,12 +1900,12 @@ async fn execute_session_resume(
         launch,
         geometry,
         injected,
-        |began, at| {
+        |launched, at| {
             let state = Arc::clone(state);
             let command = command.clone();
             async move {
                 state
-                    .resume_managed_session(command, session, run, began, at)
+                    .resume_managed_session(command, session, launched, at)
                     .await
             }
         },
