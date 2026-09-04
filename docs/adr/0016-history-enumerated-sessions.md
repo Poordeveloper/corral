@@ -306,6 +306,14 @@ daemon that assumed a person had been told would be the fork without the
 disclosure that `PRODUCT.md` §3 forbids; a client that decided for itself
 when one was needed would be a client deriving eligibility.
 
+The revision is a precondition on the sender, never part of what the
+command is. `session.resume`'s command fingerprint is the Session and the
+directory, because those are what the command does; a receipt is durable
+and a revision is momentary, so binding the two would leave a client that
+lost its response and correctly re-ran the preflight permanently unable to
+learn what it had already started. The revision is checked against the
+decision being acted on, inside the execution that acts.
+
 ## Compatibility
 
 This surface has a capability name of its own, `history-sessions.v1`:

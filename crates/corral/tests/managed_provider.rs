@@ -1603,6 +1603,8 @@ fn a_session_only_the_providers_store_knows_is_listed_and_continued() {
         "the row's id is the Session's: {continued}"
     );
 
+    let run = result["run_id"].as_str().expect("a run id").to_owned();
+
     // The provider was asked to continue the conversation the store named.
     wait_until(SETTLE, || script.launches().len() == 1);
     assert!(
@@ -1610,6 +1612,29 @@ fn a_session_only_the_providers_store_knows_is_listed_and_continued() {
         "{:?}",
         script.launches()
     );
+
+    // The same command id again, carrying no revision at all — the shape
+    // refused above, from a client whose response was lost. It gets its
+    // receipt, not the refusal and not a second provider: the revision says
+    // whether a sender may issue this command, and what a command *is* stays
+    // the Session and the directory. Putting the revision in the fingerprint
+    // instead would make the durable receipt unreplayable the moment the
+    // disclosure moved, and a client that never learned what it started is
+    // worse off than one told what it already did (ADR 0002 D4).
+    let replayed = client
+        .request(
+            20,
+            "session.resume",
+            Some(json!({
+                "command_id": "history-2",
+                "session_id": session,
+                "working_directory": workspace.to_string_lossy(),
+            })),
+        )
+        .expect("session.resume answered");
+    let replayed = &replayed["outcome"]["result"];
+    assert_eq!(replayed["session_id"], session.as_str(), "{replayed}");
+    assert_eq!(replayed["run_id"], run.as_str(), "{replayed}");
 
     // And it is one session now, not a row beside a Session.
     wait_until(provider::DELIVERED, || {
@@ -1637,6 +1662,9 @@ fn a_session_only_the_providers_store_knows_is_listed_and_continued() {
             .first()
             .is_some_and(|(_, end)| end.is_some())
     });
+    // By now a second execution of the replayed command would have recorded
+    // its own Run.
+    assert_eq!(recorded_runs(&account.registry()).len(), 1);
     daemon.signal(rustix::process::Signal::TERM);
     let (_status, _log) = daemon.wait();
     wait_until(SETTLE, || !support::lock_is_held(&account.lock()));

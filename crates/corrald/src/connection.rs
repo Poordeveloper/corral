@@ -1610,6 +1610,16 @@ fn read_session_resume(request: &Request) -> Result<ResumeSession, ProtocolError
     // because a continuation of a session Corral knows only from a provider's
     // history runs where the client says (Q35), so two requests naming the
     // same Session and different directories are two different commands.
+    //
+    // The disclosure revision is deliberately not part of it, on the same
+    // reasoning terminal geometry is not: it says whether this sender may
+    // issue the command now, never what the command does. A receipt is durable
+    // and a revision is momentary, and `already_started` refuses a receipt
+    // whose fingerprint has moved — so a revision here would permanently
+    // deny a client that lost its response, and correctly re-ran the
+    // preflight, any way to learn what it had already started (ADR 0002 D4).
+    // It is checked instead where it belongs: against the decision being acted
+    // on, in the execution that acts.
     let mut fingerprint = CommandFingerprint::builder(kind).input("session", session.to_string());
     if let Some(working_directory) = &params.working_directory {
         fingerprint = fingerprint.input("working_directory", working_directory.clone());
