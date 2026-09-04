@@ -51,6 +51,16 @@ const NO_SCREEN: &str = "Screen unavailable";
 /// making everything a label.
 const OUTSIDE_CORRAL: &str = "Running outside Corral";
 
+/// A session found only in the provider's own store: no runtime Corral saw,
+/// no location it can vouch for, and the age of the store's last activity
+/// (ADR 0016 D1, grill Q25).
+fn found_in_history(provider: Option<&str>) -> String {
+    match provider {
+        Some(name) => format!("Found in {} history", product(name)),
+        None => "Found in history".to_owned(),
+    }
+}
+
 /// What a row says about a session Corral found rather than started, before
 /// anything it did has reached Corral.
 ///
@@ -110,6 +120,10 @@ pub struct SessionPresentation {
     /// worth saying. Absent for a session Corral launched, and absent again
     /// for an origin this build has no word for.
     pub origin: Option<&'static str>,
+    /// The same, for an origin whose wording names the provider.
+    pub found_in: Option<String>,
+    /// When the provider's store last saw this session act, as an age.
+    pub last_active: Option<String>,
     /// Present when Corral has found a session but nothing it did has reached
     /// Corral yet. It goes away on its own, when the session acts.
     pub warming_up: Option<&'static str>,
@@ -144,6 +158,13 @@ pub fn present_at(item: &SessionListItem, now: SystemTime) -> SessionPresentatio
         // contract says an unrecognised value is unknown rather than guessed
         // at, so the two arrive at the same place on purpose.
         _ => (MainState::Unknown, Some(UNVERIFIED)),
+    };
+    // A history row has no runtime fact at all — Corral never observed one —
+    // so "Runtime unverified" would name a runtime nothing saw (ADR 0016 D2).
+    let runtime = if item.origin.as_deref() == Some(corral_protocol::method::ORIGIN_HISTORY) {
+        None
+    } else {
+        runtime
     };
     // The daemon's claim, when it made one this build can name. Absent is an
     // older daemon, and an unrecognized spelling is no claim: either way the
@@ -207,6 +228,15 @@ pub fn present_at(item: &SessionListItem, now: SystemTime) -> SessionPresentatio
             // at, the same rule `execution_state` follows.
             _ => None,
         },
+        found_in: match item.origin.as_deref() {
+            Some(corral_protocol::method::ORIGIN_HISTORY) => Some(found_in_history(
+                item.provider.as_ref().map(|facts| facts.name.as_str()),
+            )),
+            _ => None,
+        },
+        last_active: item
+            .last_active_unix_ms
+            .map(|at| format!("Last active {} ago", age_of(at, now))),
         // A session Corral did not launch has no provider identity until a
         // delivery corroborates one. That is not a degraded runtime — the row
         // keeps whatever execution truth it has — and it is not a
@@ -346,6 +376,8 @@ impl SessionPresentation {
         // Origin first: it is the most durable thing about the row and the
         // one that explains the rest of what it does and does not say.
         lines.extend(self.origin.map(str::to_owned));
+        lines.extend(self.found_in.clone());
+        lines.extend(self.last_active.clone());
         lines.extend(self.last_known.clone());
         lines.extend(self.warming_up.map(str::to_owned));
         lines.extend(self.screen.map(str::to_owned));

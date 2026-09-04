@@ -184,6 +184,13 @@ impl Drop for FullScreen {
 }
 
 impl Frame {
+    /// What this frame would put on a terminal. For asserting a surface
+    /// without owning one.
+    #[cfg(test)]
+    pub(crate) fn painted(&self) -> String {
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
+
     pub fn new(geometry: Geometry) -> Self {
         let mut bytes = Vec::with_capacity(usize::from(geometry.rows) * 64);
         bytes.extend_from_slice(HIDE_CURSOR.as_bytes());

@@ -156,6 +156,7 @@ fn an_unknown_terminal_access_is_left_off_the_wire() {
         origin: None,
         location_hint: None,
         attention: None,
+        last_active_unix_ms: None,
     };
 
     let encoded = serde_json::to_value(&item).expect("encode");
@@ -177,6 +178,7 @@ fn absent_provider_facts_are_left_off_the_wire() {
         origin: None,
         location_hint: None,
         attention: None,
+        last_active_unix_ms: None,
     };
 
     let encoded = serde_json::to_value(&item).expect("encode");
@@ -324,6 +326,8 @@ fn session_resume_names_only_a_command_and_a_session() {
     let params = SessionResumeParams {
         command_id: "c1".to_owned(),
         session_id: "s1".to_owned(),
+        disclosure_revision: None,
+        working_directory: None,
     };
 
     let encoded = serde_json::to_value(&params).expect("encode");
@@ -452,6 +456,7 @@ fn a_list_item_carries_the_daemons_attention_claim() {
                 acknowledged: false,
             }],
         }),
+        last_active_unix_ms: None,
     };
     let encoded = serde_json::to_value(&item).expect("encode");
     assert_eq!(encoded["attention"]["state"], json!("needs_you"));
@@ -632,4 +637,112 @@ fn a_dispute_names_an_item_when_it_can_and_learns_whether_it_was_stale() {
     );
     assert_eq!(ATTENTION_REPORT, "attention.report");
     assert_eq!(ATTENTION_DISPUTE, "attention.dispute");
+}
+
+/// A history row says where it came from and when it was last active, and
+/// an older peer reads it as an unknown-origin row with unknown execution.
+#[test]
+fn a_history_row_carries_its_origin_and_recency() {
+    assert_eq!(ORIGIN_HISTORY, "history");
+    let decoded: SessionListItem = serde_json::from_value(json!({
+        "session_id": "s", "title": "Claude Code", "execution_state": "unknown",
+        "origin": "history", "last_active_unix_ms": 1_788_350_400_000_i64
+    }))
+    .expect("decode");
+    assert_eq!(decoded.origin.as_deref(), Some(ORIGIN_HISTORY));
+    assert_eq!(decoded.last_active_unix_ms, Some(1_788_350_400_000));
+    let older: SessionListItem = serde_json::from_value(json!({
+        "session_id": "s", "title": "Claude Code", "execution_state": "unknown"
+    }))
+    .expect("decode");
+    assert_eq!(older.last_active_unix_ms, None);
+}
+
+// ------------------------------------------------------------ continuation
+
+/// The preflight answers with the daemon's decision, the disclosure it
+/// wants shown, and a revision bound to that exact decision (ADR 0016 D5).
+#[test]
+fn a_continuation_preflight_carries_its_decision_and_revision() {
+    assert_eq!(SESSION_CONTINUATION, "session.continuation");
+    // The name a client asks before it offers a person this method. A daemon
+    // serving `managed-sessions` may predate the whole surface, so nothing
+    // else in the hello can answer for it.
+    assert_eq!(
+        crate::hello::capability::HISTORY_SESSIONS,
+        "history-sessions.v1"
+    );
+    let params: SessionContinuationParams =
+        serde_json::from_value(json!({"session_id": "s", "working_directory": "/w"}))
+            .expect("decode");
+    assert_eq!(params.session_id, "s");
+    assert_eq!(params.working_directory.as_deref(), Some("/w"));
+    // A client that cannot name its own working directory says nothing rather
+    // than naming one, and the daemon refuses what needs one.
+    let silent: SessionContinuationParams =
+        serde_json::from_value(json!({"session_id": "s"})).expect("decode");
+    assert_eq!(silent.working_directory, None);
+    let result = SessionContinuationResult {
+        code: None,
+        decision: CONTINUATION_ELIGIBLE_WITH_DISCLOSURE.to_owned(),
+        reason: None,
+        disclosure: Some(ContinuationDisclosure {
+            code: "history-unknown-live-state".to_owned(),
+            text: "Corral can't tell whether this session is still running somewhere else."
+                .to_owned(),
+        }),
+        disclosure_revision: Some("r1".to_owned()),
+    };
+    let encoded = serde_json::to_value(&result).expect("encode");
+    assert_eq!(encoded["decision"], json!("eligible_with_disclosure"));
+    assert_eq!(
+        encoded["disclosure"]["code"],
+        json!("history-unknown-live-state")
+    );
+    let decoded: SessionContinuationResult = serde_json::from_value(encoded).expect("decode");
+    assert_eq!(decoded.disclosure_revision.as_deref(), Some("r1"));
+    let refused: SessionContinuationResult = serde_json::from_value(json!({
+        "decision": "refused", "reason": "Still running outside Corral."
+    }))
+    .expect("decode");
+    assert_eq!(refused.decision, CONTINUATION_REFUSED);
+    assert_eq!(refused.disclosure, None);
+    // A daemon that predates the field sends none, and a client that reads
+    // none has learned nothing about which refusal this is — not that it is
+    // permanent.
+    assert_eq!(refused.code, None);
+
+    let busy: SessionContinuationResult = serde_json::from_value(json!({
+        "decision": "refused", "code": "busy",
+        "reason": "the registry is held by another writer",
+        "unknown_field": 1
+    }))
+    .expect("decode");
+    assert_eq!(busy.code.as_deref(), Some("busy"));
+}
+
+/// A resume may carry the revision of the disclosure the client showed; an
+/// older client sends none, which is how the daemon knows it showed none.
+#[test]
+fn session_resume_carries_the_disclosure_revision_it_showed() {
+    let with: SessionResumeParams = serde_json::from_value(json!({
+        "command_id": "c", "session_id": "s", "disclosure_revision": "r1",
+        "working_directory": "/w"
+    }))
+    .expect("decode");
+    assert_eq!(with.disclosure_revision.as_deref(), Some("r1"));
+    assert_eq!(with.working_directory.as_deref(), Some("/w"));
+    let without: SessionResumeParams =
+        serde_json::from_value(json!({"command_id": "c", "session_id": "s"})).expect("decode");
+    assert_eq!(without.disclosure_revision, None);
+    let encoded = serde_json::to_value(&without).expect("encode");
+    assert!(encoded.get("disclosure_revision").is_none());
+}
+
+#[test]
+fn the_stale_disclosure_code_survives_the_wire() {
+    let encoded = serde_json::to_value(ErrorCode::StaleDisclosure).expect("encode");
+    assert_eq!(encoded, json!("stale_disclosure"));
+    let decoded: ErrorCode = serde_json::from_value(encoded).expect("decode");
+    assert_eq!(decoded, ErrorCode::StaleDisclosure);
 }

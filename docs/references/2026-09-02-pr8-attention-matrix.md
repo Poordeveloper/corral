@@ -571,6 +571,36 @@ subcommand that calls the rollout files "legacy local sessions". The index
 is the provider's explicit, separate metadata surface grill Q9/Q25 said
 could be ruled on separately; nothing here reads it.
 
+### Resume from a directory other than the session's
+
+Run after the scenarios above, 2026-09-02 ~22:50 +08, in the same
+container, from a fresh `/root/elsewhere` (no git repository) against
+sessions the scenarios had left under `/root/proj`. Non-interactive resume
+was used so the run needed no driver; the interactive `claude --resume`
+and `codex resume` share the same session loader and were not exercised
+separately.
+
+- **Claude 2.1.258** — `claude --resume 48e6a7ca-… -p "Reply with exactly:
+  pong" --output-format json` from `/root/elsewhere`: exit 0, `is_error:
+  false`, `session_id` unchanged. The transcript stayed where it was filed,
+  `projects/-root-proj/48e6a7ca-….jsonl`, and grew (29 919 → 37 772 bytes,
+  mtime advanced). A new `projects/-root-elsewhere/` appeared holding only
+  `memory/`, no session file. The conversation now runs with
+  `/root/elsewhere` as its working directory.
+- **Codex 0.152.0** — `codex exec -s read-only --skip-git-repo-check resume
+  01a06247-… "Reply with exactly: pong"` from `/root/elsewhere`: exit 0,
+  banner `workdir: /root/elsewhere`, `session id` unchanged, answer `pong`.
+  The same rollout file was appended to (87 062 → 93 863 bytes, mtime
+  advanced) and the new turn records `"cwd":"/root/elsewhere"` beside the
+  original `/root/proj` lines.
+
+What this measures: a session id resolves without its directory, for both
+providers, on these versions; nothing in the store forbids continuing it
+from anywhere. What it does not decide: which directory Corral should
+continue a history row in, and what the person is told about it — the
+provider continues wherever it is started, so the choice is Corral's
+(grill Q35).
+
 ## Provider version, where it can be read
 
 Neither provider's events carry a version. Measured shapes (grill Q12):
@@ -634,6 +664,6 @@ Not sealed, and why:
 | ADR 0015: late lifecycle events after `Stop` | measured: `SubagentStop` 2–6 s after every titled turn; background-task turns |
 | ADR 0016: Claude store layout, sub-agent files, mtime on resume | measured layout; no sub-agent files on this version; mtime advances per turn; resume-touches-mtime not isolated |
 | ADR 0016: Codex thread id in the file name; headless vs interactive | measured: id in the name, session threads only; headless rollouts not exercised here (`codex exec` was not run) |
-| ADR 0016: `--resume` from another directory | not measured |
+| ADR 0016: `--resume` from another directory | measured (below): both providers resume the id from any directory, append to the original file, and carry on in the new directory; non-interactive resume as the proxy |
 | ADR 0016: enumeration cost on a large store | not measured (small stores) |
 | Grill Q12: version metadata shapes per channel | measured, table above |

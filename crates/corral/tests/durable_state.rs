@@ -108,6 +108,52 @@ fn a_registry_held_by_another_writer_is_answered_not_dropped() {
     );
 }
 
+/// The same for the continuation preflight, which reads the registry to
+/// decide and is therefore reachable by the same held lock. Every error from
+/// the decision used to end the daemon, so one other writer holding the store
+/// — a backup tool — could stop every session's control plane by way of a
+/// question about one session (`corral-state`: `Busy` is the canonical
+/// transient condition).
+#[test]
+fn a_continuation_asked_while_the_registry_is_held_is_answered_not_dropped() {
+    let account = TestAccount::new("held-continuation");
+    let _daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+    client.establish();
+
+    #[allow(clippy::disallowed_methods)]
+    let holder = rusqlite::Connection::open(account.registry()).expect("open the registry");
+    holder
+        .execute_batch("BEGIN EXCLUSIVE")
+        .expect("hold the registry");
+    let answer = client
+        .request(
+            1,
+            "session.continuation",
+            Some(serde_json::json!({
+                "session_id": "0f9b6c1a-4444-4444-8444-000000000004",
+            })),
+        )
+        .expect("the daemon answered rather than closing");
+    holder
+        .execute_batch("COMMIT")
+        .expect("release the registry");
+
+    assert_eq!(
+        answer["outcome"]["error"]["code"], "busy",
+        "expected a retryable answer, got {answer}"
+    );
+    // The daemon is still there, which is the half of this that the old
+    // behaviour took away.
+    let after = client
+        .request(2, "session.list", None)
+        .expect("the connection is still usable");
+    assert_eq!(
+        after["outcome"]["result"],
+        serde_json::json!({"sessions": []})
+    );
+}
+
 /// Once the store stops being the one the daemon validated, the daemon stops
 /// serving rather than answering from it. The caller sees the connection go,
 /// never a normal-looking empty list.

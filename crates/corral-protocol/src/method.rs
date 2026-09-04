@@ -27,6 +27,10 @@ pub const SESSION_RESUME: &str = "session.resume";
 /// Obtain a one-time token for a terminal data channel.
 pub const TERMINAL_ATTACH: &str = "terminal.attach";
 
+/// Ask whether a Session may be continued, and what a person must be told
+/// first (ADR 0016 D4/D5). The daemon decides; the client shows its words.
+pub const SESSION_CONTINUATION: &str = "session.continuation";
+
 /// How many sessions need the user, per class, as the daemon counts them.
 pub const ATTENTION_SUMMARY: &str = "attention.summary";
 
@@ -599,12 +603,20 @@ pub struct SessionListItem {
         skip_serializing_if = "Option::is_none"
     )]
     pub attention: Option<AttentionFacts>,
+    /// When the provider's store last recorded activity for this session, on
+    /// the daemon's clock. Absent means Corral has no such fact, never that
+    /// the session was never active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active_unix_ms: Option<i64>,
 }
 
 /// The origins this build names. Open on the decode side; see
 /// `SessionListItem::origin`.
 pub const ORIGIN_MANAGED: &str = "managed";
 pub const ORIGIN_DISCOVERED: &str = "discovered";
+/// Found in the provider's own session store and nowhere else yet: no
+/// runtime, no Run, execution unknown (ADR 0016 D2).
+pub const ORIGIN_HISTORY: &str = "history";
 
 /// `session.list`'s result.
 ///
@@ -701,6 +713,62 @@ pub struct SessionNewResult {
     pub run_id: String,
 }
 
+/// `session.continuation`'s parameters.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionContinuationParams {
+    pub session_id: String,
+    /// The directory the initiating client wants the continuation to run in,
+    /// as that client's own policy decides (its cwd, today). It governs a
+    /// session Corral knows only from a provider's history, which carries no
+    /// location; the daemon never substitutes one of its own. Absent means
+    /// the client did not say, which refuses a continuation that needs it
+    /// rather than picking a directory for the person (ADR 0016 D5, Q35).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+}
+
+/// The decisions this build names. Open on the decode side, read the way
+/// `execution_state` is: a decision this build has no word for is treated
+/// as a refusal, because acting on an unknown decision would be acting on a
+/// guess.
+pub const CONTINUATION_ELIGIBLE: &str = "eligible";
+pub const CONTINUATION_ELIGIBLE_WITH_DISCLOSURE: &str = "eligible_with_disclosure";
+pub const CONTINUATION_REFUSED: &str = "refused";
+
+/// What the client must show before continuing, in the daemon's words.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuationDisclosure {
+    /// A stable code for the client that wants to recognize it.
+    pub code: String,
+    /// The sentence a person reads, exactly.
+    pub text: String,
+}
+
+/// `session.continuation`'s result.
+///
+/// `disclosure_revision` correlates the disclosure the client obtained with
+/// this exact decision; carrying it back on `session.resume` says "I showed
+/// this one", never "the person consented" (ADR 0016 D5).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionContinuationResult {
+    pub decision: String,
+    /// Which refusal this is, so a client acts on the daemon's answer rather
+    /// than on one of its own. Absent from a daemon that predates the field
+    /// and from every decision that is not a refusal; a client that reads no
+    /// code has learned nothing about the kind, not that the kind is
+    /// permanent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Why a refusal, in the person's words. Absent when there is nothing
+    /// to explain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disclosure: Option<ContinuationDisclosure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disclosure_revision: Option<String>,
+}
+
 /// `session.resume`'s parameters.
 ///
 /// The Session, not the provider session: what a caller asks for is that this
@@ -714,6 +782,18 @@ pub struct SessionResumeParams {
     /// a second Run.
     pub command_id: String,
     pub session_id: String,
+    /// The revision of the disclosure this client obtained from
+    /// `session.continuation` and showed, when one was required. Absent means
+    /// none was shown — which refuses a continuation that needed one, rather
+    /// than assuming a person was told (ADR 0016 D5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disclosure_revision: Option<String>,
+    /// The same directory the preflight was asked about. The daemon recomputes
+    /// the decision from it, so a client that changed its mind after the
+    /// preflight gets a revision mismatch rather than a process in a
+    /// directory nobody was shown (Q35).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
 }
 
 /// `session.resume`'s result.

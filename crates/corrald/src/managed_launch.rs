@@ -65,10 +65,15 @@ pub(crate) async fn spawn_and_commit<Commit, Committing>(
     commit: Commit,
 ) -> Committed
 where
-    Commit: FnOnce(OccurrenceTime, SystemTime) -> Committing,
+    Commit: FnOnce(corral_state::LaunchedRun, SystemTime) -> Committing,
     Committing: Future<Output = Result<StartedManagedSession, StateError>>,
 {
     let program = std::path::PathBuf::from(launch.program());
+    // Taken before the request is spent. Every Corral launch records where it
+    // ran, and building the episode here rather than at each call site is
+    // what makes that true of all three of them rather than of whichever ones
+    // remembered (Q35).
+    let working_directory = launch.working_directory().to_path_buf();
     let pending = match spawn_off_the_reactor(launch, geometry).await {
         Ok(pending) => pending,
         // The command never ran, so no Run exists to report. Saying otherwise
@@ -123,7 +128,12 @@ where
     // blocking-pool hop and a reschedule is arbitrary under load, and an
     // instant measured after the fact is not an authoritative one.
     let began = pending.began();
-    let started = match commit(OccurrenceTime::Authoritative(began), SystemTime::now()).await {
+    let launched = corral_state::LaunchedRun {
+        run,
+        started: OccurrenceTime::Authoritative(began),
+        working_directory,
+    };
+    let started = match commit(launched, SystemTime::now()).await {
         Ok(started) => started,
         Err(error) => {
             // The child is running and its Run is not a durable fact. It is
@@ -221,18 +231,14 @@ fn abandon(pending: PendingSession) {
 /// second native resume of a provider session that may still be live is two
 /// executions driving one conversation (grill Q7).
 pub(crate) enum ResumeRefused {
-    /// The Session exists and is eligible, but this daemon did not launch it
-    /// and so does not know where it ran.
+    /// The Session is eligible, and Corral cannot say where its last Run ran.
     ///
-    /// A known boundary rather than an oversight: where a Run ran is live
-    /// state on its handle, and a daemon holding no client and no live Run
-    /// exits after its idle grace — so a continuation outlives the provider
-    /// process but not the daemon. The plan's "Known limitation" section names
-    /// what repairing it needs.
-    NotThisDaemon,
-    /// The live runtime could not be consulted at all. Not a fact about this
-    /// Session — the same request may simply be sent again.
-    RuntimeUnavailable,
+    /// Every Run Corral launches records its directory, so this is a Run
+    /// Corral *found*: where a discovered process runs is knowable from the
+    /// OS and is not something this phase looks at. Refused rather than
+    /// guessed, because a provider resolves which of its sessions an id names
+    /// by where it is started (Q35).
+    DirectoryUnknown,
     IdentityUnknown,
     Eligibility(NativeResumeEligibility),
     UnknownProvider(String),
@@ -312,24 +318,16 @@ pub(crate) async fn resume_plan(
         Some(Some(RunEnd::Unverifiable)) => return Ok(Err(ResumeRefused::EndUnverifiable)),
     }
 
-    // Live state, and the last precondition on purpose: a daemon that did not
-    // launch this Session does not know where it ran, and a provider resolves
-    // which of its own sessions an id names by the directory it was started
-    // in. Substituting one would ask for a conversation that is not there.
-    // The two `None`s here are different answers and are kept apart. A runtime
-    // that could not be consulted is a lock a holder panicked under, which says
-    // nothing about this Session; a Session the runtime does not hold is the
-    // factual claim below.
-    let Some(known) = state.with_runtime(|runtime| {
-        runtime
-            .sessions
-            .get(session)
-            .map(|handle| handle.working_directory().to_path_buf())
-    }) else {
-        return Ok(Err(ResumeRefused::RuntimeUnavailable));
-    };
-    let Some(working_directory) = known else {
-        return Ok(Err(ResumeRefused::NotThisDaemon));
+    // Read from the Run, not from a runtime handle: where a Run ran is a fact
+    // about that episode, and the daemon that held the handle is gone by the
+    // time this matters. A provider resolves which of its own sessions an id
+    // names by the directory it was started in, so an absent one is refused
+    // rather than substituted (Q35).
+    let Some(working_directory) = runs
+        .last()
+        .and_then(|run| run.working_directory().map(std::path::Path::to_path_buf))
+    else {
+        return Ok(Err(ResumeRefused::DirectoryUnknown));
     };
 
     Ok(Ok(ResumePlan {
@@ -349,13 +347,10 @@ pub(crate) struct ResumePlan {
 impl std::fmt::Display for ResumeRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotThisDaemon => f.write_str(
-                "this session was not started by the running Corral daemon, so Corral does not \
-                 know where it ran and will not continue it somewhere else",
+            Self::DirectoryUnknown => f.write_str(
+                "Corral did not start this session and does not know which directory it ran in, \
+                 so it will not continue it somewhere else",
             ),
-            Self::RuntimeUnavailable => {
-                f.write_str("Corral could not check this session just now; try again")
-            }
             Self::IdentityUnknown => f.write_str(
                 "Corral has not learned which provider session this is, so there is nothing to \
                  continue",
@@ -414,15 +409,30 @@ impl std::fmt::Display for ResumeRefused {
 /// other request, stop the hook endpoint accepting, and push relays past their
 /// interference budget, which is the same reason the spawn and every store
 /// call are already moved off it.
+pub(crate) struct LaunchTarget<'a> {
+    pub provider: KnownProvider,
+    /// The executable to run. A continuation of a history row names the file
+    /// the sealing check read the version from; a launch that makes no version
+    /// claim names the provider's program and lets exec resolve it
+    /// (ADR 0016 D4).
+    pub program: &'a std::ffi::OsStr,
+    pub working_directory: &'a std::path::Path,
+    pub intent: LaunchIntent,
+}
+
 pub(crate) async fn compose_provider_launch(
     state: &Arc<DaemonState>,
     session: CorralSessionId,
     run: RunId,
-    provider: KnownProvider,
     ownership: SessionOwnership,
-    working_directory: &std::path::Path,
-    intent: LaunchIntent,
+    target: LaunchTarget<'_>,
 ) -> Result<(LaunchRequest, Option<Injected>), String> {
+    let LaunchTarget {
+        provider,
+        program,
+        working_directory,
+        intent,
+    } = target;
     // Asked before anything is minted or written. A managed session's whole
     // point is that it reports; if nothing is listening for what it reports,
     // starting it produces a session that looks managed and can never be
@@ -478,11 +488,11 @@ pub(crate) async fn compose_provider_launch(
         }
     };
 
-    match LaunchRequest::new(
-        provider::program(provider),
-        composed.argv,
-        working_directory,
-    ) {
+    // The caller's, not this function's: a continuation of a history row may
+    // only run the executable whose version the sealing check read, while a
+    // launch that makes no version claim resolves the provider's program name
+    // the way any command does (ADR 0016 D4).
+    match LaunchRequest::new(program, composed.argv, working_directory) {
         Ok(launch) => Ok((
             launch,
             Some(Injected {

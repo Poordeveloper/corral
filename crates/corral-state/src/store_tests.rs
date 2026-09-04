@@ -138,8 +138,11 @@ fn opened(
     store.start_managed_session(
         command,
         CorralSessionId::mint(),
-        RunId::mint(),
-        OccurrenceTime::Authoritative(at),
+        LaunchedRun {
+            run: RunId::mint(),
+            started: OccurrenceTime::Authoritative(at),
+            working_directory: std::path::PathBuf::from("/w"),
+        },
         at,
     )
 }
@@ -201,6 +204,143 @@ fn identity_survives_the_process_that_created_it() {
 
 /// Re-scanning resolves a previously seen external identity to its existing
 /// Session through binding uniqueness — never to a second Session.
+/// A Run Corral launched records where it ran; one Corral found does not.
+///
+/// The directory outlives the daemon that held the handle, which is what lets
+/// the next one continue the Session (Q35). Absent means unknown — a Run
+/// Corral did not start — and is never filled in from anywhere else.
+#[test]
+fn a_launched_run_records_where_it_ran_and_a_discovered_one_does_not() {
+    let mut store = TestStore::new("run-directory");
+    let launched = store
+        .start_managed_session(
+            &command("cmd-dir", "/w"),
+            CorralSessionId::mint(),
+            LaunchedRun {
+                run: RunId::mint(),
+                started: OccurrenceTime::Authoritative(instant(10)),
+                working_directory: std::path::PathBuf::from("/projects/corral"),
+            },
+            instant(10),
+        )
+        .expect("started");
+
+    let run = store.run(launched.run()).expect("read").expect("a Run");
+    assert_eq!(
+        run.working_directory(),
+        Some(std::path::Path::new("/projects/corral"))
+    );
+
+    let (session, binding) = managed_session(&mut store, "run-found");
+    let _ = session;
+    let discovered = store
+        .record_run_started(
+            RunId::mint(),
+            binding,
+            EvidenceSource::NodeRuntimeObservation,
+            OccurrenceTime::Authoritative(instant(20)),
+        )
+        .expect("recorded");
+    assert_eq!(
+        store
+            .run(discovered.run().id())
+            .expect("read")
+            .expect("a Run")
+            .working_directory(),
+        None,
+        "a Run Corral found was given a directory nobody observed"
+    );
+}
+
+/// The same provider session, met a second time under a different kind of
+/// binding, is the same Session.
+///
+/// Enumeration files a history binding for an id the store named; the hook
+/// then reports that id live and files a provider-session binding for it.
+/// Both name one conversation, so resolution looks the identity up across
+/// kinds and the provider-session binding wins where several name it — the
+/// alternative is two rows for one agent, which is the duplication a binding
+/// key exists to prevent (ADR 0016 D2).
+#[test]
+fn one_provider_session_met_under_two_binding_kinds_is_one_session() {
+    let mut store = TestStore::new("cross-kind");
+    let node = store.node();
+
+    let SessionResolution::Created { session: known, .. } = store
+        .resolve_or_create_session(
+            key(node, BindingKind::History, "sess-x"),
+            Provenance::Discovered,
+            evidence(EvidenceSource::HistoryRecord, Assurance::Attested),
+            instant(10),
+        )
+        .expect("resolved")
+    else {
+        panic!("an identity nothing claims is a new Session");
+    };
+
+    let discovered = store
+        .resolve_or_create_session(
+            key(node, BindingKind::ProviderSession, "sess-x"),
+            Provenance::Discovered,
+            evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+            instant(20),
+        )
+        .expect("resolved");
+
+    let (SessionResolution::Created { session, .. } | SessionResolution::Existing { session, .. }) =
+        discovered;
+    assert_eq!(
+        session.id(),
+        known.id(),
+        "discovery minted a second Session for a provider session the store already knew"
+    );
+}
+
+/// Binding a conversation another Session already holds is refused, even
+/// when the key itself is free.
+///
+/// A history row names a provider session; a Corral-launched agent then
+/// resumes that same conversation from inside itself and its hook reports the
+/// id. The provider-session key is unused, so the exact-key check passes —
+/// and adding the edge would put one agent behind two rows, which is what
+/// binding uniqueness exists to stop (`ARCHITECTURE.md` §1).
+#[test]
+fn a_conversation_another_session_holds_is_not_bound_to_a_second_one() {
+    let mut store = TestStore::new("cross-kind-bind");
+    let node = store.node();
+    let SessionResolution::Created { session: known, .. } = store
+        .resolve_or_create_session(
+            key(node, BindingKind::History, "sess-y"),
+            Provenance::Discovered,
+            evidence(EvidenceSource::HistoryRecord, Assurance::Attested),
+            instant(10),
+        )
+        .expect("resolved")
+    else {
+        panic!("an identity nothing claims is a new Session");
+    };
+    let (other, _) = managed_session(&mut store, "run-elsewhere");
+
+    let refused = store.bind(
+        other,
+        key(node, BindingKind::ProviderSession, "sess-y"),
+        Provenance::Discovered,
+        evidence(EvidenceSource::ProviderHook, Assurance::Attested),
+        instant(20),
+    );
+
+    assert!(
+        matches!(
+            refused,
+            Err(StateError::Refused(Refusal::BindingClaimedByAnotherSession {
+                session,
+                ..
+            })) if session == known.id()
+        ),
+        "{refused:?}"
+    );
+}
+
 #[test]
 fn re_discovery_never_duplicates_a_session() {
     let mut store = TestStore::new("rediscovery");
@@ -2191,8 +2331,11 @@ fn opening_a_managed_session_refuses_a_run_id_the_log_holds() {
         .start_managed_session(
             &command("cmd-2", "/elsewhere"),
             CorralSessionId::mint(),
-            taken.run(),
-            OccurrenceTime::Authoritative(instant(20)),
+            LaunchedRun {
+                run: taken.run(),
+                started: OccurrenceTime::Authoritative(instant(20)),
+                working_directory: std::path::PathBuf::from("/w"),
+            },
             instant(20),
         )
         .expect_err("refused");
@@ -2500,8 +2643,11 @@ fn resume(
     store.resume_managed_session(
         command,
         session,
-        RunId::mint(),
-        OccurrenceTime::Authoritative(at),
+        LaunchedRun {
+            run: RunId::mint(),
+            started: OccurrenceTime::Authoritative(at),
+            working_directory: std::path::PathBuf::from("/w"),
+        },
         at,
     )
 }
@@ -3087,8 +3233,11 @@ fn a_continuation_never_lands_on_a_runtime_corral_only_discovered() {
     let continued = store.resume_managed_session(
         &continuation(),
         session,
-        RunId::mint(),
-        OccurrenceTime::Authoritative(instant(200)),
+        LaunchedRun {
+            run: RunId::mint(),
+            started: OccurrenceTime::Authoritative(instant(200)),
+            working_directory: std::path::PathBuf::from("/w"),
+        },
         instant(200),
     );
 
@@ -3175,4 +3324,184 @@ fn a_discovered_runtime_is_admitted_beside_the_managed_one() {
     );
 
     assert!(admitted.is_ok(), "{admitted:?}");
+}
+
+/// A history enumeration resolves an identity against every binding kind
+/// before it makes a row (ADR 0016 D2): a Session bound to a provider
+/// session id is found by that id whether the lookup names history or not,
+/// and an unknown id is nobody's.
+#[test]
+fn a_session_is_found_by_its_external_id_whatever_the_binding_kind() {
+    let mut store = TestStore::new("by-external-id");
+    let node = store.node();
+    let SessionResolution::Created { session, .. } = store
+        .resolve_or_create_session(
+            key(node, BindingKind::ProviderSession, "session-abc"),
+            Provenance::Discovered,
+            owned_runtime(),
+            instant(10),
+        )
+        .expect("resolved")
+    else {
+        panic!("a new external identity is a new Session");
+    };
+
+    let provider = ProviderId::new("claude-code").expect("usable");
+    let found = store
+        .session_by_external_id(&provider, &ExternalId::new("session-abc").expect("usable"))
+        .expect("readable");
+    assert_eq!(found, Some(session.id()));
+
+    let unknown = store
+        .session_by_external_id(&provider, &ExternalId::new("session-xyz").expect("usable"))
+        .expect("readable");
+    assert_eq!(unknown, None);
+}
+
+/// Continuing a session Corral knows only from a provider's own store puts it
+/// in the durable log for the first time: the Session, the `HistoryBinding`
+/// that says which provider session it is, the managed runtime Corral is
+/// about to own, and the Run — one transaction, or nothing (ADR 0016 D2).
+#[test]
+fn continuing_a_history_row_records_the_session_its_history_binding_and_its_run() {
+    let mut store = TestStore::new("continue-history");
+    let at = instant(500);
+    // The pass that read the store ran before the write that records it.
+    let observed = instant(300);
+    let session = CorralSessionId::mint();
+    let run = RunId::mint();
+    let history = BindingKey::history(
+        store.node(),
+        ProviderId::new("claude-code").expect("usable"),
+        ExternalId::new("session-abc").expect("usable"),
+    );
+
+    let started = store
+        .continue_history_session(
+            &command("continue-1", "/w"),
+            session,
+            LaunchedRun {
+                run,
+                started: OccurrenceTime::Authoritative(at),
+                working_directory: std::path::PathBuf::from("/w"),
+            },
+            HistoryObservation {
+                key: history.clone(),
+                observed_at: observed,
+            },
+            at,
+        )
+        .expect("recorded");
+
+    assert_eq!(started.session, session);
+    assert_eq!(started.run, run);
+    assert_eq!(
+        kinds(&store.events_of(session).expect("read")),
+        vec![
+            "session-created",
+            "binding-added",
+            "binding-added",
+            "run-started",
+            "command-accepted"
+        ]
+    );
+
+    // The history binding claims the identity and nothing about the present:
+    // Attested for what the store holds, from the store's own record, and
+    // never control-capable (ADR 0016 D3).
+    let bindings = store.bindings_of(session).expect("read");
+    let history = bindings
+        .iter()
+        .find(|binding| binding.key().kind() == BindingKind::History)
+        .expect("a history binding");
+    assert_eq!(history.key().kind(), BindingKind::History);
+    assert_eq!(history.key().external_id().as_str(), "session-abc");
+    assert_eq!(history.assurance(), Assurance::Attested);
+    assert_eq!(history.evidence().source(), EvidenceSource::HistoryRecord);
+    // Dated on the pass that read the store, not on this write: freshness
+    // asks how old the observation is (ADR 0015 D5).
+    assert_eq!(history.evidence().observed_at(), observed);
+    assert_eq!(history.provenance(), Provenance::Discovered);
+    assert!(!history.is_control_capable_runtime_binding());
+
+    // And the Run belongs to the managed runtime, which is what Corral drives.
+    let runs = store.runs_of(session).expect("read");
+    let managed = bindings
+        .iter()
+        .find(|binding| binding.is_control_capable_runtime_binding())
+        .expect("a managed runtime binding");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].runtime_binding(), managed.id());
+
+    // The store found it by the identity the provider's store named.
+    assert_eq!(
+        store
+            .session_by_external_id(
+                &ProviderId::new("claude-code").expect("usable"),
+                &ExternalId::new("session-abc").expect("usable")
+            )
+            .expect("read"),
+        Some(session)
+    );
+}
+
+/// The same continuation sent twice is one continuation: the receipt answers
+/// the retry, and no second Session appears for the same provider session.
+#[test]
+fn a_retried_history_continuation_replays_its_receipt() {
+    let mut store = TestStore::new("continue-history-retry");
+    let at = instant(500);
+    let observed = instant(300);
+    let command = command("continue-1", "/w");
+    let history = BindingKey::history(
+        store.node(),
+        ProviderId::new("claude-code").expect("usable"),
+        ExternalId::new("session-abc").expect("usable"),
+    );
+    let first = store
+        .continue_history_session(
+            &command,
+            CorralSessionId::mint(),
+            LaunchedRun {
+                run: RunId::mint(),
+                started: OccurrenceTime::Authoritative(at),
+                working_directory: std::path::PathBuf::from("/w"),
+            },
+            HistoryObservation {
+                key: history.clone(),
+                observed_at: observed,
+            },
+            at,
+        )
+        .expect("recorded");
+
+    let again = store
+        .continue_history_session(
+            &command,
+            CorralSessionId::mint(),
+            LaunchedRun {
+                run: RunId::mint(),
+                started: OccurrenceTime::Authoritative(at),
+                working_directory: std::path::PathBuf::from("/w"),
+            },
+            HistoryObservation {
+                key: history.clone(),
+                observed_at: observed,
+            },
+            at,
+        )
+        .expect("replayed");
+
+    assert_eq!(again.session, first.session);
+    assert_eq!(again.run, first.run);
+    assert_eq!(
+        store
+            .events_of(first.session)
+            .expect("read")
+            .iter()
+            .filter(|recorded| recorded.event().kind() == "session-created")
+            .count(),
+        1,
+        "a retry created a second Session"
+    );
 }

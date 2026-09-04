@@ -24,6 +24,7 @@ fn listed(execution_state: &str, terminal_access: Option<TerminalAccess>) -> Ses
         origin: None,
         location_hint: None,
         attention: None,
+        last_active_unix_ms: None,
     }
 }
 

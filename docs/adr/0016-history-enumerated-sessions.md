@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 read_when:
   - listing a session Corral has never seen run
   - reading a provider's session store or history directory for any purpose
@@ -7,10 +7,12 @@ read_when:
   - adding a provider whose session store has a different shape
 ---
 
-> Structural rulings founder-accepted 2026-09-02, rounds 1–4
-> (`docs/decisions/2026-09-02-pr8-attention-grill.md`); the ADR stays
-> proposed until the PR8 matrix measures the load-bearing facts below and
-> an acceptance reconciliation finds grill Q32's closing conditions met.
+> Accepted 2026-09-03. Structural rulings founder-accepted 2026-09-02,
+> rounds 1–4; the working-directory policy in D5 is round 5's Q35
+> (`docs/decisions/2026-09-02-pr8-attention-grill.md`). The load-bearing
+> store and resume facts are measured, version-specific, and durable in
+> `docs/evidence/pr8b-history-store-and-resume-2026-09-02.md`: they seal
+> Claude Code 2.1.258 and Codex 0.152.0 and no other version.
 
 # History-enumerated sessions: what a provider's own store may claim, and when Continue in Corral is offered
 
@@ -77,6 +79,23 @@ one row, and a discovered session whose Run is still open and its history
 file are one row, because discovery is idempotent and the provider-id-keyed
 record wins (`ARCHITECTURE.md` §1).
 
+A decorated Session is still a row. Nothing live outlives the daemon that
+held it, so once a continued Session's Run has ended and that daemon is
+gone, the store is the only thing left saying the Session exists — and a
+session that vanished from the list by having been continued once is the
+disappearance this rule exists to prevent. The store's rows are therefore
+listed under the identities they resolved to, and the ones a live tier is
+already showing are dropped there rather than never produced.
+
+Resolution and publication are one answer. A pass resolves its entries
+against the registry one at a time and publishes them together; a
+continuation landing in between gives one of those identities a Session,
+and the pass's answer for it is older than that. Publishing it anyway
+would mint a second id for a provider session that now has one — and
+offer it for Continue, where the provider process is spawned before the
+store refuses the duplicate. A pass whose answers were overtaken is
+dropped, and the next one reads the store as it stands.
+
 An identity that resolves to nothing is a **history row**: live daemon
 state, origin `history`, with no Run, no runtime, and no durable Session.
 It enters the durable log at its first durable-grade fact — the person's
@@ -86,6 +105,44 @@ transaction, exactly as a provisional external Session enters it at its
 first Attested identity (ADR 0014 D5). A daemon restart re-enumerates
 rather than replays. Nothing is fabricated to avoid an empty list, and
 nothing is hidden to make one shorter than the recent window.
+
+Retracting a provider's rows is a revocation, and a pass still resolving
+against the sealed version it confirmed must not install its answers over
+one. Publishing is not: a pass that installs one provider's fresh rows says
+nothing about anyone else's evidence and invalidates nothing.
+
+A revocation is scoped to the provider whose evidence it withdraws, for the
+same reason. What a pass publishes is one provider's rows, read from that
+provider's store; a retraction or a claim elsewhere is not a statement about
+them. Scoped wider, the cost is not one late cadence: a provider with no
+sealed install here is retracted on every pass, so one machine-wide answer
+would let it invalidate a sealed provider's rows every pass, and those rows
+would never be published at all.
+
+Everything a continuation decision reads from the filesystem — whether the
+installed version is sealed, and whether the stated directory is usable — is
+read off the reactor. `corrald` runs one reactor thread, and a stalled mount
+holds whichever thread asks it; on that one it would hold every other client,
+hook delivery, and timer with it. A check that could not be run at all is
+answered as transient and retryable, never as a fact about the directory
+nobody looked at.
+
+An identity stops being one a history row may stand for at either of the two
+places it becomes a Session: a continuation in Corral, and a discovery of a
+runtime already carrying it. Both say so, because a pass resolves its entries
+one at a time and publishes the lot at the end — so one that read the identity
+while nothing claimed it would otherwise publish it under a second, minted id,
+beside the Session that had just been created.
+
+Resolution is a property of the store, not of one caller: `bind` and
+`resolve_or_create_session` both look an identity up across the kinds whose
+external id *is* a provider session identity, and a runtime incarnation or a
+terminal id — which share the `(node, provider)` namespace without naming the
+same thing — are matched by their whole key. A key that is free can still
+name a conversation another Session holds, and that is refused rather than
+bound: a Corral-launched agent that resumes, from inside itself, a
+conversation Corral had already enumerated is one conversation, and merging
+two Sessions is not an operation this store has.
 
 ## D3 — What a history-claimed identity is entitled to: assurance is claim-scoped
 
@@ -150,15 +207,19 @@ external Run open (discovered, Attested)    unavailable in this phase:
                                             unavailable while this
                                             session remains live."
 last Run ended Exited (any origin)          eligible
-no Run known (a history row)                eligible with a disclosure:
-                                            "Corral can't tell whether
-                                            this session is still running
-                                            somewhere else. Continuing
-                                            here starts another <Provider>
-                                            process for this session."
+no Run known (a history row)                eligible with a disclosure,
+                                            in the directory the client
+                                            stated (D5): "Corral can't
+                                            tell whether this session is
+                                            still running somewhere else.
+                                            Continuing starts another
+                                            <Provider> process for this
+                                            session in <directory>."
                                             — possible concurrency, never
                                             a claim another process
-                                            exists (grill Q33)
+                                            exists (grill Q33); refused
+                                            outright if no usable
+                                            directory was stated
 ```
 
 The second row is a phase limitation, and it is never written down as the
@@ -180,11 +241,76 @@ weight, because on macOS and with integration off Corral cannot discover
 the live process at all (ADR 0014 D2), and refusing every history row
 would make the first-run list a list of things Corral will not do.
 
+The refusal a continuation preflight answers carries its code, because a
+refusal a person may simply send again and one they never can are
+different answers and only the daemon knows which this is. A client
+reading no code has learned nothing about the kind — not that the kind is
+permanent. The disclosure is shown before the continuation, including
+when it was answered in advance: text printed once the provider is
+already running says what happened, which is not a disclosure.
+
+The history binding's evidence is dated on the pass that read the store,
+never on the write that records it. Freshness asks how old the
+observation is (ADR 0015 D5), and a record's own timestamp would say
+Corral had just looked.
+
 A continuation from a history row is a managed launch like any other:
 Deterministic runtime binding, launch token, injected hooks, and the
 provider's first identity report confirming the `HistoryBinding`'s claim
 as a `ProviderSessionBinding` at Attested — or contesting it (ADR 0004
 D8), which is the one way the store's claim can be found wrong.
+
+Sealing is asked again when a history row's continuation is decided, not
+only when the store was read. The row is an observation; sealing is what
+makes it evidence, and it is a property of the binary a continuation
+launches — the one installed now, which an in-place upgrade can change
+between one enumeration pass and the next. An unmeasured version inherits
+nothing, so a row learned under a sealed version is not a licence to start
+an unmeasured one for the length of a cadence, and a decision that finds
+its provider unsealed retracts the rows rather than leaving them offered.
+The working directory is rechecked on the same path for the same reason:
+both are mutable state that the decision, not the enumeration, is
+answerable for.
+
+The check binds to a resolved pathname, not to a program name. A version
+is sealed on the executable it was read from, and that pathname is
+carried into the launch rather than resolved again from the provider's
+program name, which an in-place upgrade would answer differently between
+the check and the exec. It is a pathname and not a file object: nothing
+here holds the inode open, so the file that pathname names at exec may
+not be the file the version was read from. Continuations that rest on a
+durable provider binding make no version claim and resolve the program
+the way any command does. What remains is exactly that: the filesystem
+race between reading a file's version and executing its pathname.
+
+That remainder is accepted rather than closed, and it is worth stating at
+its real size. It is not a tight read-then-exec: the decision's sealing
+check, the launch composition, and the spawn each run off the reactor, so
+the window spans several blocking-pool hops and whatever scheduling delay
+the daemon is under. It is accepted anyway because sealing answers
+accidental version drift, not a local writer who can rewrite an
+installation at will — one who can do that can rewrite it before the
+check as easily as after, and every layer of this model rests on the
+installation being non-adversarial. Closing it means launching from a
+file descriptor rather than a pathname, which is platform work this phase
+does not take on. Detecting it after the fact is a different proposal
+with its own cost: the unmeasured process has run by then, and the
+version bound at the launch boundary reads `None` whenever the
+installation's metadata changed after the process started, so a correct
+launch followed closely by an upgrade would be killed as a wrong one.
+
+Enumeration reads the sealed shape, not an approximation of it. A tree of
+the right depth ending in a plausible identity is not what was measured:
+Codex's dated directories are dates and its rollout names carry the time
+the measurement recorded, and a file that does not have that shape is one
+of the other things a provider keeps in its store (grill Q25).
+
+Enumeration follows no symlink. The sealed layouts describe what a
+provider writes *under* its store; a link is a name in the store pointing
+at a file that is not, and following one would enumerate whatever the
+filesystem can reach from there and grant it the assurance a history
+record carries. Directory entries are classified by their own type and a
+session file's time is its own, never a target's.
 
 ## D5 — The disclosure is the daemon's, correlated, and never assumed
 
@@ -199,6 +325,36 @@ flag was rejected because it cannot say *which* disclosure a client
 showed, and a stale one would let a person continue under yesterday's
 answer.
 
+**Where a history row is continued (grill Q35).** A store entry supplies no
+directory, and the measured providers resume an id from anywhere and then
+run *in the directory they were started in*
+(`docs/evidence/pr8b-history-store-and-resume-2026-09-02.md`). So identity
+does not imply location, and the location is stated by the initiating
+client: `session.continuation` and `session.resume` both carry a
+`working_directory`, and the daemon never substitutes its own working
+directory, a path decoded from the provider's store label, the store file's
+location, the account home, or a previous guess. A continuation that needs a
+directory and was given none is refused, not defaulted. The directory must
+be absolute, exist, and be a directory; it is checked again on the way to a
+spawn, and a directory that has since gone fails the continuation rather
+than falling back to another one. Which directory a client asks for is that
+client's policy — the CLI and the TUI send their own working directory — and
+a later directory picker replaces that default without changing any of this.
+A Session Corral launched keeps the working directory Corral recorded for
+it; a requested directory neither overrides that nor is silently adopted
+from it. Recorded means recorded: every Run Corral starts writes its
+directory into the durable log, so the next daemon reads it rather than a
+handle the last one held, and a Session does not stop being continuable by
+having outlived the process that continued it. A Run Corral *found* records
+none — where a discovered process runs is knowable from the OS and this
+phase does not look — and that continuation is refused rather than given a
+directory nobody observed.
+
+The requested directory is one of the facts the decision is computed from,
+so it is one of the facts the revision covers: changing directory after the
+preflight is a different decision, and the resume is refused rather than
+starting a process somewhere nobody was shown.
+
 The revision means one thing: the client obtained the disclosure
 associated with this exact continuation decision. A client convenience
 that skips its own confirmation step — `corral continue --yes` — still
@@ -210,6 +366,40 @@ document says so in those words: disclosure correlation, not consent. A
 daemon that assumed a person had been told would be the fork without the
 disclosure that `PRODUCT.md` §3 forbids; a client that decided for itself
 when one was needed would be a client deriving eligibility.
+
+The revision is a precondition on the sender, never part of what the
+command is. `session.resume`'s command fingerprint is the Session and the
+directory, because those are what the command does; a receipt is durable
+and a revision is momentary, so binding the two would leave a client that
+lost its response and correctly re-ran the preflight permanently unable to
+learn what it had already started. This is ADR 0002's Q12 rule — a
+fingerprint covers what the command does and nothing else — applied to
+`session.resume`'s inputs, as
+`docs/decisions/2026-08-25-session-new-fingerprint-excludes-geometry.md`
+applied it to terminal geometry. The revision is checked against the
+decision being acted on, inside the execution that acts.
+
+## Compatibility
+
+This surface has a capability name of its own, `history-sessions.v1`:
+`session.continuation`, `session.resume`'s working directory and disclosure
+revision, and history rows in `session.list`. `managed-sessions` cannot
+answer for it — that name was minted for the managed-agent surface and a
+daemon serving it may predate this one — so a client that read it as
+permission to preflight would meet `method_not_found` for a continuation
+that worked before it was upgraded, and for every managed Session rather
+than only the rows the preflight exists for.
+
+A client that finds the name absent continues the way it did before the
+preflight existed: `session.resume` with the Session alone. Not a degraded
+form of this decision — a daemon without the capability enumerates no
+history rows, so nothing it can continue has a disclosure to show, and a
+Session Corral launched runs where Corral recorded it either way.
+
+In the other direction a client that predates this decision resumes a
+history row without a revision, and is refused with `stale_disclosure`.
+Failing closed is correct: what the row needs shown, that client cannot
+show.
 
 ## Rejected
 
@@ -230,8 +420,12 @@ when one was needed would be a client deriving eligibility.
 
 ## Load-bearing facts, measured and open
 
-Measured 2026-09-02 (`docs/references/2026-09-02-pr8-attention-matrix.md`,
-"Session stores"):
+Measured 2026-09-02, durable in
+`docs/evidence/pr8b-history-store-and-resume-2026-09-02.md` (narrative in
+`docs/references/2026-09-02-pr8-attention-matrix.md`). Every fact below is
+sealed for **Claude Code 2.1.258 and Codex 0.152.0 only**; a version whose
+layout has not been measured is not enumerated, and the founder's macOS
+installs (2.1.252, 0.145.0) inherit nothing (grill Q28):
 
 - Claude 2.1.258 files one `<uuid>.jsonl` per session, headless `-p`
   runs included, beside a `memory/` directory; no sub-agent files
@@ -247,11 +441,20 @@ Measured 2026-09-02 (`docs/references/2026-09-02-pr8-attention-matrix.md`,
   calls the rollout files legacy; whether the index is ever read is the
   separate ruling grill Q9/Q25 reserved.
 
+Resume from a directory other than the session's, measured 2026-09-02 on
+these versions and recorded in
+`docs/evidence/pr8b-history-store-and-resume-2026-09-02.md`: both providers
+resolve the id without its directory, append the new turn to the original
+file, keep the id, and carry on with the new directory as the working
+directory — Codex records it in the rollout, Claude files a `memory/` under
+the new directory's project name. So D4's fourth rung is mechanically
+possible from anywhere, and the directory is not the store's to supply;
+D5 says whose it is and that the disclosure names it.
+
 Still open, and none of it load-bearing for the decisions above: whether
 resuming touches Claude's file time; how a headless Codex rollout is told
-from an interactive one by name alone (`codex exec` was not run); `--resume`
-from a directory other than the store's; enumeration cost on a large
-store.
+from an interactive one by name alone (`codex exec` was not run);
+enumeration cost on a large store.
 
 ## What this does not decide
 
@@ -259,3 +462,18 @@ History parsing, indexing, search, and the history library (M2). Archive
 and delete. Deleting anything provider-owned, ever. The recent window's
 value (tuning). The left-behind-branch surface for continuing a live
 external session (follow-up, after S3). Remote nodes' stores (M3).
+
+**What a continuation whose provider mints a different id means.** Corral
+asks to continue X and the hook reports Y. The identity question is asked
+against the Session's provider-session binding, and a Session continued
+from a history row has none yet, so Y is established as its first live
+identity. Nothing false is recorded — D3 keeps the two claims apart, "the
+store holds X" and "the runtime here carries Y" are both true, and a
+resume reads the live binding, never the history one — but nothing records
+that the conversation moved, either. Contest is not the answer: it
+withdraws a live claim, and there is no live claim here to withdraw.
+ADR 0002 D4's `ContextHandoff` — a new Session with a lineage edge — is
+the shape that fits, and building it is a phase this one does not own.
+Not reachable in the measured behaviour: `--resume` keeps the id and
+Corral never passes `--fork-session`. Left open deliberately rather than
+answered by whichever code path happened to run first.

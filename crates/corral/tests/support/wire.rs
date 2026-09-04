@@ -177,6 +177,16 @@ pub enum FakeBehaviour {
     /// produce it: closing looks like a daemon on its way out, which is
     /// legitimately retried.
     StaySilent,
+    /// A daemon from before this build: it names `capabilities` in its hello,
+    /// lists `session` alone, serves `session.resume`, and answers everything
+    /// else the way a daemon that never heard of a method does.
+    ///
+    /// The only way to observe what a new client does opposite an old daemon,
+    /// which is the ordinary state of a machine where one half was upgraded.
+    OlderDaemon {
+        capabilities: Vec<String>,
+        session: String,
+    },
     /// Answer the hello at once, then take `delay` over every request after
     /// it, watching for a second one arriving before the first is answered.
     ///
@@ -196,6 +206,7 @@ pub struct FakeDaemon {
     connections: Arc<AtomicUsize>,
     requests: Arc<AtomicUsize>,
     overlapped: Arc<AtomicBool>,
+    methods: Arc<std::sync::Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -216,6 +227,14 @@ impl FakeDaemon {
     pub fn overlapped(&self) -> bool {
         self.overlapped.load(Ordering::SeqCst)
     }
+
+    /// Every method this daemon was asked for, in order, excluding the hello.
+    pub fn methods(&self) -> Vec<String> {
+        self.methods
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
 }
 
 impl Drop for FakeDaemon {
@@ -235,10 +254,12 @@ pub fn spawn_fake_daemon(socket: &Path, behaviour: FakeBehaviour) -> FakeDaemon 
     let connections = Arc::new(AtomicUsize::new(0));
     let requests = Arc::new(AtomicUsize::new(0));
     let overlapped = Arc::new(AtomicBool::new(false));
+    let methods = Arc::new(std::sync::Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
     let counter = Arc::clone(&connections);
     let asked = Arc::clone(&requests);
     let queued = Arc::clone(&overlapped);
+    let logged = Arc::clone(&methods);
     let stopped = Arc::clone(&stop);
 
     std::thread::spawn(move || {
@@ -258,6 +279,10 @@ pub fn spawn_fake_daemon(socket: &Path, behaviour: FakeBehaviour) -> FakeDaemon 
                             let _ = stream.flush();
                         }
                         FakeBehaviour::StaySilent => held.push(stream),
+                        FakeBehaviour::OlderDaemon {
+                            capabilities,
+                            session,
+                        } => answer_as_an_older_daemon(stream, capabilities, session, &logged),
                         FakeBehaviour::AnswerSlowly { delay } => {
                             answer_slowly(stream, *delay, &asked, &queued);
                         }
@@ -275,7 +300,68 @@ pub fn spawn_fake_daemon(socket: &Path, behaviour: FakeBehaviour) -> FakeDaemon 
         connections,
         requests,
         overlapped,
+        methods,
         stop,
+    }
+}
+
+/// Serve one connection as a daemon that predates this build.
+fn answer_as_an_older_daemon(
+    mut stream: UnixStream,
+    capabilities: &[String],
+    session: &str,
+    methods: &Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        let Ok(request) = serde_json::from_str::<Value>(&line) else {
+            return;
+        };
+        let id = request.get("id").cloned().unwrap_or_else(|| json!(0));
+        let method = request
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+
+        let outcome = match method.as_str() {
+            "hello" => json!({"result": {
+                "protocol_version": corral_protocol::PROTOCOL_VERSION,
+                "min_compatible_peer_version": corral_protocol::MIN_COMPATIBLE_PEER_VERSION,
+                "capabilities": capabilities,
+                "compatibility_result": "compatible",
+            }}),
+            "session.list" => json!({"result": {
+                "sessions": [{"session_id": session}],
+            }}),
+            "session.resume" => json!({"result": {
+                "session_id": session,
+                "run_id": "00000000-0000-4000-8000-0000000000aa",
+            }}),
+            _ => json!({"error": {
+                "code": "method_not_found",
+                "message": format!("this daemon does not serve {method}"),
+            }}),
+        };
+        if method != "hello" {
+            methods
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(method);
+        }
+
+        let mut reply =
+            serde_json::to_vec(&json!({"type": "response", "id": id, "outcome": outcome}))
+                .expect("encode");
+        reply.push(b'\n');
+        if stream.write_all(&reply).is_err() || stream.flush().is_err() {
+            return;
+        }
     }
 }
 

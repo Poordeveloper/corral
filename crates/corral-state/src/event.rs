@@ -8,6 +8,7 @@
 //! Nothing derived and nothing runtime-owned appears here — no PTY bytes, no
 //! raw hook events, no provider transcripts, no status.
 
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::SystemTime;
 
@@ -73,6 +74,10 @@ pub enum SessionEvent {
         runtime_binding: BindingId,
         /// Absent when the runtime itself cannot say when it began.
         started_at: Option<SystemTime>,
+        /// Where Corral started it. Absent for a Run Corral found rather than
+        /// launched: the directory is unknown, not empty, and no reader may
+        /// supply one for it (Q35).
+        working_directory: Option<PathBuf>,
     },
     /// The process episode ended, or could not be established to have ended.
     RunEnded {
@@ -189,11 +194,13 @@ pub(crate) fn encode(event: &SessionEvent) -> Result<Value, FatalState> {
             run,
             runtime_binding,
             started_at,
+            working_directory,
             ..
         } => json!({
             "run_id": run.to_string(),
             "runtime_binding_id": runtime_binding.to_string(),
             "started_at_ms": optional_millis(*started_at)?,
+            "working_directory": storable_path(working_directory.as_deref()),
         }),
         SessionEvent::RunEnded {
             run, end, ended_at, ..
@@ -293,6 +300,10 @@ pub(crate) fn decode(
             run: identity(payload, "run_id")?,
             runtime_binding: identity(payload, "runtime_binding_id")?,
             started_at: optional_instant(payload, "started_at_ms")?,
+            // Absent in every record written before Runs carried one, and in
+            // every Run Corral found rather than launched. Both mean the same
+            // thing here — the directory is unknown — so both decode alike.
+            working_directory: optional_text(payload, "working_directory").map(PathBuf::from),
         },
         "run-ended" => SessionEvent::RunEnded {
             session,
@@ -380,6 +391,24 @@ fn optional_instant(payload: &Value, field: &str) -> Result<Option<SystemTime>, 
         Some(Value::Null) | None => Ok(None),
         Some(_) => Ok(Some(from_millis(integer(payload, field)?))),
     }
+}
+
+fn optional_text(payload: &Value, field: &str) -> Option<String> {
+    payload
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// A path as the log can hold it.
+///
+/// `None` for a path this platform allows and JSON cannot carry. Recorded as
+/// unknown rather than as a lossily transcoded string: a continuation that
+/// refuses because Corral cannot say where a Run ran is the behaviour that
+/// existed before this field, and a directory that is nearly the right one is
+/// a process started somewhere nobody chose (Q35).
+fn storable_path(path: Option<&Path>) -> Option<&str> {
+    path.and_then(Path::to_str)
 }
 
 fn optional_millis(at: Option<SystemTime>) -> Result<Option<i64>, FatalState> {

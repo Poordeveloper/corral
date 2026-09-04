@@ -9,8 +9,7 @@ use corral_core::NativeResumeEligibility;
 /// police what refusals say can run at all.
 fn every_refusal() -> Vec<ResumeRefused> {
     let refusals = vec![
-        ResumeRefused::NotThisDaemon,
-        ResumeRefused::RuntimeUnavailable,
+        ResumeRefused::DirectoryUnknown,
         ResumeRefused::IdentityUnknown,
         ResumeRefused::Eligibility(NativeResumeEligibility::IdentityContested),
         ResumeRefused::Eligibility(NativeResumeEligibility::AssuranceTooWeak),
@@ -23,8 +22,7 @@ fn every_refusal() -> Vec<ResumeRefused> {
     ];
     for refusal in &refusals {
         match refusal {
-            ResumeRefused::NotThisDaemon
-            | ResumeRefused::RuntimeUnavailable
+            ResumeRefused::DirectoryUnknown
             | ResumeRefused::IdentityUnknown
             | ResumeRefused::UnknownProvider(_)
             | ResumeRefused::RunStillLive

@@ -151,6 +151,15 @@ Added to the accepted event set: `RunStarted`, `RunEnded`,
 `CommandAccepted`. **This expansion is explicitly founder-accepted** in
 the acceptance record — never implied by the ADR's status alone.
 
+`RunStarted` carries where the episode began, optionally: Corral records the
+directory of every Run it launches, and none for a Run it merely found. The
+field is what lets a later daemon continue a Session the one that started it
+no longer exists to describe, and its absence means the directory is unknown
+— never that a caller may choose one (ADR 0016 D5). Added under this
+decision's own rule that a change the vocabulary cannot express is out of
+scope until the owning phase extends it; nothing already recorded changes
+meaning.
+
 `RunStarted`/`RunEnded` are the process episode; `RunAttached`/`RunDetached`
 are a runtime binding becoming available or not. They are different facts —
 `Started, Attached, Detached, Attached, Detached, Ended` is a legal

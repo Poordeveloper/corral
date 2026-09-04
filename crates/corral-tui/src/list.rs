@@ -106,8 +106,27 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
             }
             Chosen::Continue(session) => {
                 screen.hand_over()?;
-                list.notice = continue_into(&mut daemon, &session, &mut keys).await;
+                let answered = continue_into(
+                    &mut daemon,
+                    &session,
+                    crate::launch::Shown::NotYet,
+                    &mut keys,
+                )
+                .await;
                 returned(&mut screen, &mut list)?;
+                list.answered(answered);
+            }
+            Chosen::ContinueDisclosed { session, revision } => {
+                screen.hand_over()?;
+                let answered = continue_into(
+                    &mut daemon,
+                    &session,
+                    crate::launch::Shown::Accepted(revision),
+                    &mut keys,
+                )
+                .await;
+                returned(&mut screen, &mut list)?;
+                list.answered(answered);
             }
             // Nothing leaves the list for this one: the daemon answers, the
             // notice says what it said, and the next poll shows the badge.
@@ -132,12 +151,36 @@ enum Chosen {
     New(crate::launch::Requested),
     /// Continue a Session as a new Run, and go straight into it.
     Continue(String),
+    /// The same, after the person read what the daemon required disclosing
+    /// and said yes to that exact decision.
+    ContinueDisclosed {
+        session: String,
+        revision: String,
+    },
     /// Acknowledge the selected row's current item, by the id this surface
     /// saw — never "whatever is current" (grill Q18).
     Acknowledge {
         session: String,
         item: String,
     },
+}
+
+/// What a continuation needs said before it happens, held until answered.
+struct Confirming {
+    session: String,
+    /// The daemon's words, shown unchanged.
+    text: String,
+    /// The decision those words belong to; carried back so the person's yes
+    /// is a yes to this one and not to a later one (ADR 0016 D5).
+    revision: String,
+}
+
+/// What continuing produced, in the terms the list shows.
+enum Answered {
+    Nothing,
+    Notice(String),
+    /// The daemon requires this be shown and answered first.
+    Disclose(Confirming),
 }
 
 /// One row: a session the daemon reported, and what this surface may say.
@@ -176,6 +219,10 @@ struct SessionList {
     unrenderable: usize,
     /// What the last action produced, shown until the next one.
     notice: Option<String>,
+    /// What the daemon requires be shown before this continuation, and the
+    /// decision it belongs to. The person answers it on the list rather than
+    /// being sent to another surface.
+    confirming: Option<Confirming>,
     /// The command being typed, when the person is starting a session.
     typing: Option<String>,
     /// The daemon's counts, when its last answer carried them. Never
@@ -417,20 +464,35 @@ async fn start(
 async fn continue_into(
     daemon: &mut Daemon<'_>,
     session: &str,
+    shown: crate::launch::Shown,
     keys: &mut LocalKeys,
-) -> Option<String> {
+) -> Answered {
+    // The TUI's own working directory, read before the borrow below: client
+    // policy, and the only directory this surface may ask for (Q35).
+    let directory = crate::launch::working_directory();
     let continued = {
         let connection = match daemon.connection() {
             Ok(connection) => connection,
-            Err(reason) => return Some(reason),
+            Err(reason) => return Answered::Notice(reason),
         };
-        match tokio::time::timeout(ANSWER, crate::launch::continue_session(connection, session))
-            .await
+        match tokio::time::timeout(
+            ANSWER,
+            crate::launch::continue_session(
+                connection,
+                session,
+                shown,
+                directory.as_deref(),
+                // This surface never answers in advance; it shows the
+                // disclosure and asks, which is the `NeedsDisclosure` arm.
+                &mut |_| {},
+            ),
+        )
+        .await
         {
             Ok(continued) => continued,
             Err(_) => {
                 daemon.forget();
-                return Some(format!(
+                return Answered::Notice(format!(
                     "corrald did not answer within {} seconds",
                     ANSWER.as_secs()
                 ));
@@ -439,10 +501,24 @@ async fn continue_into(
     };
 
     match continued {
-        Ok(continued) => open(daemon, &continued.session_id, keys).await,
+        Ok(crate::launch::Continued::Started { started }) => {
+            match open(daemon, &started.session_id, keys).await {
+                Some(notice) => Answered::Notice(notice),
+                None => Answered::Nothing,
+            }
+        }
+        // The words are the daemon's and are shown unchanged; the list only
+        // asks the question.
+        Ok(crate::launch::Continued::NeedsDisclosure { text, revision }) => {
+            Answered::Disclose(Confirming {
+                session: session.to_owned(),
+                text,
+                revision,
+            })
+        }
         Err(error) => {
             daemon.forget_if_unusable(&error);
-            Some(error.to_string())
+            Answered::Notice(error.to_string())
         }
     }
 }
@@ -478,6 +554,21 @@ impl SessionList {
     /// Accept the daemon's counts, or their absence.
     fn take_summary(&mut self, summary: Option<corral_protocol::method::AttentionSummaryResult>) {
         self.summary = summary;
+    }
+
+    /// Accept what continuing produced.
+    fn answered(&mut self, answered: Answered) {
+        match answered {
+            Answered::Nothing => self.notice = None,
+            Answered::Notice(notice) => {
+                self.notice = Some(notice);
+                self.confirming = None;
+            }
+            Answered::Disclose(confirming) => {
+                self.notice = None;
+                self.confirming = Some(confirming);
+            }
+        }
     }
 
     /// Accept what the last poll produced.
@@ -522,6 +613,9 @@ impl SessionList {
         if self.typing.is_some() {
             return self.type_command(key);
         }
+        if self.confirming.is_some() {
+            return self.answer_disclosure(key);
+        }
 
         match key {
             // Moving clears whatever the last action said: the notice was
@@ -552,6 +646,22 @@ impl SessionList {
             Key::Pasted(_) => None,
             _ => None,
         }
+    }
+
+    /// Yes is one key and everything else is no, because the question is
+    /// about starting another provider process on a conversation that may be
+    /// in use: a keystroke a person did not mean must not be the one that
+    /// says go.
+    fn answer_disclosure(&mut self, key: Key) -> Option<Chosen> {
+        let confirming = self.confirming.take()?;
+        if key == Key::Typed('y') {
+            return Some(Chosen::ContinueDisclosed {
+                session: confirming.session,
+                revision: confirming.revision,
+            });
+        }
+        self.notice = Some("Not continued.".to_owned());
+        None
     }
 
     fn open_selected(&mut self) -> Option<Chosen> {
@@ -724,11 +834,31 @@ fn draw(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> 
             "the terminal stopped reporting its size",
         ));
     };
+    screen.show(frame_for(list, geometry))
+}
+
+/// The whole surface for one geometry. Separate from the terminal it goes to,
+/// so what a person sees can be asserted without one.
+fn frame_for(list: &mut SessionList, geometry: Geometry) -> Frame {
     let mut frame = Frame::new(geometry);
 
     // The last line is the footer or the prompt, with a line above it for
     // whatever the surface has to say.
-    let tail = 1 + u16::from(list.notice.is_some() || list.typing.is_some());
+    // A disclosure is wrapped rather than truncated, and the rows give way to
+    // it: the directory the continuation will run in is the last thing on the
+    // line and the third of the three facts the person is owed, so a cut line
+    // is a question asked about something they were not shown (ADR 0016 D5).
+    let disclosure: Vec<String> = list
+        .confirming
+        .as_ref()
+        .map(|confirming| wrapped(&confirming.text, geometry.cols))
+        .unwrap_or_default();
+    let said = if disclosure.is_empty() {
+        u16::from(list.notice.is_some() || list.typing.is_some())
+    } else {
+        u16::try_from(disclosure.len()).unwrap_or(u16::MAX)
+    };
+    let tail = 1 + said;
     // The count of what could not be rendered sits under the rows, so its row
     // is spoken for too, and one blank row keeps the tail off the last of
     // them. Reserved rather than subtracted: `line` then stops at the
@@ -798,6 +928,15 @@ fn draw(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> 
             // domain noun this surface exposes is Session (`PRODUCT.md` §8).
             frame.prompt(&format!("new session: {typed}"));
         }
+        None if !disclosure.is_empty() => {
+            // The daemon's sentence, then the question. Nothing is summarized
+            // or shortened: what the person is agreeing to is exactly what
+            // Corral said it would do.
+            for line in &disclosure {
+                frame.line(Emphasis::Secondary, line);
+            }
+            frame.line(Emphasis::Secondary, "Continue anyway? y / any other key");
+        }
         None => {
             if let Some(notice) = &list.notice {
                 frame.line(Emphasis::Secondary, notice);
@@ -806,7 +945,7 @@ fn draw(screen: &mut FullScreen, list: &mut SessionList) -> std::io::Result<()> 
         }
     }
 
-    screen.show(frame)
+    frame
 }
 
 fn heading(list: &SessionList) -> String {
@@ -840,6 +979,51 @@ fn heading(list: &SessionList) -> String {
         }
     }
     heading
+}
+
+/// Break text onto lines that fit, at spaces where there are any and inside a
+/// word where there are none — a path long enough to fill a line has no space
+/// to break at, and dropping its tail would drop the fact it carries.
+fn wrapped(text: &str, cols: u16) -> Vec<String> {
+    let width = usize::from(cols.max(1));
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        for piece in split_to_width(word, width) {
+            if !line.is_empty() && line.chars().count() + 1 + piece.chars().count() > width {
+                lines.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(&piece);
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+fn split_to_width(word: &str, width: usize) -> Vec<String> {
+    if word.chars().count() <= width {
+        return vec![word.to_owned()];
+    }
+    let mut pieces = Vec::new();
+    let mut piece = String::new();
+    for character in word.chars() {
+        if piece.chars().count() == width {
+            pieces.push(std::mem::take(&mut piece));
+        }
+        piece.push(character);
+    }
+    if !piece.is_empty() {
+        pieces.push(piece);
+    }
+    pieces
 }
 
 fn draw_row(frame: &mut Frame, row: &Row, selected: bool, geometry: Geometry) {

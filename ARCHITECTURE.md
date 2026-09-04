@@ -48,25 +48,37 @@ Discrete levels, never a floating confidence score:
 ```text
 Deterministic   corrald spawned and owns the runtime; identity holds by
                 construction
-Attested        live provider-native evidence proves the binding — e.g. a
-                hook event carrying the exact provider session identity,
-                corroborated by an observed process
+Attested        provider-native evidence directly proves the claim being
+                made — e.g. a hook event carrying the exact provider
+                session identity, corroborated by an observed process for
+                a *live* binding claim; the provider's own session store,
+                read at a sealed path, for the claim that the provider
+                holds a session it calls X (ADR 0016 D3)
 Manual          the user explicitly linked it
 Heuristic       cwd / time / process / history correlation only
 ```
 
-**A hook event Corral received on a launch token it minted directly
-supports the positive claim that event makes.** That a turn started, ended,
-or is waiting for an answer is what the provider said about itself through a
-channel Corral owns, and no further corroboration is owed for *that* claim —
-the corroboration a `ProviderSessionBinding` needs is for the different, live
-association claim that a named process is carrying the identity. Assurance
-qualifies the claim being made, not the object globally. What such an event
-may not do is assert a state its version was never measured to assert; that
-is sealing, not assurance (ADR 0015 D3, D9).
+**Assurance qualifies a claim, not an object globally.** The same record
+supports one claim and not another: a history record proves what the
+provider's store contains and never that a runtime is carrying it, so a
+live binding claim needs live corroboration and provider history alone is
+insufficient for it. "History correlation" above stays Heuristic and means
+what it says — matching a live process to a history record by cwd, time, or
+start proximity.
+
+The same rule read the other way: **a hook event Corral received on a launch
+token it minted directly supports the positive claim that event makes.**
+That a turn started, ended, or is waiting for an answer is what the provider
+said about itself through a channel Corral owns, and no further corroboration
+is owed for *that* claim — the corroboration a `ProviderSessionBinding` needs
+is for the different, live association claim that a named process is carrying
+the identity. What such an event may not do is assert a state its version was
+never measured to assert; that is sealing, not assurance (ADR 0015 D3, D9).
 
 Only Deterministic, Attested, or Manual bindings may drive cross-facet
-control (AGENTS.md §Core model). Whether a heuristic match was *claimed* by
+control (AGENTS.md §Core model). An Attested history claim is entitled to
+name the identity, not to drive a runtime: there is no runtime binding
+under it to drive. Whether a heuristic match was *claimed* by
 provider history or *inferred* from correlation is evidence detail, not a
 separate level. Assurance is re-evaluated when evidence changes; it is never
 a one-time stamp.
@@ -558,7 +570,9 @@ terms: `PRODUCT.md` §8.
 | **Run** | one concrete runtime occurrence of a Session, identified by a Corral-minted `RunId`. A Session outlives its runs; a Run carries no assurance and never by itself grants control |
 | **Facet** | an independently available aspect of a Session: history, runtime, control, artifacts, attention |
 | **Binding** | an edge from a Session to an external identity, carrying provenance, assurance, evidence source, and observation time |
-| **Assurance** | discrete binding trust: Deterministic, Attested, Manual, Heuristic. Heuristic never controls and never notifies |
+| **Assurance** | discrete binding trust: Deterministic, Attested, Manual, Heuristic. Qualifies the claim being made, not the object globally — evidence Attested for one claim may be insufficient for another. Heuristic never controls and never notifies |
+| **History row** | a session a supported provider's own store holds that resolves to no Session Corral has: live daemon state with origin `history`, a stable id, no Run, no runtime, no main state, and no durable record until the person continues it (ADR 0016 D2) |
+| **History binding** | the edge from a Session to the provider session a store named. Attested for that claim and nothing more; never control-capable, and never a claim that anything is running |
 | **Provenance** | how a binding came to exist — Corral created it, discovered it, or the user linked it. Never re-evaluated, unlike the evidence supporting it |
 | **Control eligibility** | whether control may be driven through a binding. Resolved from that binding's assurance and nowhere else — never from a Run |
 | **Occurrence time** | when a runtime fact happened, as against the event sequence, which is when Corral accepted it. Recorded only when authoritative runtime evidence supports it; a first-observed time is never one |

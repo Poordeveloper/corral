@@ -103,6 +103,17 @@ impl BindingKey {
             ExternalId::mint(),
         )
     }
+
+    /// The key of the provider session a history row names.
+    ///
+    /// Named here for the same reason `mint_managed_runtime` is: the kind is
+    /// part of what the binding *means*, and a caller that could choose it
+    /// could file a history claim as something entitled to more than one
+    /// (ADR 0016 D3).
+    #[must_use]
+    pub fn history(node: NodeId, provider: ProviderId, external_id: ExternalId) -> Self {
+        Self::new(node, BindingKind::History, provider, external_id)
+    }
 }
 
 /// How a binding sits wrongly in the reserved `corral` provider namespace
@@ -366,6 +377,35 @@ pub enum NativeResumeEligibility {
     /// know which provider session this names. No external id reaches a resume
     /// argv from here.
     IdentityContested,
+}
+
+impl BindingKind {
+    /// Every kind, so a consumer that must enumerate them cannot silently
+    /// miss one a later change adds.
+    pub const ALL: [Self; 4] = [
+        Self::ProviderSession,
+        Self::Runtime,
+        Self::Terminal,
+        Self::History,
+    ];
+
+    /// Whether this kind's external id is the provider's own session
+    /// identity, rather than a name for something else Corral bound.
+    ///
+    /// Resolution looks an identity up across the kinds this is true of, so
+    /// one conversation met as a history file and again as a live provider
+    /// session is one Session (ADR 0016 D2). A runtime incarnation and a
+    /// terminal id share the `(node, provider)` namespace without naming the
+    /// same thing, so they are matched by their whole key and never by the id
+    /// alone — a coincidental string would otherwise join two unrelated
+    /// Sessions.
+    #[must_use]
+    pub fn names_a_provider_session(self) -> bool {
+        match self {
+            Self::ProviderSession | Self::History => true,
+            Self::Runtime | Self::Terminal => false,
+        }
+    }
 }
 
 impl fmt::Display for BindingKind {

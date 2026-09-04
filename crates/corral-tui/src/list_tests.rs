@@ -662,3 +662,90 @@ fn a_acknowledges_the_selected_rows_current_item_by_id() {
     assert!(list.act(Key::Typed('a')).is_none());
     assert_eq!(list.notice.as_deref(), Some("Nothing to acknowledge."));
 }
+
+/// A continuation the daemon requires disclosing is asked on the list, in the
+/// daemon's own words, and only `y` answers it. Anything else is no, because
+/// the question is whether to start another provider process on a
+/// conversation that may be in use (ADR 0016 D4/D5).
+#[test]
+fn a_required_disclosure_is_asked_before_it_is_answered() {
+    let mut list = SessionList::default();
+    list.take(answered(vec![session("s0-rest", "unknown", None)]));
+    list.answered(Answered::Disclose(Confirming {
+        session: "s0-rest".to_owned(),
+        text: "Corral can't tell whether this session is still running somewhere else.".to_owned(),
+        revision: "r1".to_owned(),
+    }));
+
+    // Moving on is not agreeing.
+    assert!(list.act(Key::Down).is_none());
+    assert_eq!(list.notice.as_deref(), Some("Not continued."));
+    assert!(
+        list.confirming.is_none(),
+        "the question outlived its answer"
+    );
+
+    list.answered(Answered::Disclose(Confirming {
+        session: "s0-rest".to_owned(),
+        text: "…".to_owned(),
+        revision: "r2".to_owned(),
+    }));
+    let chosen = list.act(Key::Typed('y')).expect("y continues");
+    let Chosen::ContinueDisclosed { session, revision } = chosen else {
+        panic!("y answered something other than the disclosure");
+    };
+    assert_eq!(session, "s0-rest");
+    assert_eq!(
+        revision, "r2",
+        "the yes belongs to the decision that was shown"
+    );
+    assert!(list.confirming.is_none());
+}
+
+/// While the question is up, the list shows the daemon's sentence and the
+/// question, and nothing else claims to be the footer.
+#[test]
+fn the_disclosure_replaces_the_footer_while_it_is_up() {
+    let mut list = SessionList::default();
+    list.take(answered(vec![session("s0-rest", "unknown", None)]));
+    list.answered(Answered::Disclose(Confirming {
+        session: "s0-rest".to_owned(),
+        text: "Corral can't tell whether this session is still running somewhere else. \
+               Continuing starts another Claude Code process for this session in /tmp/proj."
+            .to_owned(),
+        revision: "r1".to_owned(),
+    }));
+
+    let frame = frame_for(&mut list, Geometry { rows: 10, cols: 78 });
+    insta::assert_snapshot!(frame.painted());
+}
+
+/// The directory is the last thing on the disclosure's line and the third
+/// fact the person is owed, so the text wraps rather than being cut.
+#[test]
+fn a_disclosure_wraps_so_its_directory_survives() {
+    let text = "Corral can't tell whether this session is still running somewhere else. \
+                Continuing starts another Claude Code process for this session in \
+                /Users/someone/work/a-rather-long-project-directory.";
+    let lines = wrapped(text, 40);
+
+    assert!(
+        lines.iter().all(|line| line.chars().count() <= 40),
+        "{lines:?}"
+    );
+    // Split across lines where it must be, but never dropped.
+    assert!(
+        lines
+            .concat()
+            .replace(' ', "")
+            .contains("/Users/someone/work/a-rather-long-project-directory."),
+        "{lines:?}"
+    );
+    // A path with no space in it and no room on the line is split rather than
+    // dropped.
+    let long = wrapped("in /a/very/deep/path/that/exceeds/the/width", 10);
+    assert_eq!(
+        long.concat().replace(' ', ""),
+        "in/a/very/deep/path/that/exceeds/the/width"
+    );
+}

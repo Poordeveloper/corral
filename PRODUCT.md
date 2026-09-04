@@ -248,8 +248,13 @@ behind.
 - **User-visible**: Session (the only exposed domain noun); the five main
   states; Limited awareness; Enable / Disable Integration; Open · Respond ·
   Continue in Corral · Jump; origin facts only when reliably known
-  ("Launched from Corral", "Running outside Corral", "Found in VS Code") —
-  never a guessed terminal host; branch relation text.
+  ("Launched from Corral", "Running outside Corral", "Found in VS Code",
+  "Found in Claude Code history") — never a guessed terminal host; branch
+  relation text. A session found only in a provider's history says so and
+  says when it was last active; it claims no execution state and no
+  location, and before it is continued the person is told, in Corral's
+  words, that liveness elsewhere is unknown, that another provider process
+  will be started, and the exact directory it will start in.
 - **Internal only**: Observed, Managed, Run, Binding, Assurance, Evidence,
   AttentionItem, CorralSessionId, capability rung.
 - **Dead words**: "Adopt"; "Finished" as a main state; "Take control" as a

@@ -120,6 +120,14 @@ pub async fn discovered(
 
     match resolution {
         SessionResolution::Created { session, binding } => {
+            // This identity has stopped being one a history row may stand
+            // for. Said here as well as at a continuation, because those are
+            // the two places an enumerated identity becomes a Session: an
+            // enumeration pass resolves its entries one at a time and
+            // publishes at the end, so one that read this id before this
+            // moment would otherwise publish it under a second, minted id,
+            // beside the Session just created (ADR 0016 D2).
+            state.with_runtime(|runtime| runtime.history.forget(provider, &identity));
             observe_fact(state, provider, session.id(), fact, observed_at, &process);
             info!(
                 session = %session.id(),

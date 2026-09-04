@@ -109,17 +109,22 @@ pub(crate) fn apply(
             run,
             runtime_binding,
             started_at,
+            working_directory,
         } => {
             tx.execute(
                 "INSERT INTO runs
-                     (id, session_id, runtime_binding_id, accepted_seq, started_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                     (id, session_id, runtime_binding_id, accepted_seq, started_at_ms,
+                      working_directory)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     run.to_string(),
                     session.to_string(),
                     runtime_binding.to_string(),
                     accepted_seq,
                     started_at.map(millis).transpose()?,
+                    working_directory
+                        .as_deref()
+                        .and_then(std::path::Path::to_str),
                 ],
             )?;
         }
@@ -234,6 +239,60 @@ pub(crate) fn binding_by_key(
             binding_kind_token(key.kind()),
         ],
     )
+}
+
+/// The Session bound to an external identity under any binding kind, the
+/// provider-session binding preferred when several kinds name the same id.
+///
+/// What history enumeration resolves against before it makes a row: a
+/// discovered session and its history file are one Session, and the
+/// provider-id-keyed record wins (ADR 0016 D2).
+pub(crate) fn session_by_external_id(
+    connection: &Connection,
+    node: NodeId,
+    provider: &ProviderId,
+    external_id: &ExternalId,
+) -> Result<Option<CorralSessionId>, StateError> {
+    binding_by_external_id(connection, node, provider, external_id)
+        .map(|binding| binding.map(|binding| binding.session()))
+}
+
+/// The binding an external identity is already filed under, whatever its
+/// kind. A provider-session binding wins when several name the same identity,
+/// because it is the one that asserts the live association.
+pub(crate) fn binding_by_external_id(
+    connection: &Connection,
+    node: NodeId,
+    provider: &ProviderId,
+    external_id: &ExternalId,
+) -> Result<Option<Binding>, StateError> {
+    query_binding(
+        connection,
+        &format!(
+            // Only the kinds whose external id is a provider session identity:
+            // a runtime incarnation shares this namespace without naming the
+            // same thing. The list is derived from the kinds themselves, so a
+            // kind added later is classified rather than quietly omitted.
+            "WHERE node_id = ?1 AND provider = ?2 AND external_id = ?3 \
+             AND kind IN ({}) \
+             ORDER BY (kind = '{}') DESC, created_at_ms, id",
+            provider_session_kinds(),
+            crate::encoding::binding_kind_token(BindingKind::ProviderSession),
+        ),
+        params![node.to_string(), provider.as_str(), external_id.as_str(),],
+    )
+}
+
+/// The stored tokens of every kind whose external id names a provider
+/// session, as a SQL list. Built from tokens this crate owns, never from user
+/// input.
+fn provider_session_kinds() -> String {
+    BindingKind::ALL
+        .into_iter()
+        .filter(|kind| kind.names_a_provider_session())
+        .map(|kind| format!("'{}'", crate::encoding::binding_kind_token(kind)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The binding this Session may currently drive control through, if any.
@@ -379,13 +438,14 @@ pub(crate) fn recorded_run(connection: &Connection, id: RunId) -> Result<Option<
 }
 
 const RUN_COLUMNS: &str = "SELECT id, session_id, runtime_binding_id, started_at_ms, \
-                           ended_at_ms, end_state FROM runs";
+                           working_directory, ended_at_ms, end_state FROM runs";
 
 type RunRow = (
     String,
     String,
     String,
     Option<i64>,
+    Option<String>,
     Option<i64>,
     Option<String>,
 );
@@ -398,17 +458,21 @@ fn run_row(row: &Row<'_>) -> rusqlite::Result<RunRow> {
         row.get(3)?,
         row.get(4)?,
         row.get(5)?,
+        row.get(6)?,
     ))
 }
 
 fn run_from(row: RunRow) -> Result<Run, StateError> {
-    let (id, session, binding, started, ended, end_state) = row;
-    let run = Run::started(
+    let (id, session, binding, started, directory, ended, end_state) = row;
+    let mut run = Run::started(
         id.parse().map_err(FatalState::from)?,
         session.parse().map_err(FatalState::from)?,
         binding.parse().map_err(FatalState::from)?,
         occurrence(started),
     );
+    if let Some(directory) = directory {
+        run = run.ran_in(std::path::PathBuf::from(directory));
+    }
     Ok(match end_state {
         None => run,
         Some(token) => run.ended(run_end_from_token(&token)?, occurrence(ended)),

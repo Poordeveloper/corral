@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use corral_protocol::method::{
-    self, IntegrationParams, IntegrationResult, SessionListResult, SessionNewParams,
-    SessionNewResult, SessionResumeParams, SessionResumeResult, TerminalAttachParams,
-    TerminalAttachResult,
+    self, IntegrationParams, IntegrationResult, SessionContinuationParams,
+    SessionContinuationResult, SessionListResult, SessionNewParams, SessionNewResult,
+    SessionResumeParams, SessionResumeResult, TerminalAttachParams, TerminalAttachResult,
 };
 use corral_protocol::{
     ClientHello, Compatibility, ConnectionRole, Frame, FrameError, FrameReader, FrameWriter,
@@ -237,6 +237,21 @@ impl Connection {
     }
 
     /// Continue an existing Session's provider session as a new Run.
+    pub async fn session_continuation(
+        &mut self,
+        params: SessionContinuationParams,
+    ) -> Result<SessionContinuationResult, RequestError> {
+        let encoded = serde_json::to_value(params).map_err(|source| RequestError::Protocol {
+            detail: format!("the request did not encode: {source}"),
+        })?;
+        let value = self
+            .call(method::SESSION_CONTINUATION, Some(encoded))
+            .await?;
+        serde_json::from_value(value).map_err(|source| RequestError::Protocol {
+            detail: format!("the continuation decision did not decode: {source}"),
+        })
+    }
+
     pub async fn session_resume(
         &mut self,
         params: SessionResumeParams,

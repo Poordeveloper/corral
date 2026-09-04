@@ -49,6 +49,21 @@ pub mod capability {
     /// two names would let a client believe in half of it.
     pub const MANAGED_SESSIONS: &str = "managed-sessions";
 
+    /// `session.continuation`, the working directory and disclosure revision
+    /// `session.resume` accepts, and history rows in `session.list`: the
+    /// history-enumerated session surface of ADR 0016.
+    ///
+    /// One name for the whole surface, on [`MANAGED_SESSIONS`]'s reasoning — a
+    /// client that may be shown a history row is the client that must ask a
+    /// preflight before continuing one.
+    ///
+    /// `MANAGED_SESSIONS` cannot answer for it. That name was minted for the
+    /// managed-agent surface and a daemon serving it may predate this one
+    /// entirely, so a client that read it as permission to ask for a preflight
+    /// would meet `method_not_found` in front of a person, for a continuation
+    /// that worked before they upgraded.
+    pub const HISTORY_SESSIONS: &str = "history-sessions.v1";
+
     /// The attention projection on `session.list`, `attention.summary`, and
     /// `attention.acknowledge`: the daemon derives the five-state main
     /// status and clients render it (ADR 0015).

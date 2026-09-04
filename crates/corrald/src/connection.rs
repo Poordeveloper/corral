@@ -8,8 +8,9 @@ use corral_core::{
 };
 
 use corral_protocol::method::{
-    self, AgentEvent, IntegrationParams, IntegrationResult, PingResult, ProviderFacts,
-    SessionListItem, SessionListResult, SessionNewParams, SessionNewResult, SessionResumeParams,
+    self, AgentEvent, ContinuationDisclosure, IntegrationParams, IntegrationResult, PingResult,
+    ProviderFacts, SessionContinuationParams, SessionContinuationResult, SessionListItem,
+    SessionListResult, SessionNewParams, SessionNewResult, SessionResumeParams,
     SessionResumeResult, TerminalAttachParams, TerminalAttachResult,
 };
 use corral_protocol::{
@@ -22,12 +23,11 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
 use tracing::{debug, error, warn};
 
+use crate::continuation;
 use crate::in_flight::{self, Claim, Concluded};
 use crate::integration;
 use crate::lifecycle::{EstablishedGuard, Lifecycle, ShutdownReason};
-use crate::managed_launch::{
-    self, Committed, ResumeRefused, SessionOwnership, compose_provider_launch, resume_plan,
-};
+use crate::managed_launch::{self, Committed, SessionOwnership, compose_provider_launch};
 use crate::policy::DaemonPolicy;
 use crate::provider::launch::RelayInvocation;
 use crate::provider::{self, KnownProvider, ReportedSession};
@@ -203,6 +203,12 @@ async fn bootstrap(
             let mut capabilities = BTreeSet::from([capability::ATTENTION.to_owned()]);
             if state.hook_endpoint_was_bound() {
                 capabilities.insert(capability::MANAGED_SESSIONS.to_owned());
+                // Under the same condition, not a second one: continuing a
+                // history row composes the same injected launch a managed one
+                // does, so a daemon that cannot serve managed sessions cannot
+                // serve this either, and two conditions would let a client
+                // believe in a surface half of which is missing.
+                capabilities.insert(capability::HISTORY_SESSIONS.to_owned());
             }
             capabilities
         },
@@ -445,6 +451,17 @@ async fn dispatch(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
         method::ATTENTION_ACKNOWLEDGE => Dispatch::Reply(attention_acknowledge(request, state)),
         method::ATTENTION_REPORT => Dispatch::Reply(attention_report(request, state).await),
         method::ATTENTION_DISPUTE => Dispatch::Reply(attention_dispute(request, state).await),
+        // Not live state: the preflight reads the registry to decide, so it
+        // takes the same gate `session.list` does. A daemon that cannot vouch
+        // for durable truth must not answer whether a session may continue.
+        method::SESSION_CONTINUATION => match state.vouch().await {
+            Ok(Vouched::Yes) => session_continuation(request, state).await,
+            Ok(Vouched::NotNow) => Dispatch::Reply(Frame::error(
+                id,
+                ProtocolError::new(ErrorCode::Busy, "the registry is held by another writer"),
+            )),
+            Err(error) => Dispatch::FailClosed(error),
+        },
         // Status reads a file rather than the registry, but it is still a
         // claim made in the daemon's name and the two mutations write durable
         // intent, so all three take the same gate as any other request.
@@ -494,7 +511,8 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
             .map(|session| {
                 let reported = runtime.reported.get(session.session).cloned();
                 let attention = attention_facts(&runtime.attention, session.session);
-                (session, reported, attention)
+                let last_active = runtime.history.last_active(session.session);
+                (session, reported, attention, last_active)
             })
             .collect::<Vec<_>>();
         let externally: Vec<Option<method::AttentionFacts>> = external
@@ -513,10 +531,14 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
         );
     };
 
+    let shown_above: Vec<CorralSessionId> = described
+        .iter()
+        .map(|(session, ..)| session.session)
+        .collect();
     let mut sessions: Vec<serde_json::Value> = described
         .into_iter()
-        .map(|(session, reported, attention)| {
-            encode_session(&session, reported.as_ref(), attention)
+        .map(|(session, reported, attention, last_active)| {
+            encode_session(&session, reported.as_ref(), attention, last_active)
         })
         .collect();
     // After the managed rows: the runtimes outside Corral. A session Corral
@@ -528,6 +550,31 @@ fn session_list(id: RequestId, state: &Arc<DaemonState>) -> Frame {
             .iter()
             .zip(externally)
             .map(|(candidate, attention)| encode_external(candidate, attention)),
+    );
+    // Last, in their own non-live tier by recency (grill Q18): what the
+    // providers' stores hold that nothing above already showed.
+    //
+    // "Already showed" is the whole of the filter, and it is why a Session
+    // Corral holds durably still has a row here once its Run has ended and
+    // the daemon that ran it is gone: the store is the only thing left saying
+    // it exists, and a session that vanished from the list by having been
+    // continued once is exactly the disappearance D2 forbids.
+    let shown: std::collections::HashSet<CorralSessionId> = shown_above
+        .into_iter()
+        .chain(
+            external
+                .iter()
+                .filter_map(|candidate| candidate.identified().map(|known| known.session)),
+        )
+        .collect();
+    let history = state
+        .with_runtime(|runtime| runtime.history.rows())
+        .unwrap_or_default();
+    sessions.extend(
+        history
+            .iter()
+            .filter(|row| !shown.contains(&row.session))
+            .map(encode_history),
     );
     match serde_json::to_value(SessionListResult { sessions }) {
         Ok(value) => Frame::result(id, value),
@@ -860,10 +907,42 @@ fn attention_facts(
     })
 }
 
+fn unix_ms(at: std::time::SystemTime) -> i64 {
+    at.duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+/// A session found in a provider's store and nowhere else: no runtime, no
+/// Run, execution unknown, and the identity the store gave it (ADR 0016 D2).
+fn encode_history(row: &crate::history::HistoryRow) -> serde_json::Value {
+    serde_json::to_value(SessionListItem {
+        session_id: row.session.to_string(),
+        title: row.entry.provider.as_str().to_owned(),
+        // Corral observed no runtime and no end: unknown is the truth, and
+        // `exited` would be a claim nothing supports.
+        execution_state: "unknown".to_owned(),
+        terminal_access: Some(corral_protocol::method::TerminalAccess::Unavailable),
+        provider: Some(ProviderFacts {
+            name: row.entry.provider.as_str().to_owned(),
+            external_id: Some(row.entry.external_id.as_str().to_owned()),
+        }),
+        agent_event: None,
+        origin: Some(method::ORIGIN_HISTORY.to_owned()),
+        // Never the encoded directory name as a path (grill Q25).
+        location_hint: None,
+        attention: None,
+        last_active_unix_ms: Some(unix_ms(row.entry.last_active)),
+    })
+    .unwrap_or_else(|_| serde_json::json!({}))
+}
+
 fn encode_session(
     session: &ManagedSession,
     reported: Option<&ReportedSession>,
     attention: Option<method::AttentionFacts>,
+    last_active: Option<std::time::SystemTime>,
 ) -> serde_json::Value {
     serde_json::to_value(SessionListItem {
         session_id: session.session.to_string(),
@@ -892,6 +971,7 @@ fn encode_session(
         origin: Some(method::ORIGIN_MANAGED.to_owned()),
         location_hint: None,
         attention,
+        last_active_unix_ms: last_active.map(unix_ms),
     })
     .unwrap_or_else(|_| serde_json::json!({}))
 }
@@ -937,6 +1017,7 @@ fn encode_external(
         // this runtime was found to be carrying. A runtime nothing has named
         // yet is no Session, and has nothing to be in a state about.
         attention,
+        last_active_unix_ms: None,
     })
     .unwrap_or_else(|_| serde_json::json!({}))
 }
@@ -1396,10 +1477,13 @@ async fn execute_session_new(
                 state,
                 session,
                 run,
-                provider,
                 SessionOwnership::CreatedHere,
-                &working_directory,
-                provider::LaunchIntent::Fresh { args },
+                managed_launch::LaunchTarget {
+                    provider,
+                    program: std::ffi::OsStr::new(provider::program(provider)),
+                    working_directory: &working_directory,
+                    intent: provider::LaunchIntent::Fresh { args },
+                },
             )
             .await
             {
@@ -1425,12 +1509,12 @@ async fn execute_session_new(
         launch,
         geometry,
         injected,
-        |began, at| {
+        |launched, at| {
             let state = Arc::clone(state);
             let command = command.clone();
             async move {
                 state
-                    .start_managed_session(command, session, run, began, at)
+                    .start_managed_session(command, session, launched, at)
                     .await
             }
         },
@@ -1461,6 +1545,10 @@ fn concluded(
 struct ResumeSession {
     command: Command,
     session: CorralSessionId,
+    /// The disclosure revision the client says it showed, if any.
+    disclosure_revision: Option<String>,
+    /// The directory this continuation was preflighted for.
+    working_directory: Option<std::path::PathBuf>,
 }
 
 /// Continue an existing Session's provider session as a new Run, exactly once
@@ -1517,18 +1605,193 @@ fn read_session_resume(request: &Request) -> Result<ResumeSession, ProtocolError
 
     let kind = CommandKind::new(method::SESSION_RESUME)
         .unwrap_or_else(|_| unreachable!("{} is a usable command kind", method::SESSION_RESUME));
-    // The Session is the whole of what this command means. There is no argv to
-    // fingerprint — Corral composes it from what it recorded — so a retry
-    // naming a different Session is a different command, and that is the only
-    // way this one can differ.
-    let fingerprint = CommandFingerprint::builder(kind)
-        .input("session", session.to_string())
-        .build();
+    // The Session is most of what this command means: Corral composes the argv
+    // from what it recorded rather than taking one. The directory is the rest,
+    // because a continuation of a session Corral knows only from a provider's
+    // history runs where the client says (Q35), so two requests naming the
+    // same Session and different directories are two different commands.
+    //
+    // The disclosure revision is deliberately not part of it, on the same
+    // reasoning terminal geometry is not: it says whether this sender may
+    // issue the command now, never what the command does. A receipt is durable
+    // and a revision is momentary, and `already_started` refuses a receipt
+    // whose fingerprint has moved — so a revision here would permanently
+    // deny a client that lost its response, and correctly re-ran the
+    // preflight, any way to learn what it had already started (ADR 0002, Q12;
+    // the same exclusion `docs/decisions/2026-08-25-session-new-fingerprint-
+    // excludes-geometry.md` made for terminal geometry).
+    // It is checked instead where it belongs: against the decision being acted
+    // on, in the execution that acts.
+    let mut fingerprint = CommandFingerprint::builder(kind).input("session", session.to_string());
+    if let Some(working_directory) = &params.working_directory {
+        fingerprint = fingerprint.input("working_directory", working_directory.clone());
+    }
 
     Ok(ResumeSession {
-        command: Command::new(command_id, fingerprint),
+        command: Command::new(command_id, fingerprint.build()),
         session,
+        disclosure_revision: params.disclosure_revision,
+        working_directory: params.working_directory.map(std::path::PathBuf::from),
     })
+}
+
+/// Answer `session.continuation`: the ladder's decision in the person's words,
+/// and nothing spawned by asking.
+async fn session_continuation(request: &Request, state: &Arc<DaemonState>) -> Dispatch {
+    let id = request.id;
+    let invalid = |detail: String| ProtocolError::new(ErrorCode::InvalidParams, detail);
+    let params: SessionContinuationParams = match request.params.clone() {
+        Some(params) => match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(source) => return Dispatch::Reply(Frame::error(id, invalid(source.to_string()))),
+        },
+        None => {
+            return Dispatch::Reply(Frame::error(
+                id,
+                invalid("session.continuation needs a session".to_owned()),
+            ));
+        }
+    };
+    let session: CorralSessionId = match params.session_id.parse() {
+        Ok(session) => session,
+        Err(error) => {
+            let error: corral_core::MalformedId = error;
+            return Dispatch::Reply(Frame::error(id, invalid(error.to_string())));
+        }
+    };
+    let requested = params.working_directory.map(std::path::PathBuf::from);
+    let decision = match continuation::decide(state, session, requested.as_deref()).await {
+        Ok(decision) => decision,
+        Err(error) => match refused_reading(error) {
+            Ok(refusal) => return Dispatch::Reply(Frame::error(id, refusal)),
+            Err(fatal) => return Dispatch::FailClosed(fatal),
+        },
+    };
+    let result = match decision {
+        continuation::Decision::Eligible(_) => SessionContinuationResult {
+            decision: method::CONTINUATION_ELIGIBLE.to_owned(),
+            code: None,
+            reason: None,
+            disclosure: None,
+            disclosure_revision: None,
+        },
+        continuation::Decision::EligibleWithDisclosure {
+            disclosure,
+            revision,
+            ..
+        } => SessionContinuationResult {
+            decision: method::CONTINUATION_ELIGIBLE_WITH_DISCLOSURE.to_owned(),
+            code: None,
+            reason: None,
+            disclosure: Some(ContinuationDisclosure {
+                code: disclosure.code.to_owned(),
+                text: disclosure.text,
+            }),
+            disclosure_revision: Some(revision),
+        },
+        // The code the daemon decided, not one the client infers: a refusal
+        // it could retry and a refusal it never can are different answers,
+        // and only this end knows which this is.
+        continuation::Decision::Refused { code, reason } => SessionContinuationResult {
+            decision: method::CONTINUATION_REFUSED.to_owned(),
+            code: Some(code.as_str().to_owned()),
+            reason: Some(reason),
+            disclosure: None,
+            disclosure_revision: None,
+        },
+    };
+    Dispatch::Reply(match serde_json::to_value(result) {
+        Ok(value) => Frame::result(id, value),
+        Err(source) => Frame::error(
+            id,
+            ProtocolError::new(ErrorCode::InvalidParams, source.to_string()),
+        ),
+    })
+}
+
+/// Continue a session Corral knows only from a provider's own store.
+///
+/// Its Session, its `HistoryBinding`, its managed runtime, and the Run all
+/// enter the durable log together, at the moment a person asks for them (ADR
+/// 0016 D2). The row's id becomes the Session's, so the list does not change
+/// what it was calling this session.
+async fn continue_history_row(
+    state: &Arc<DaemonState>,
+    command: Command,
+    session: CorralSessionId,
+    plan: continuation::HistoryPlan,
+) -> Result<Concluded, corral_state::StateError> {
+    let run = RunId::mint();
+    let (launch, injected) = match compose_provider_launch(
+        state,
+        session,
+        run,
+        // The Session does not exist yet; this command is what creates it.
+        SessionOwnership::CreatedHere,
+        managed_launch::LaunchTarget {
+            provider: plan.provider,
+            // The file the sealing check read the version from, never the
+            // program name resolved afresh, which an in-place upgrade would
+            // answer differently between the check and the exec. Binding to
+            // the file does not settle that file's contents at exec: the race
+            // between reading a version and running it is the remainder D4
+            // names and accepts, not a guarantee this launch makes.
+            program: plan.executable.as_os_str(),
+            working_directory: &plan.working_directory,
+            intent: provider::LaunchIntent::Continue {
+                external_id: plan.external_id.clone(),
+            },
+        },
+    )
+    .await
+    {
+        Ok(composed) => composed,
+        Err(message) => {
+            return Ok(Concluded::Refused {
+                code: ErrorCode::InvalidParams,
+                message,
+            });
+        }
+    };
+
+    let Ok(named) = corral_core::ProviderId::new(plan.provider.as_str()) else {
+        return Ok(Concluded::Refused {
+            code: ErrorCode::UnknownProvider,
+            message: format!("{} is not a provider id", plan.provider),
+        });
+    };
+    let observed = corral_state::HistoryObservation {
+        key: corral_core::BindingKey::history(state.node(), named, plan.external_id.clone()),
+        observed_at: plan.observed_at,
+    };
+    let geometry = PtyGeometry::expect_valid(24, 80);
+    let committed = managed_launch::spawn_and_commit(
+        state,
+        session,
+        run,
+        launch,
+        geometry,
+        injected,
+        |launched, at| {
+            let state = Arc::clone(state);
+            let command = command.clone();
+            let observed = observed.clone();
+            async move {
+                state
+                    .continue_history_session(command, session, launched, observed, at)
+                    .await
+            }
+        },
+    )
+    .await;
+
+    let concluded = concluded(committed, &command)?;
+    if matches!(concluded, Concluded::Accepted { .. }) {
+        state.with_runtime(|runtime| {
+            runtime.history.forget(plan.provider, &plan.external_id);
+        });
+    }
+    Ok(concluded)
 }
 
 /// Perform one `session.resume`, as the owner of its command id.
@@ -1536,7 +1799,12 @@ async fn execute_session_resume(
     resume: ResumeSession,
     state: &Arc<DaemonState>,
 ) -> Result<Concluded, corral_state::StateError> {
-    let ResumeSession { command, session } = resume;
+    let ResumeSession {
+        command,
+        session,
+        disclosure_revision,
+        working_directory,
+    } = resume;
 
     // The receipt first, and before the per-Session claim, because this answer
     // does not depend on the claim: a command that already executed is replayed
@@ -1544,7 +1812,7 @@ async fn execute_session_resume(
     // first would let an unrelated continuation of the same Session, running
     // right now, turn an idempotent retry into `Busy` — a client that lost its
     // response would be told to try later and would never reach the Run it
-    // already made (ADR 0002 D4).
+    // already made (ADR 0002, Q12).
     match state.completed_managed_session(command.clone()).await {
         Ok(Some(already)) => {
             return Ok(Concluded::Accepted {
@@ -1568,29 +1836,28 @@ async fn execute_session_resume(
         });
     };
 
-    let plan = match resume_plan(state, session).await {
-        Ok(Ok(plan)) => plan,
-        Ok(Err(refused)) => {
+    // Recomputed, not remembered: the preflight left nothing behind, so this
+    // is the decision as it stands now, on the directory this call names.
+    let plan = match continuation::decide(state, session, working_directory.as_deref()).await {
+        Ok(continuation::Decision::Eligible(plan)) => plan,
+        Ok(continuation::Decision::Refused { code, reason }) => {
             return Ok(Concluded::Refused {
-                // Three answers, because a client does three different things
-                // with them: send it again, ask a different daemon about the
-                // agent, or read what the Session's own state says. None of
-                // them is `invalid_params` — the parameters were fine, and a
-                // client sent looking for a mistake in its request would not
-                // find one.
-                code: match refused {
-                    ResumeRefused::RuntimeUnavailable => ErrorCode::Busy,
-                    ResumeRefused::UnknownProvider(_) => ErrorCode::UnknownProvider,
-                    ResumeRefused::NotThisDaemon
-                    | ResumeRefused::IdentityUnknown
-                    | ResumeRefused::Eligibility(_)
-                    | ResumeRefused::RunStillLive
-                    | ResumeRefused::EndUnverifiable
-                    | ResumeRefused::NoPreviousRun
-                    | ResumeRefused::EpisodeOrderUnknown => ErrorCode::SessionNotContinuable,
-                },
-                message: refused.to_string(),
+                code,
+                message: reason,
             });
+        }
+        Ok(continuation::Decision::EligibleWithDisclosure { plan, revision, .. }) => {
+            if continuation::shown(Some(&revision), disclosure_revision.as_deref())
+                == continuation::Shown::Stale
+            {
+                return Ok(Concluded::Refused {
+                    code: ErrorCode::StaleDisclosure,
+                    message: "this continuation needs a disclosure shown first, and the one \
+                              shown is not the current one; ask session.continuation again"
+                        .to_owned(),
+                });
+            }
+            return continue_history_row(state, command, session, plan).await;
         }
         Err(error) => return refused_by_store(&command, error),
     };
@@ -1600,11 +1867,17 @@ async fn execute_session_resume(
         state,
         session,
         run,
-        plan.provider,
         SessionOwnership::Preexisting,
-        &plan.working_directory,
-        provider::LaunchIntent::Continue {
-            external_id: plan.external_id.clone(),
+        managed_launch::LaunchTarget {
+            provider: plan.provider,
+            // A recorded Session's continuation rests on a durable provider
+            // binding rather than on a sealed store layout, so it resolves the
+            // program the way any command does.
+            program: std::ffi::OsStr::new(provider::program(plan.provider)),
+            working_directory: &plan.working_directory,
+            intent: provider::LaunchIntent::Continue {
+                external_id: plan.external_id.clone(),
+            },
         },
     )
     .await
@@ -1630,12 +1903,12 @@ async fn execute_session_resume(
         launch,
         geometry,
         injected,
-        |began, at| {
+        |launched, at| {
             let state = Arc::clone(state);
             let command = command.clone();
             async move {
                 state
-                    .resume_managed_session(command, session, run, began, at)
+                    .resume_managed_session(command, session, launched, at)
                     .await
             }
         },
@@ -1685,6 +1958,34 @@ fn refused_by_store(
             code: ErrorCode::InvalidParams,
             message: other.to_string(),
         },
+    })
+}
+
+/// The protocol error a store refusal is when nothing was being executed.
+///
+/// The read counterpart of `refused_by_store`, exhaustive for the same
+/// reason: a refusal no arm named would reach the caller as `FailClosed`,
+/// and `Busy` — a store one other writer is holding — would then be one
+/// backup tool ending every session's control plane.
+fn refused_reading(
+    error: corral_state::StateError,
+) -> Result<ProtocolError, corral_state::StateError> {
+    use corral_state::{Refusal, StateError};
+
+    let refusal = match error {
+        StateError::Refused(refusal) => refusal,
+        fatal => return Err(fatal),
+    };
+    Ok(match refusal {
+        // A fixed message: the engine's own text names tables, columns and
+        // paths, and a protocol error crosses the socket.
+        Refusal::Busy { .. } => ProtocolError::new(
+            ErrorCode::Busy,
+            "the registry is held by another writer".to_owned(),
+        ),
+        // Nothing was executed, so every other refusal is about what was
+        // asked rather than about the store's health.
+        other => ProtocolError::new(ErrorCode::InvalidParams, other.to_string()),
     })
 }
 

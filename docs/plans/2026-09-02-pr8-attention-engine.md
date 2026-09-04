@@ -482,8 +482,11 @@ is told.
 
 ## Definition of done (PR8b)
 
-- Store layouts sealed by the matrix for both providers; ADR 0016
-  accepted; this workstream unblocked before any boundary was crossed.
+- Store layouts sealed by the matrix for both providers, keyed by the
+  exact versions measured and inheriting nothing; ADR 0016 accepted
+  2026-09-03 on durable version-specific evidence
+  (`docs/evidence/pr8b-history-store-and-resume-2026-09-02.md`), so this
+  workstream is unblocked.
 - B1–B5 implemented; `./scripts/verify` green; snapshot coverage present;
   the recent window recorded as tuning.
 - Never an empty first list when the sealed store holds recent sessions;
@@ -493,6 +496,10 @@ is told.
 - Continuation under test: the historical disclosure, external-live
   refusal, managed-live Open, Unverifiable refusal, stale
   `disclosure_revision` rejection, and `--yes` still preflighting.
+- The directory a history row continues in is the initiating client's,
+  stated explicitly and never defaulted by the daemon; refused when
+  absent, relative, missing, or not a directory; named in the disclosure;
+  covered by the revision; revalidated on the way to a spawn (Q35).
 - Human-merged (Class C). Glossary entry landed; drift notes placed.
 
 ## Review checklist (PR8b)
@@ -567,6 +574,11 @@ claim, claim-scoped assurance, capability-scoped support and release
 semantics, and unverified versions meaning Limited awareness rather than
 inherited authority. Q1–Q34 do not reopen. What remains before PR8a lands
 is the review pass and the harness-isolation gate above.
+
+**ADR 0016 status.** Accepted 2026-09-03 on durable version-specific
+evidence (`docs/evidence/pr8b-history-store-and-resume-2026-09-02.md`);
+its decision frontier is closed and PR8b implements accepted architecture.
+PR8b lands after PR8a (grill Q11).
 
 **When the dogfood window may start (grill Q31).** PR8a merged; a human
 has advanced `STORAGE_EPOCH` to `dogfood`; the exercised
@@ -679,6 +691,37 @@ the sealed version rows (`attention::sealing` is an empty table), the
 `sealed_by` lines in the manifests, the Claude adapter's `Notification`
 split, the glossary and canonical prose changes A7 names. Until then every
 session reads Unknown from the daemon — visible, diagnostic, and honest.
+
+**Built ahead of acceptance, on `task/pr8b-history` (grill Q32(b)).**
+B1 enumeration over the two store layouts (window, cap, dedupe by id,
+no content read), gated per provider by `history::layout_sealed` —
+false for both, so nothing is enumerated yet; the history tier of live
+rows, resolved against the registry under any binding kind, known
+Sessions decorated with the store's recency, the rest listed after the
+external rows with `origin: "history"`, execution `unknown`, and
+`last_active_unix_ms`; the five-state presentation says "Found in Claude
+history" and the age, and nothing about a runtime or a location;
+`session.continuation` with the four D4 answers in the daemon's words,
+`disclosure_revision` bound to the decision's facts, `session.resume`
+carrying it back and refusing a missing or stale one with
+`stale_disclosure`; `corral continue --yes` still preflights, renders
+the disclosure it answered, and carries the revision. The fourth rung
+answers *eligible with disclosure* only once
+the client states a usable working directory: absolute, existing, a
+directory. Grill Q35 ruled it — the measured providers resume an id from
+anywhere and then run where they were started, so identity does not imply
+location and the daemon substitutes none — and the disclosure names the
+exact directory. The CLI and the TUI send their own working directory as
+client policy. The revision covers it, so changing directory after the
+preflight is refused as stale rather than started somewhere nobody saw. B1–B5 are implemented: layouts sealed per exact
+measured version (Claude Code 2.1.258, Codex 0.152.0), read from the
+install the daemon resolves on PATH, so an unmeasured version enumerates
+nothing; the composing store operation recording Session, `HistoryBinding`
+at Attested, the managed runtime, and the Run in one transaction, with the
+row forgotten as it becomes a Session; the TUI asking the disclosure on the
+list itself, wrapped rather than truncated so the directory survives; and
+the glossary and `PRODUCT.md` §8 prose. What is left is the review pass and
+the merge itself, which waits on ADR 0015.
 
 ## Plan size justification
 

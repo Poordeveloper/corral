@@ -41,6 +41,12 @@ pub const MOCK_PROVIDER_BINARY: &str = env!("CARGO_BIN_EXE_corral-mock-provider"
 /// How long a test waits for a condition it expects to become true.
 pub const SETTLE: Duration = Duration::from_secs(10);
 
+/// Where a test namespace puts the home whose provider dotfiles Corral reads
+/// and writes: under the Corral root, because that is the directory the
+/// namespace seam is set to. A real account keeps them beside `.corral`
+/// instead, which is the one layout difference a test namespace has.
+const PROVIDER_HOME: &str = "provider-home";
+
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// The daemon a test drives: the staged copy, resolved as the staged client's
@@ -112,6 +118,41 @@ impl TestAccount {
         self
     }
 
+    /// The same stand-in, installed the way Claude Code's native installer
+    /// lays itself out, so the daemon can read a version from the path it
+    /// resolves to. A store layout is sealed per version (ADR 0016 D1), so a
+    /// test about enumeration has to be about a version.
+    pub fn with_versioned_claude(mut self, version: &str) -> Self {
+        let bin = self.base.join("bin");
+        create_private_dir_all(&bin);
+        let installed = self.base.join("claude/versions").join(version);
+        create_private_dir_all(&installed);
+        let real = installed.join("claude");
+        std::fs::copy(MOCK_PROVIDER_BINARY, &real).expect("place the stand-in provider");
+        let link = bin.join("claude");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).expect("link the stand-in onto PATH");
+        self.provider_path = Some(bin);
+        self
+    }
+
+    /// A session file in the provider's own store, as the provider files it.
+    /// Content is never read (ADR 0016 D1), so the bytes are a marker.
+    ///
+    /// Under the provider home, which is the one home Corral reads and writes
+    /// a provider's own files in — the same place the hook installer works —
+    /// so a test's layout is the layout production has.
+    pub fn with_claude_history(self, label: &str, session_id: &str) -> Self {
+        let directory = self.provider_home().join(".claude/projects").join(label);
+        create_private_dir_all(&directory);
+        std::fs::write(
+            directory.join(format!("{session_id}.jsonl")),
+            b"{\"type\":\"user\"}\n",
+        )
+        .expect("write a session file");
+        self
+    }
+
     pub fn with_idle_grace(mut self, idle_grace: Duration) -> Self {
         self.idle_grace = idle_grace;
         self
@@ -135,6 +176,13 @@ impl TestAccount {
     /// Somewhere to put fixtures that are not rendezvous state.
     pub fn scratch(&self) -> &Path {
         &self.base
+    }
+
+    /// The home this account's daemon reads and writes provider files in,
+    /// as `corral_rendezvous::provider_home` resolves it under the test
+    /// namespace.
+    pub fn provider_home(&self) -> PathBuf {
+        self.corral_root.join(PROVIDER_HOME)
     }
 
     pub fn socket(&self) -> PathBuf {

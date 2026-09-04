@@ -18,9 +18,11 @@ mod ancestry;
 mod attention;
 pub mod clock;
 mod connection;
+mod continuation;
 mod detection;
 /// Sessions Corral found rather than started (ADR 0014).
 mod external_session;
+mod history;
 mod hook_endpoint;
 mod hook_evidence;
 mod in_flight;
@@ -130,6 +132,13 @@ fn start() -> Result<ExitCode, StartupError> {
         DaemonState::open(paths.registry(), paths.launch_dir(), paths.state_dir())
             .map_err(StartupError::State)?,
     );
+    // The providers' own home, resolved the way the hook installer resolves
+    // it. A daemon that cannot resolve one enumerates nothing rather than
+    // reading a directory it guessed at.
+    match corral_rendezvous::provider_home() {
+        Ok(home) => state.attach_provider_home(home),
+        Err(source) => tracing::warn!(%source, "the provider home could not be resolved"),
+    }
     // Diagnostics beside state, never inside it, and never a startup failure:
     // a daemon that cannot journal still derives (ADR 0015 D8).
     match crate::attention::Journal::open(

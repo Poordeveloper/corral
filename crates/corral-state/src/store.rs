@@ -81,6 +81,20 @@ impl RecordedRun {
     }
 }
 
+/// The episode a Corral launch creates: its id, when it began, and where.
+///
+/// The three together, because the launch paths take all three and none of
+/// them may take only two: a Run recorded without where it ran is one the
+/// next daemon cannot continue, and the directory is not a thing to
+/// substitute later (Q35). Non-optional here on purpose — a Run Corral
+/// started always has one, and only a Run Corral *found* does not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchedRun {
+    pub run: RunId,
+    pub started: OccurrenceTime,
+    pub working_directory: std::path::PathBuf,
+}
+
 /// What resolving an external identity found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionResolution {
@@ -236,6 +250,18 @@ impl<T> Written<T> {
     }
 }
 
+/// The store observation a history binding rests on: the provider identity a
+/// session file named, and when Corral read it.
+///
+/// One argument because they are one fact. The evidence is dated on the
+/// reading rather than on the write that records it, and separating them is
+/// how a record comes to claim Corral had just looked (ADR 0015 D5).
+#[derive(Clone, Debug)]
+pub struct HistoryObservation {
+    pub key: BindingKey,
+    pub observed_at: SystemTime,
+}
+
 impl Store {
     /// Open the registry store, or conclude it cannot be used.
     pub fn open(path: &Path) -> Result<Self, StateError> {
@@ -281,6 +307,18 @@ impl Store {
 
     pub fn session(&mut self, id: CorralSessionId) -> Result<Option<Session>, StateError> {
         self.read(|connection| projection::session(connection, id))
+    }
+
+    /// The Session an external identity resolves to under any binding kind.
+    pub fn session_by_external_id(
+        &mut self,
+        provider: &ProviderId,
+        external_id: &ExternalId,
+    ) -> Result<Option<CorralSessionId>, StateError> {
+        let node = self.node();
+        self.read(|connection| {
+            projection::session_by_external_id(connection, node, provider, external_id)
+        })
     }
 
     pub fn binding(&mut self, id: BindingId) -> Result<Option<Binding>, StateError> {
@@ -349,10 +387,14 @@ impl Store {
         &mut self,
         command: &Command,
         session: CorralSessionId,
-        run: RunId,
-        started: OccurrenceTime,
+        launched: LaunchedRun,
         at: SystemTime,
     ) -> Result<StartedManagedSession, StateError> {
+        let LaunchedRun {
+            run,
+            started,
+            working_directory,
+        } = launched;
         let node = self.node;
         // Inside the write, not before it: a store that has already concluded
         // it cannot vouch must answer that, not a refusal a caller would read
@@ -417,6 +459,138 @@ impl Store {
                         run,
                         runtime_binding: binding.id(),
                         started_at: started.authoritative(),
+                        working_directory: Some(working_directory),
+                    },
+                    SessionEvent::CommandAccepted {
+                        command: command.id().clone(),
+                        fingerprint: command.fingerprint().clone(),
+                        outcome: CommandOutcome::SessionCreated(session),
+                        accepted_at: at,
+                    },
+                ],
+            ))
+        })
+    }
+
+    /// Record a session Corral knows only from a provider's own store, and
+    /// the continuation that puts it in the durable log for the first time.
+    ///
+    /// One transaction, because the three facts are one fact: a Session
+    /// exists, it *is* the provider session the store named, and Corral is
+    /// running it now. Recording any of them alone would leave either a
+    /// Session nothing identifies or an identity with no session (ADR 0016
+    /// D2), and a daemon restart re-enumerates rather than replaying, so a
+    /// partial write would not be repaired by the next pass.
+    ///
+    /// The history binding's shape is the store's, not the caller's: what a
+    /// provider's own store proves is that it holds a session it calls X, and
+    /// that claim is Attested from `HistoryRecord` and Discovered. It is not
+    /// control-capable and never becomes a claim about a live runtime (ADR
+    /// 0016 D3). The Run belongs to the managed runtime binding minted here,
+    /// exactly as `start_managed_session` mints one, because the process this
+    /// continuation is about to spawn is Corral's own.
+    pub fn continue_history_session(
+        &mut self,
+        command: &Command,
+        session: CorralSessionId,
+        launched: LaunchedRun,
+        observed: HistoryObservation,
+        at: SystemTime,
+    ) -> Result<StartedManagedSession, StateError> {
+        let LaunchedRun {
+            run,
+            started,
+            working_directory,
+        } = launched;
+        let HistoryObservation {
+            key: history,
+            observed_at,
+        } = observed;
+        let node = self.node;
+        self.write(move |transaction| {
+            let at = encoding::as_stored(at)?;
+            let started = as_stored_occurrence(started)?;
+            refuse_oversized_fingerprint(command)?;
+            if projection::recorded_run(transaction, run)?.is_some() {
+                return Err(Refusal::RunAlreadyRecorded(run).into());
+            }
+            if let Some(replayed) = already_started(transaction, command)? {
+                return Ok(Written::nothing_to_record(replayed));
+            }
+            // Resolution before creation (ADR 0016 D2): an identity that has
+            // become a Session since the row was listed is that Session, and
+            // continuing it is that Session's continuation to accept or
+            // refuse — never a second Session for one provider session.
+            if history.kind() != BindingKind::History {
+                return Err(Refusal::NotAHistoryBinding(history.kind()).into());
+            }
+            if let Some(claimed) = projection::binding_by_external_id(
+                transaction,
+                node,
+                history.provider(),
+                history.external_id(),
+            )? {
+                return Err(Refusal::BindingClaimedByAnotherSession {
+                    binding: claimed.id(),
+                    session: claimed.session(),
+                }
+                .into());
+            }
+
+            let history = Binding::new(
+                BindingId::mint(),
+                session,
+                history,
+                Provenance::Discovered,
+                // Dated on the pass that read the store, never on this
+                // write: freshness asks how old the observation is, and a
+                // record's own timestamp would say Corral had just looked
+                // (ADR 0015 D5).
+                as_stored_evidence(Evidence::new(
+                    EvidenceSource::HistoryRecord,
+                    Assurance::Attested,
+                    observed_at,
+                ))?,
+                at,
+            );
+            refuse_reserved_namespace(&history)?;
+            let runtime = Binding::new(
+                BindingId::mint(),
+                session,
+                BindingKey::mint_managed_runtime(node),
+                Provenance::CorralCreated,
+                as_stored_evidence(Evidence::new(
+                    EvidenceSource::CorralConstructed,
+                    Assurance::Deterministic,
+                    at,
+                ))?,
+                at,
+            );
+            let receipt = CommandReceipt::new(
+                command.id().clone(),
+                command.fingerprint().clone(),
+                CommandOutcome::SessionCreated(session),
+                at,
+            );
+            Ok(Written::recording(
+                StartedManagedSession {
+                    acceptance: CommandAcceptance::Executed(receipt),
+                    session,
+                    run,
+                },
+                vec![
+                    SessionEvent::SessionCreated {
+                        session,
+                        created_at: at,
+                    },
+                    SessionEvent::BindingAdded(history),
+                    SessionEvent::BindingAdded(runtime.clone()),
+                    SessionEvent::RunStarted {
+                        session,
+                        run,
+                        runtime_binding: runtime.id(),
+                        started_at: started.authoritative(),
+                        working_directory: Some(working_directory),
                     },
                     SessionEvent::CommandAccepted {
                         command: command.id().clone(),
@@ -450,10 +624,14 @@ impl Store {
         &mut self,
         command: &Command,
         session: CorralSessionId,
-        run: RunId,
-        started: OccurrenceTime,
+        launched: LaunchedRun,
         at: SystemTime,
     ) -> Result<StartedManagedSession, StateError> {
+        let LaunchedRun {
+            run,
+            started,
+            working_directory,
+        } = launched;
         let outcome = self.write(move |transaction| {
             let at = encoding::as_stored(at)?;
             let started = as_stored_occurrence(started)?;
@@ -492,6 +670,7 @@ impl Store {
                         run,
                         runtime_binding: binding,
                         started_at: started.authoritative(),
+                        working_directory: Some(working_directory),
                     },
                     SessionEvent::CommandAccepted {
                         command: command.id().clone(),
@@ -589,7 +768,21 @@ impl Store {
         self.write(move |transaction| {
             let at = encoding::as_stored(at)?;
             let evidence = as_stored_evidence(evidence)?;
-            if let Some(binding) = projection::binding_by_key(transaction, &key)? {
+            // Across kinds when the key names a provider session, by the whole
+            // key otherwise: one conversation met as a history file and again
+            // as a live provider session is one Session, and only an identity
+            // nothing already claims mints a new one (ADR 0016 D2).
+            let existing = if key.kind().names_a_provider_session() {
+                projection::binding_by_external_id(
+                    transaction,
+                    key.node(),
+                    key.provider(),
+                    key.external_id(),
+                )?
+            } else {
+                projection::binding_by_key(transaction, &key)?
+            };
+            if let Some(binding) = existing {
                 let session =
                     projection::session(transaction, binding.session())?.ok_or_else(|| {
                         FatalState::Unreadable {
@@ -659,6 +852,7 @@ impl Store {
 
             let binding = Binding::new(BindingId::mint(), session, key, provenance, evidence, at);
             refuse_reserved_namespace(&binding)?;
+            refuse_an_identity_another_session_claims(transaction, &binding, session)?;
             refuse_second_control_capable_runtime_binding(transaction, &binding)?;
             refuse_second_provider_session_binding(transaction, &binding)?;
             Ok(Written::recording(
@@ -919,6 +1113,10 @@ impl Store {
                 run: id,
                 runtime_binding,
                 started_at: started.authoritative(),
+                // A Run Corral found rather than launched. Where it runs is
+                // knowable from the OS and has not been looked at, so the
+                // fact is absent rather than guessed.
+                working_directory: None,
             }];
             if let Some((end, at)) = ending {
                 let at = as_stored_occurrence(at)?;
@@ -1413,6 +1611,47 @@ fn refuse_reserved_namespace(binding: &Binding) -> Result<(), StateError> {
         }
         .into()
     })
+}
+
+/// A provider session another Session already claims is not bound again.
+///
+/// The exact-key check above answers "is this key taken"; this answers "is
+/// this conversation taken", which is the guarantee binding uniqueness
+/// actually makes (`ARCHITECTURE.md` §1). A history binding and a
+/// provider-session binding name one conversation under two kinds (ADR 0016
+/// D2), so a key that is free can still name an identity another Session
+/// holds — a Corral-launched agent that resumed, from inside itself, a
+/// conversation Corral had already enumerated.
+///
+/// Refused rather than repaired: merging two Sessions is not an operation
+/// this store has, and quietly adding the second edge is what puts one agent
+/// behind two rows.
+fn refuse_an_identity_another_session_claims(
+    connection: &Connection,
+    candidate: &Binding,
+    session: CorralSessionId,
+) -> Result<(), StateError> {
+    if !candidate.key().kind().names_a_provider_session() {
+        return Ok(());
+    }
+    let key = candidate.key();
+    let Some(held) = projection::binding_by_external_id(
+        connection,
+        key.node(),
+        key.provider(),
+        key.external_id(),
+    )?
+    else {
+        return Ok(());
+    };
+    if held.session() == session {
+        return Ok(());
+    }
+    Err(Refusal::BindingClaimedByAnotherSession {
+        binding: held.id(),
+        session: held.session(),
+    }
+    .into())
 }
 
 /// At most one control-capable runtime binding is active per Session.
