@@ -1,5 +1,5 @@
 ---
-status: blocked   # ADR 0015 / ADR 0016 proposed; structural grill closed (rounds 1–4); PR8a's ruled mechanics are built on task/pr8-attention (grill Q32), nothing merges before acceptance
+status: done   # PR8a merged in PR #37, PR8b in PR #38; ADRs 0015 and 0016 accepted 2026-09-03. The Follow-ups section below outlives the plan
 class: C
 writes:           # one plan, two independently correct PRs (grill Q1); overlapping owners serialize
   pr8a: [corrald, corral-core, corral-protocol, corral-tui, corral]

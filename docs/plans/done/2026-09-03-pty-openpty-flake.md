@@ -1,5 +1,5 @@
 ---
-status: active
+status: done   # PATCH 2 in third_party/portable-pty/CORRAL_PATCHES.md
 class:  B
 writes:
   - third_party/portable-pty (vendored PTY backend)
