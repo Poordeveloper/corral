@@ -92,9 +92,9 @@ rejected alternative → confidence → remaining gap.
 ### 8. Desktop architecture (GPUI)
 - Strongest: Zed (primary), Wake (small-scale existence proof).
 - Evidence: Zed terminal = alacritty-fork in-process, per-terminal IO thread, FairMutex grid, per-frame owned viewport snapshot, 4ms event coalescing, style-batched shaping via LineLayoutCache, custom 3k-LOC Element, entity-per-terminal view-granular invalidation, embedded/standalone terminal modes, `spawn_dedicated` for parsers (macOS GCD 512KiB stacks), gpui not on crates.io (pin a rev; platform crates just split). Wake: complete GPUI+gpui-component app in 10.7k LOC, `ListState`+splice transcript virtualization.
-- Decision (pre-PR8 checklist): entity per terminal; custom Element; 4ms coalescing; owned frame snapshot; embedded/standalone mode enum on day one; pinned gpui rev; client-side emulator fed by daemon ANSI (display-only mode is first-class in Zed itself).
+- Decision (pre-PR8 checklist): entity per terminal; custom Element; 4ms coalescing; owned frame snapshot; embedded/standalone mode enum on day one; pinned gpui (as of 2026-09-04 gpui ships on crates.io; Corral pins the exact release `gpui = "=0.2.2"`, no git rev — `docs/decisions/2026-09-04-pr9-spike-grill.md` Q2); client-side emulator fed by daemon ANSI (display-only mode is first-class in Zed itself; qwertty-term-vt chosen as the client engine, grill Q3).
 - Rejected: terminal-in-client PTY ownership; composing the grid from div-like elements; unpinned gpui.
-- Confidence: high. Gap: no perf measurements of ANSI-replica rendering vs Zed's direct-lock model (expected fine; verify in PR8 spike).
+- Confidence: high. The ANSI-replica rendering gap was measured by the PR9 spike (`docs/references/2026-09-04-pr9-gpui-integration-spike.md`): paint p95 1.34 ms at 200×60 under the real display link; the spike also found six daemon-side defects the PR9 plan must clear first.
 
 ### 9. TUI architecture
 - Strongest: Pi (interaction model), Codex tui (testing), Herdr (mouse-first ratatui).
