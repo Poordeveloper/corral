@@ -54,6 +54,8 @@ pub(crate) struct HistoryPlan {
     pub provider: KnownProvider,
     pub external_id: ExternalId,
     pub working_directory: PathBuf,
+    /// When Corral read the store and found this session.
+    pub observed_at: std::time::SystemTime,
     /// The executable whose version the sealing check read, and the one this
     /// continuation runs. Not the provider's program name: that is resolved
     /// again at exec, and an install upgraded in between would answer it
@@ -264,6 +266,7 @@ fn history_row(
             provider,
             external_id: row.entry.external_id.clone(),
             working_directory: directory,
+            observed_at: row.entry.observed_at,
             executable,
         },
     }

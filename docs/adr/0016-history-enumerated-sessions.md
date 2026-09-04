@@ -203,6 +203,19 @@ weight, because on macOS and with integration off Corral cannot discover
 the live process at all (ADR 0014 D2), and refusing every history row
 would make the first-run list a list of things Corral will not do.
 
+The refusal a continuation preflight answers carries its code, because a
+refusal a person may simply send again and one they never can are
+different answers and only the daemon knows which this is. A client
+reading no code has learned nothing about the kind — not that the kind is
+permanent. The disclosure is shown before the continuation, including
+when it was answered in advance: text printed once the provider is
+already running says what happened, which is not a disclosure.
+
+The history binding's evidence is dated on the pass that read the store,
+never on the write that records it. Freshness asks how old the
+observation is (ADR 0015 D5), and a record's own timestamp would say
+Corral had just looked.
+
 A continuation from a history row is a managed launch like any other:
 Deterministic runtime binding, launch token, injected hooks, and the
 provider's first identity report confirming the `HistoryBinding`'s claim

@@ -26,6 +26,6 @@ pub use error::{FatalState, Refusal, StateError};
 pub use event::SessionEvent;
 pub use integration::RecordedIntent;
 pub use store::{
-    BindingResolution, CommandAcceptance, Contested, Durability, RecordedEvent, RecordedRun,
-    SessionResolution, StartedManagedSession, Store,
+    BindingResolution, CommandAcceptance, Contested, Durability, HistoryObservation, RecordedEvent,
+    RecordedRun, SessionResolution, StartedManagedSession, Store,
 };

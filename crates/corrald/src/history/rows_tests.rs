@@ -14,6 +14,7 @@ fn entry(id: &str, seconds_ago: u64) -> HistoryEntry {
         provider: KnownProvider::Claude,
         external_id: ExternalId::new(id).expect("usable"),
         last_active: SystemTime::UNIX_EPOCH + Duration::from_secs(10_000 - seconds_ago),
+        observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(10_000),
         store_label: "-w".to_owned(),
         path: std::path::PathBuf::from(format!("/store/{id}.jsonl")),
     }

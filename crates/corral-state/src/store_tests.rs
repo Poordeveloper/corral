@@ -3217,6 +3217,8 @@ fn a_session_is_found_by_its_external_id_whatever_the_binding_kind() {
 fn continuing_a_history_row_records_the_session_its_history_binding_and_its_run() {
     let mut store = TestStore::new("continue-history");
     let at = instant(500);
+    // The pass that read the store ran before the write that records it.
+    let observed = instant(300);
     let session = CorralSessionId::mint();
     let run = RunId::mint();
     let history = BindingKey::history(
@@ -3230,7 +3232,10 @@ fn continuing_a_history_row_records_the_session_its_history_binding_and_its_run(
             &command("continue-1", "/w"),
             session,
             run,
-            history.clone(),
+            HistoryObservation {
+                key: history.clone(),
+                observed_at: observed,
+            },
             OccurrenceTime::Authoritative(at),
             at,
         )
@@ -3261,6 +3266,9 @@ fn continuing_a_history_row_records_the_session_its_history_binding_and_its_run(
     assert_eq!(history.key().external_id().as_str(), "session-abc");
     assert_eq!(history.assurance(), Assurance::Attested);
     assert_eq!(history.evidence().source(), EvidenceSource::HistoryRecord);
+    // Dated on the pass that read the store, not on this write: freshness
+    // asks how old the observation is (ADR 0015 D5).
+    assert_eq!(history.evidence().observed_at(), observed);
     assert_eq!(history.provenance(), Provenance::Discovered);
     assert!(!history.is_control_capable_runtime_binding());
 
@@ -3291,6 +3299,7 @@ fn continuing_a_history_row_records_the_session_its_history_binding_and_its_run(
 fn a_retried_history_continuation_replays_its_receipt() {
     let mut store = TestStore::new("continue-history-retry");
     let at = instant(500);
+    let observed = instant(300);
     let command = command("continue-1", "/w");
     let history = BindingKey::history(
         store.node(),
@@ -3302,7 +3311,10 @@ fn a_retried_history_continuation_replays_its_receipt() {
             &command,
             CorralSessionId::mint(),
             RunId::mint(),
-            history.clone(),
+            HistoryObservation {
+                key: history.clone(),
+                observed_at: observed,
+            },
             OccurrenceTime::Authoritative(at),
             at,
         )
@@ -3313,7 +3325,10 @@ fn a_retried_history_continuation_replays_its_receipt() {
             &command,
             CorralSessionId::mint(),
             RunId::mint(),
-            history.clone(),
+            HistoryObservation {
+                key: history.clone(),
+                observed_at: observed,
+            },
             OccurrenceTime::Authoritative(at),
             at,
         )

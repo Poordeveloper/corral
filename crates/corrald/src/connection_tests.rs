@@ -915,6 +915,7 @@ async fn a_history_row_is_listed_with_its_origin_and_recency() {
                 provider: crate::provider::KnownProvider::Claude,
                 external_id: corral_core::ExternalId::new("session-abc").expect("usable"),
                 last_active: at,
+                observed_at: at,
                 store_label: "-root-proj".to_owned(),
                 path: std::path::PathBuf::from("/store/session-abc.jsonl"),
             }],

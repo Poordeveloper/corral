@@ -20,6 +20,11 @@ pub struct HistoryEntry {
     pub provider: KnownProvider,
     pub external_id: ExternalId,
     pub last_active: SystemTime,
+    /// When Corral read the store and found this, which is what the evidence
+    /// for a history claim is dated on. Not `last_active`: that is when the
+    /// session acted, and freshness asks how old the *observation* is
+    /// (ADR 0015 D5).
+    pub observed_at: SystemTime,
     /// The directory the provider filed it under, as the provider spelled
     /// it. A label, never decoded into a path: Claude's encoding is not
     /// reversible (grill Q25).
@@ -162,6 +167,7 @@ pub fn enumerate(
             provider,
             external_id: id.clone(),
             last_active: modified,
+            observed_at: now,
             store_label: label,
             path,
         };

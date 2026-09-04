@@ -236,6 +236,18 @@ impl<T> Written<T> {
     }
 }
 
+/// The store observation a history binding rests on: the provider identity a
+/// session file named, and when Corral read it.
+///
+/// One argument because they are one fact. The evidence is dated on the
+/// reading rather than on the write that records it, and separating them is
+/// how a record comes to claim Corral had just looked (ADR 0015 D5).
+#[derive(Clone, Debug)]
+pub struct HistoryObservation {
+    pub key: BindingKey,
+    pub observed_at: SystemTime,
+}
+
 impl Store {
     /// Open the registry store, or conclude it cannot be used.
     pub fn open(path: &Path) -> Result<Self, StateError> {
@@ -463,10 +475,14 @@ impl Store {
         command: &Command,
         session: CorralSessionId,
         run: RunId,
-        history: BindingKey,
+        observed: HistoryObservation,
         started: OccurrenceTime,
         at: SystemTime,
     ) -> Result<StartedManagedSession, StateError> {
+        let HistoryObservation {
+            key: history,
+            observed_at,
+        } = observed;
         let node = self.node;
         self.write(move |transaction| {
             let at = encoding::as_stored(at)?;
@@ -503,10 +519,14 @@ impl Store {
                 session,
                 history,
                 Provenance::Discovered,
+                // Dated on the pass that read the store, never on this
+                // write: freshness asks how old the observation is, and a
+                // record's own timestamp would say Corral had just looked
+                // (ADR 0015 D5).
                 as_stored_evidence(Evidence::new(
                     EvidenceSource::HistoryRecord,
                     Assurance::Attested,
-                    at,
+                    observed_at,
                 ))?,
                 at,
             );

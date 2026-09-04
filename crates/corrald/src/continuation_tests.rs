@@ -218,6 +218,7 @@ async fn a_history_row_is_eligible_once_the_client_says_where() {
         provider: KnownProvider::Claude,
         external_id: external_id.clone(),
         last_active: std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700),
+        observed_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800),
         store_label: "-root-proj".to_owned(),
         path: registry.directory.join("-root-proj/x.jsonl"),
     };

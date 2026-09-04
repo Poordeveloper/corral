@@ -489,12 +489,12 @@ impl DaemonState {
         command: Command,
         session: CorralSessionId,
         run: RunId,
-        history: corral_core::BindingKey,
+        observed: corral_state::HistoryObservation,
         started: OccurrenceTime,
         at: SystemTime,
     ) -> Result<StartedManagedSession, StateError> {
         self.off_the_reactor(move |store| {
-            store.continue_history_session(&command, session, run, history, started, at)
+            store.continue_history_session(&command, session, run, observed, started, at)
         })
         .await
     }
