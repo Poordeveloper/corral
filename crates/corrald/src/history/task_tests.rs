@@ -228,3 +228,49 @@ fn sealed_at(provider: KnownProvider) -> Option<crate::history::SealedInstall> {
 fn not_sealed(_: KnownProvider) -> Option<crate::history::SealedInstall> {
     None
 }
+
+/// A Codex rollout under the sealed shape:
+/// `<root>/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`.
+fn codex_rollout(home: &std::path::Path) {
+    let day = home.join(".codex/sessions/2026/09/02");
+    std::fs::create_dir_all(&day).expect("the day");
+    let rollout =
+        day.join("rollout-2026-09-02T10-00-00-0f9b6c1a-2222-4222-8222-000000000002.jsonl");
+    std::fs::write(&rollout, "{}\n").expect("rollout file");
+    std::fs::File::options()
+        .write(true)
+        .open(&rollout)
+        .expect("open")
+        .set_modified(now() - Duration::from_secs(3_600))
+        .expect("mtime");
+}
+
+/// A provider this machine has no sealed install of must not silence the one
+/// it has.
+///
+/// The pass retracts an unsealed provider, and a retraction says a pass in
+/// flight may no longer publish. `KnownProvider::ALL` puts Claude first, so
+/// on a machine with only Codex sealed the retraction lands before Codex's
+/// answers are installed — and it repeats every cadence, so Codex's rows
+/// would never be published at all rather than being one cadence late.
+#[tokio::test]
+async fn a_provider_that_is_not_sealed_here_does_not_starve_the_one_that_is() {
+    let (state, directory) = daemon("only-codex-sealed");
+    codex_rollout(&directory.join("home"));
+
+    pass(&state, now(), only_codex_sealed).await;
+
+    let listed = state
+        .with_runtime(|runtime| runtime.history.rows())
+        .expect("the runtime");
+    assert_eq!(listed.len(), 1, "the sealed provider's store went unlisted");
+    assert_eq!(listed[0].entry.provider, KnownProvider::Codex);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+fn only_codex_sealed(provider: KnownProvider) -> Option<crate::history::SealedInstall> {
+    match provider {
+        KnownProvider::Claude => None,
+        KnownProvider::Codex => sealed_at(provider),
+    }
+}

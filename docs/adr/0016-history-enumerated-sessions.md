@@ -111,6 +111,14 @@ against the sealed version it confirmed must not install its answers over
 one. Publishing is not: a pass that installs one provider's fresh rows says
 nothing about anyone else's evidence and invalidates nothing.
 
+A revocation is scoped to the provider whose evidence it withdraws, for the
+same reason. What a pass publishes is one provider's rows, read from that
+provider's store; a retraction or a claim elsewhere is not a statement about
+them. Scoped wider, the cost is not one late cadence: a provider with no
+sealed install here is retracted on every pass, so one machine-wide answer
+would let it invalidate a sealed provider's rows every pass, and those rows
+would never be published at all.
+
 Everything a continuation decision reads from the filesystem — whether the
 installed version is sealed, and whether the stated directory is usable — is
 read off the reactor. `corrald` runs one reactor thread, and a stalled mount

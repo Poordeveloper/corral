@@ -45,21 +45,29 @@ pub struct HistoryRows {
     /// own: a file that is deleted or ages out of the window stops saying
     /// anything, and a map only ever added to could never say so.
     known: HashMap<(KnownProvider, ExternalId), HistoryRow>,
-    /// Bumped whenever an identity, or a whole provider's evidence, stops
-    /// being something a history row may stand
+    /// Per provider, bumped whenever an identity of that provider's, or the
+    /// whole of its evidence, stops being something a history row may stand
     /// for. A pass resolves each entry against the registry one at a time and
     /// publishes the lot at the end; a continuation that lands in between has
     /// already given that identity a Session, and the pass's answer for it is
     /// from before that. Without this, republishing the stale answer mints a
     /// second id for a provider session that now has one (ADR 0016 D2).
-    generation: u64,
+    ///
+    /// Per provider because that is the scope of every answer it guards: a
+    /// pass publishes one provider's rows, and what revokes them is read from
+    /// that provider's store. One counter for all of them would let a
+    /// provider this machine has no sealed install of — retracted on every
+    /// pass, before the others are read — invalidate the answers of one it
+    /// does, every pass, forever.
+    generations: HashMap<KnownProvider, u64>,
 }
 
 impl HistoryRows {
-    /// What the rows were resolved against, to be handed back to `replace`.
+    /// What this provider's rows were resolved against, to be handed back to
+    /// `replace`.
     #[must_use]
-    pub fn generation(&self) -> u64 {
-        self.generation
+    pub fn generation(&self, provider: KnownProvider) -> u64 {
+        self.generations.get(&provider).copied().unwrap_or_default()
     }
 
     /// Replace one provider's rows with a fresh pass, keeping the ids of the
@@ -75,7 +83,7 @@ impl HistoryRows {
         resolved: Vec<(CorralSessionId, HistoryEntry)>,
         resolved_at: u64,
     ) -> Published {
-        if resolved_at != self.generation {
+        if resolved_at != self.generation(provider) {
             return Published::Stale;
         }
         let mut fresh = HashMap::new();
@@ -112,7 +120,7 @@ impl HistoryRows {
         // before it started. It no longer is, so its answers are from before
         // the revocation and republishing them would put back rows this
         // daemon has just said it will not act on.
-        self.generation = self.generation.wrapping_add(1);
+        self.revoke(provider);
     }
 
     /// Clear one provider's rows without saying anything about its evidence.
@@ -133,7 +141,14 @@ impl HistoryRows {
         self.rows.remove(&(provider, external_id.clone()));
         // Any resolution taken before this moment answered for an identity
         // nothing had claimed, and one now does.
-        self.generation = self.generation.wrapping_add(1);
+        self.revoke(provider);
+    }
+
+    /// Say that answers this provider's store gave before now are no longer
+    /// answers a pass may publish.
+    fn revoke(&mut self, provider: KnownProvider) {
+        let generation = self.generations.entry(provider).or_default();
+        *generation = generation.wrapping_add(1);
     }
 
     /// Every row the stores hold, newest first — the identities Corral has

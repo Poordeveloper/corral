@@ -35,11 +35,6 @@ async fn pass(
     let Some(home) = state.provider_home() else {
         return;
     };
-    // Read before anything is resolved, so a claim made while this pass runs
-    // is one the pass can notice rather than overwrite (ADR 0016 D2).
-    let Some(resolved_at) = state.with_runtime(|runtime| runtime.history.generation()) else {
-        return;
-    };
     for provider in KnownProvider::ALL {
         // Nothing is enumerated for a layout the matrix has not sealed at
         // the version installed here: a row is a claim that a session
@@ -56,6 +51,15 @@ async fn pass(
             state.with_runtime(|runtime| runtime.history.retract(provider));
             continue;
         }
+        // Read before this provider's store is, so a claim made while its
+        // entries are being resolved is one the pass can notice rather than
+        // overwrite (ADR 0016 D2). Per provider, and taken here rather than
+        // once for the pass: an earlier provider's retraction says nothing
+        // about this one's answers.
+        let Some(resolved_at) = state.with_runtime(|runtime| runtime.history.generation(provider))
+        else {
+            return;
+        };
         let root = store_root(provider, &home);
         let entries = tokio::task::spawn_blocking(move || {
             enumerate(provider, &root, now, &Recent::default())

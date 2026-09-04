@@ -114,7 +114,7 @@ async fn a_discovered_identity_retires_the_history_row_that_stood_for_it() {
                 Vec::new(),
                 0,
             );
-            runtime.history.generation()
+            runtime.history.generation(KnownProvider::Claude)
         })
         .expect("a runtime");
 
@@ -131,7 +131,12 @@ async fn a_discovered_identity_retires_the_history_row_that_stood_for_it() {
 
     let (rows, generation) = registry
         .state
-        .with_runtime(|runtime| (runtime.history.rows().len(), runtime.history.generation()))
+        .with_runtime(|runtime| {
+            (
+                runtime.history.rows().len(),
+                runtime.history.generation(KnownProvider::Claude),
+            )
+        })
         .expect("a runtime");
     assert_eq!(rows, 0, "the row outlived the Session it became");
     assert_ne!(

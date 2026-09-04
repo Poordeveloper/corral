@@ -187,7 +187,7 @@ fn a_pass_that_resolved_before_sealing_was_revoked_does_not_publish() {
     let mut rows = HistoryRows::default();
     rows.replace(KnownProvider::Claude, vec![entry("a", 10)], Vec::new(), 0);
 
-    let resolved_at = rows.generation();
+    let resolved_at = rows.generation(KnownProvider::Claude);
     rows.retract(KnownProvider::Claude);
 
     assert_eq!(
@@ -207,7 +207,7 @@ fn a_pass_that_resolved_before_sealing_was_revoked_does_not_publish() {
 #[test]
 fn installing_a_pass_does_not_invalidate_the_next_one() {
     let mut rows = HistoryRows::default();
-    let before = rows.generation();
+    let before = rows.generation(KnownProvider::Claude);
 
     rows.replace(
         KnownProvider::Claude,
@@ -216,7 +216,7 @@ fn installing_a_pass_does_not_invalidate_the_next_one() {
         before,
     );
 
-    assert_eq!(rows.generation(), before);
+    assert_eq!(rows.generation(KnownProvider::Claude), before);
 }
 
 /// A pass resolves each entry against the registry one at a time and
@@ -234,7 +234,7 @@ fn a_pass_that_resolved_before_a_session_was_claimed_does_not_publish() {
     let listed = rows.rows()[0].session;
 
     // What a pass would have read before the continuation.
-    let resolved_at = rows.generation();
+    let resolved_at = rows.generation(KnownProvider::Claude);
     rows.forget(
         KnownProvider::Claude,
         &ExternalId::new("a").expect("usable"),
@@ -255,7 +255,7 @@ fn a_pass_that_resolved_before_a_session_was_claimed_does_not_publish() {
     );
 
     // The next pass reads the store as it now stands and is published.
-    let now = rows.generation();
+    let now = rows.generation(KnownProvider::Claude);
     assert_eq!(
         rows.replace(KnownProvider::Claude, vec![entry("a", 5)], Vec::new(), now),
         Published::Installed
@@ -264,5 +264,52 @@ fn a_pass_that_resolved_before_a_session_was_claimed_does_not_publish() {
         rows.rows()[0].session,
         listed,
         "a fresh identity, freshly read"
+    );
+}
+
+/// A retraction is one provider's own. A pass resolving another provider's
+/// store stood on evidence this says nothing about.
+///
+/// The cost of the wider answer is not one late cadence: a provider that is
+/// not sealed here is retracted on every pass, before the others are read, so
+/// a machine with one sealed provider and one unsealed would never publish
+/// the sealed one's rows at all (ADR 0016 D1).
+#[test]
+fn retracting_one_provider_leaves_another_providers_pass_publishable() {
+    let mut rows = HistoryRows::default();
+    let resolved_at = rows.generation(KnownProvider::Codex);
+
+    rows.retract(KnownProvider::Claude);
+
+    let mut codex = entry("t", 1);
+    codex.provider = KnownProvider::Codex;
+    assert_eq!(
+        rows.replace(KnownProvider::Codex, vec![codex], Vec::new(), resolved_at),
+        Published::Installed
+    );
+    assert_eq!(
+        rows.rows().len(),
+        1,
+        "the other provider's pass was dropped"
+    );
+}
+
+/// The same for a claim: one identity becoming a Session revokes the answers
+/// of the store that holds it, not of every store.
+#[test]
+fn claiming_an_identity_leaves_another_providers_pass_publishable() {
+    let mut rows = HistoryRows::default();
+    let resolved_at = rows.generation(KnownProvider::Codex);
+
+    rows.forget(
+        KnownProvider::Claude,
+        &ExternalId::new("a").expect("usable"),
+    );
+
+    let mut codex = entry("t", 1);
+    codex.provider = KnownProvider::Codex;
+    assert_eq!(
+        rows.replace(KnownProvider::Codex, vec![codex], Vec::new(), resolved_at),
+        Published::Installed
     );
 }
