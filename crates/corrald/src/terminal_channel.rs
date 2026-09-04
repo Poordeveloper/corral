@@ -28,7 +28,8 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::debug;
 
 use crate::runtime::{
-    Attachment, Delivery, InputRefused, PtyGeometry, RunOccurrence, SessionHandle, Viewer,
+    Attachment, Delivery, InputRefused, PaletteCheckpoint, PtyGeometry, RunOccurrence,
+    SessionHandle, Viewer,
 };
 use crate::state::DaemonState;
 
@@ -136,7 +137,10 @@ async fn subscriber_writer(
     run: RunId,
     state: Arc<DaemonState>,
 ) {
-    if !send_snapshot(&mut writer, &attachment).await {
+    // What this connection's replica is known to hold: the baseline until a
+    // checkpoint has actually left (ADR 0017 D3).
+    let mut palette = PaletteCheckpoint::BASELINE;
+    if !send_snapshot(&mut writer, &attachment, &mut palette).await {
         return;
     }
     state.with_runtime(|runtime| runtime.attention.opened(session));
@@ -157,7 +161,7 @@ async fn subscriber_writer(
                     match attach(session, run, &state).await {
                         Some(fresh) => {
                             attachment = fresh;
-                            if !send_snapshot(&mut writer, &attachment).await {
+                            if !send_snapshot(&mut writer, &attachment, &mut palette).await {
                                 return;
                             }
                         }
@@ -175,7 +179,7 @@ async fn subscriber_writer(
                     match attach(session, run, &state).await {
                         Some(fresh) => {
                             attachment = fresh;
-                            if !send_snapshot(&mut writer, &attachment).await {
+                            if !send_snapshot(&mut writer, &attachment, &mut palette).await {
                                 return;
                             }
                             continue;
@@ -195,7 +199,7 @@ async fn subscriber_writer(
                     match attach(session, run, &state).await {
                         Some(fresh) => {
                             attachment = fresh;
-                            if !send_snapshot(&mut writer, &attachment).await {
+                            if !send_snapshot(&mut writer, &attachment, &mut palette).await {
                                 return;
                             }
                         }
@@ -389,7 +393,11 @@ async fn handle(frame: &TerminalFrame, serving: &mut Serving<'_>) -> Handled {
                 Handled::Close
             }
         }
-        FrameKind::Snapshot | FrameKind::Delta | FrameKind::ChannelError => Handled::Close,
+        FrameKind::Snapshot
+        | FrameKind::Delta
+        | FrameKind::ChannelError
+        | FrameKind::Geometry
+        | FrameKind::Palette => Handled::Close,
         FrameKind::Unknown(_) => Handled::Continue,
     }
 }
@@ -441,38 +449,52 @@ async fn ask_session<T: Send + 'static>(
         .ok()
 }
 
-/// Send the snapshot an attachment carries, stamped with its own epoch.
-async fn send_snapshot(writer: &mut OwnedWriteHalf, attachment: &Attachment) -> bool {
+/// Send the snapshot an attachment carries as the prefix ADR 0017 defines:
+/// its geometry, the palette checkpoint when this connection needs one, then
+/// the screen — all stamped with the snapshot's own epoch and position, one
+/// recoverable state point. `known` is what the connection's replica holds
+/// and is advanced only once the checkpoint has been written.
+async fn send_snapshot(
+    writer: &mut OwnedWriteHalf,
+    attachment: &Attachment,
+    known: &mut PaletteCheckpoint,
+) -> bool {
+    let stamped = |kind: FrameKind, payload: Vec<u8>| TerminalFrame {
+        // The epoch and position the snapshot actually belongs to. A
+        // snapshot labelled with an epoch the client has left is discarded
+        // by a client that tracks epochs, and one labelled zero after
+        // thousands of chunks reads as thousands of missed frames.
+        kind,
+        epoch: attachment.epoch,
+        sequence: attachment.sequence,
+        payload,
+    };
     let payload = match &attachment.snapshot {
         Ok(snapshot) => snapshot.payload().to_vec(),
         Err(error) => {
             let _ = write_frame(
                 writer,
-                &TerminalFrame {
-                    kind: FrameKind::ChannelError,
-                    epoch: attachment.epoch,
-                    sequence: attachment.sequence,
-                    payload: error.to_string().into_bytes(),
-                },
+                &stamped(FrameKind::ChannelError, error.to_string().into_bytes()),
             )
             .await;
             return false;
         }
     };
-    write_frame(
+    if !write_frame(
         writer,
-        &TerminalFrame {
-            // The epoch and position the snapshot actually belongs to. A
-            // snapshot labelled with an epoch the client has left is discarded
-            // by a client that tracks epochs, and one labelled zero after
-            // thousands of chunks reads as thousands of missed frames.
-            kind: FrameKind::Snapshot,
-            epoch: attachment.epoch,
-            sequence: attachment.sequence,
-            payload,
-        },
+        &stamped(FrameKind::Geometry, encode_geometry(attachment.geometry)),
     )
     .await
+    {
+        return false;
+    }
+    if let Some(checkpoint) = attachment.palette.frame_from(known) {
+        if !write_frame(writer, &stamped(FrameKind::Palette, checkpoint)).await {
+            return false;
+        }
+        *known = attachment.palette;
+    }
+    write_frame(writer, &stamped(FrameKind::Snapshot, payload)).await
 }
 
 /// Ask the writer to tell this client why the daemon refused, without ending
@@ -521,7 +543,6 @@ fn decode_geometry(payload: &[u8]) -> Option<PtyGeometry> {
     .ok()
 }
 
-#[cfg(test)]
 fn encode_geometry(geometry: PtyGeometry) -> Vec<u8> {
     let mut payload = Vec::with_capacity(4);
     payload.extend_from_slice(&geometry.rows().to_be_bytes());

@@ -119,10 +119,11 @@ fn an_unknown_frame_writes_nothing() {
     assert!(out.is_empty());
 }
 
-/// ADR 0017's `Geometry` (7) and `Palette` (8), applied by the build that
-/// predates them: nothing of either reaches the person's terminal, and the
-/// snapshot that follows still does. The pre-ADR acceptance check
-/// (docs/decisions/2026-09-05-adr-0017-grill.md Q5).
+/// ADR 0017's `Geometry` (7) and `Palette` (8): nothing of either reaches
+/// the person's terminal — it has a size and a palette of its own — and the
+/// snapshot that follows still does. First run as the pre-ADR acceptance
+/// check on the decoder that did not know them (commit e09e82b,
+/// docs/decisions/2026-09-05-adr-0017-grill.md Q5); kept as the TUI's rule.
 #[test]
 fn geometry_and_palette_frames_write_nothing_and_the_snapshot_after_them_still_applies() {
     let mut out = Vec::new();

@@ -23,6 +23,7 @@ use corral_protocol::terminal::{Epoch, Sequence};
 
 use super::launch::LaunchRequest;
 use super::occurrence::{RunObservations, RunOccurrence};
+use super::palette::PaletteCheckpoint;
 use super::snapshot::{Snapshot, SnapshotError};
 use super::spawn::{PtyGeometry, SpawnError};
 
@@ -101,6 +102,11 @@ enum Ask {
 /// What a viewer receives when it joins: the screen, and everything after it.
 pub struct Attachment {
     pub snapshot: Result<Snapshot, SnapshotError>,
+    /// The size the snapshot was minted for: what a `Geometry` frame tells
+    /// a replica before it (ADR 0017 D1).
+    pub geometry: PtyGeometry,
+    /// The effective palette at the snapshot point (ADR 0017 D3).
+    pub palette: PaletteCheckpoint,
     pub epoch: Epoch,
     /// Where in the epoch this snapshot sits.
     ///
@@ -182,6 +188,7 @@ struct FinalScreen {
     epoch: Epoch,
     sequence: Sequence,
     geometry: PtyGeometry,
+    palette: PaletteCheckpoint,
     title: Option<Vec<u8>>,
 }
 
@@ -443,6 +450,8 @@ impl SessionHandle {
                 let recorded = self.recorded()?;
                 Ok(Attachment {
                     snapshot: recorded.snapshot.clone(),
+                    geometry: recorded.geometry,
+                    palette: recorded.palette,
                     epoch: recorded.epoch,
                     sequence: recorded.sequence,
                     viewer: None,
@@ -1090,6 +1099,9 @@ fn serve_screen(
                     geometry: terminal
                         .geometry()
                         .unwrap_or_else(|| unpack_geometry(&published.geometry)),
+                    palette: terminal
+                        .terminal()
+                        .map_or(PaletteCheckpoint::BASELINE, PaletteCheckpoint::of),
                     title: terminal.title().map(<[u8]>::to_vec),
                 });
                 // Returning is what releases everything: the emulator and the
@@ -1141,6 +1153,12 @@ fn serve_screen(
             Ask::Attach(reply) => {
                 let _ = reply.send(Attachment {
                     snapshot: terminal.snapshot(),
+                    geometry: terminal
+                        .geometry()
+                        .unwrap_or_else(|| unpack_geometry(&published.geometry)),
+                    palette: terminal
+                        .terminal()
+                        .map_or(PaletteCheckpoint::BASELINE, PaletteCheckpoint::of),
                     epoch: stream.epoch(),
                     sequence: stream.next_sequence(),
                     viewer: Some(stream.attach()),

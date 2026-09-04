@@ -1,13 +1,13 @@
 //! The snapshot contract, owned by a test: the screen a client rebuilds from
 //! a snapshot is the screen the daemon holds (ADR 0003 D1/D3; grill Q6/Q11).
 //!
-//! Twenty-four scenarios, twenty-two distilled from the PR9 spike plus two for
-//! origin mode, each fed in two halves:
+//! Twenty-six scenarios: twenty-two distilled from the PR9 spike, two for
+//! origin mode, two for leaving the alternate screen, each fed in two halves:
 //! the snapshot is minted between them, so the second half proves that
 //! deltas after a snapshot land where the daemon's own deltas land. Compared
-//! semantically, never as bytes. Nothing Q7 has not accepted is asserted:
-//! no primary screen behind an active alternate, no palette, no geometry
-//! transport.
+//! semantically, never as bytes. The primary screen behind an active
+//! alternate is asserted under ADR 0017 D2; the palette rides on its own
+//! frame (`palette_tests.rs`), and geometry on its own (`terminal_channel`).
 
 use qwertty_term_vt::modes::Mode;
 use qwertty_term_vt::snapshot::SnapshotRow;
@@ -114,12 +114,26 @@ fn scenarios() -> Vec<Scenario> {
         scenario("strikethrough", "\x1b[9mS\x1b[0m", "\x1b[9mT\x1b[0m"),
         scenario("cursor position", "abc\x1b[10;20H", "\x1b[5;5Hq"),
         scenario("cursor hidden", "abc\x1b[?25l", "z"),
-        // The snapshot is taken inside the alternate screen; what happens
-        // after `?1049l` is Q7's (S3) and is not asserted here.
         scenario(
             "alternate screen",
             "main1\r\nmain2\r\n\x1b[?1049h\x1b[H\x1b[2Jalt content\x1b[3;3Hmore",
             "\x1b[4;1Hdelta on alt",
+        ),
+        // The snapshot is taken inside the alternate screen and the delta
+        // leaves it: the primary the daemon kept is what comes back
+        // (ADR 0017 D2).
+        scenario(
+            "alternate screen left after the snapshot",
+            "main1\r\nmain2\r\n\x1b[?1049h\x1b[Halt content",
+            "\x1b[?1049lback",
+        ),
+        scenario(
+            "alternate screen over a primary with history",
+            format!(
+                "{}\x1b[?1049h\x1b[H\x1b[2Jfull screen app",
+                lines("fill", 60)
+            ),
+            "\x1b[?1049l\r\nafter",
         ),
         scenario(
             "OSC title",
@@ -207,7 +221,7 @@ fn a_client_rebuilds_the_daemons_screen_from_its_snapshot_and_follows_its_deltas
         if let Some(geometry) = scenario.resize_to {
             authoritative.resize(geometry);
         }
-        let snapshot = encode(&authoritative).expect("the screen encodes");
+        let snapshot = encode(&mut authoritative).expect("the screen encodes");
         let mut replica = replica_of(snapshot.payload(), geometry);
 
         let expected = fidelity(authoritative.terminal().expect("not poisoned"));
@@ -252,7 +266,7 @@ fn history_carried_by_a_snapshot_lands_in_the_clients_history() {
     ] {
         let mut authoritative = AuthoritativeTerminal::new(GEOMETRY);
         let _ = authoritative.consume(first.as_bytes());
-        let snapshot = encode(&authoritative).expect("the screen encodes");
+        let snapshot = encode(&mut authoritative).expect("the screen encodes");
         let replica = replica_of(snapshot.payload(), GEOMETRY);
 
         let (expected_len, expected_tail) = history(authoritative.terminal().unwrap(), 5);
@@ -331,4 +345,41 @@ fn diff(expected: &Fidelity, rebuilt: &Fidelity) -> String {
         out.push("keyboard modes differ".to_owned());
     }
     out.join("\n")
+}
+
+/// Minting a dual-screen snapshot is a formatting pass and nothing else:
+/// the authoritative terminal reads the same on every dimension after it —
+/// active screen, cells, cursor, modes, region, tab stops, title
+/// (ADR 0017 D2's mechanism condition).
+#[test]
+fn minting_a_snapshot_behind_an_active_alternate_leaves_the_terminal_untouched() {
+    let mut authoritative = AuthoritativeTerminal::new(GEOMETRY);
+    let _ = authoritative.consume(
+        format!(
+            "{}\x1b[5;20r\x1b[?1h\x1b]0;title\x07\x1b[?1049h\x1b[H\x1b[2Japp\x1b[7;9H\x1b[?25l",
+            lines("fill", 40)
+        )
+        .as_bytes(),
+    );
+    let before = fidelity(authoritative.terminal().unwrap());
+    let before_history = history(authoritative.terminal().unwrap(), 5);
+    assert_eq!(before.active_screen, ScreenKey::Alternate);
+
+    let snapshot = encode(&mut authoritative).expect("the screen encodes");
+
+    let after = fidelity(authoritative.terminal().unwrap());
+    assert_eq!(after, before, "minting changed the authoritative terminal");
+    assert_eq!(
+        history(authoritative.terminal().unwrap(), 5),
+        before_history
+    );
+    // And what was minted carries the primary behind the alternate: a
+    // replica that leaves the alternate shows the last fill lines.
+    let mut replica = replica_of(snapshot.payload(), GEOMETRY);
+    let _ = replica.consume(b"\x1b[?1049l");
+    let _ = authoritative.consume(b"\x1b[?1049l");
+    assert_eq!(
+        fidelity(replica.terminal().unwrap()).visible,
+        fidelity(authoritative.terminal().unwrap()).visible
+    );
 }

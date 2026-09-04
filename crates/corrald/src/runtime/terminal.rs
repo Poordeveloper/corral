@@ -230,6 +230,12 @@ impl AuthoritativeTerminal {
     pub fn terminal(&self) -> Option<&Terminal> {
         Some(&self.screen.as_ref()?.handler.terminal)
     }
+
+    /// The emulator, mutably, for a formatting pass that must leave it as it
+    /// found it (`snapshot::FormattingScreen`). Not a way to write to it.
+    pub(super) fn terminal_mut(&mut self) -> Option<&mut Terminal> {
+        Some(&mut self.screen.as_mut()?.handler.terminal)
+    }
 }
 
 impl std::fmt::Debug for AuthoritativeTerminal {

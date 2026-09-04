@@ -10,6 +10,7 @@
 use qwertty_term_vt::formatter::{Content, Format, FormatOpt, Options, TerminalExtra};
 use qwertty_term_vt::modes::Mode;
 use qwertty_term_vt::point::{Coordinate, Point, Tag};
+use qwertty_term_vt::terminal::{ScreenKey, Terminal};
 
 use super::terminal::{AuthoritativeTerminal, Poisoned};
 
@@ -84,6 +85,10 @@ pub struct Snapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotError {
     ViewportExceedsCeiling {
+        /// Which screens the viewport comprised: both, while the alternate
+        /// screen is active, because the primary behind it is required state
+        /// and is never dropped to fit (ADR 0017 D2).
+        screens: Screens,
         encoded_bytes: usize,
         /// The ceiling that refused it.
         ///
@@ -97,6 +102,15 @@ pub enum SnapshotError {
     /// reading it is unsound and a plausible-looking screen is worse than a
     /// stated absence.
     ScreenPoisoned(Poisoned),
+}
+
+/// Which screens a snapshot's viewport holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screens {
+    /// The primary screen, the only one when no alternate is active.
+    Primary,
+    /// The primary screen behind an active alternate, and the alternate.
+    Both,
 }
 
 impl Snapshot {
@@ -129,13 +143,13 @@ impl Snapshot {
 /// Degradation order is fixed: the oldest scrollback is sacrificed first, and
 /// the current viewport is never traded away to meet the target — only the
 /// ceiling can refuse it (ADR 0003 D8).
-pub fn encode(terminal: &AuthoritativeTerminal) -> Result<Snapshot, SnapshotError> {
+pub fn encode(terminal: &mut AuthoritativeTerminal) -> Result<Snapshot, SnapshotError> {
     encode_within(terminal, SnapshotBudget::DEFAULT)
 }
 
 /// `encode`, against an explicit budget.
 pub fn encode_within(
-    terminal: &AuthoritativeTerminal,
+    terminal: &mut AuthoritativeTerminal,
     budget: SnapshotBudget,
 ) -> Result<Snapshot, SnapshotError> {
     if let Some(poisoned) = terminal.poisoned() {
@@ -169,6 +183,11 @@ pub fn encode_within(
     // sent half a viewport would render a screen that never existed.
     if rows == 0 && payload.len() > budget.ceiling_bytes {
         return Err(SnapshotError::ViewportExceedsCeiling {
+            screens: if alternate_active(terminal) {
+                Screens::Both
+            } else {
+                Screens::Primary
+            },
             encoded_bytes: payload.len(),
             ceiling_bytes: budget.ceiling_bytes,
         });
@@ -186,27 +205,67 @@ pub fn encode_within(
 /// Zero for a screen that may no longer be read; every caller has already
 /// refused such a screen, and this keeps the arithmetic from being the place
 /// that discovers it.
+fn alternate_active(terminal: &AuthoritativeTerminal) -> bool {
+    terminal
+        .terminal()
+        .is_some_and(|inner| inner.screens.active_key() == ScreenKey::Alternate)
+}
+
+/// History lives behind the primary screen; the alternate keeps none. What
+/// a snapshot may carry, and what its budget trims, is the primary's.
 fn retained_scrollback_rows(terminal: &AuthoritativeTerminal) -> usize {
     let (Some(inner), Some(geometry)) = (terminal.terminal(), terminal.geometry()) else {
         return 0;
     };
     inner
         .screens
-        .active()
-        .pages
-        .total_rows()
+        .get(ScreenKey::Primary)
+        .map_or(0, |screen| screen.pages.total_rows())
         .saturating_sub(usize::from(geometry.rows()))
 }
 
-/// Serialize the viewport plus `scrollback_rows` of history.
-fn render(terminal: &AuthoritativeTerminal, scrollback_rows: usize) -> Vec<u8> {
-    let (Some(inner), Some(geometry)) = (terminal.terminal(), terminal.geometry()) else {
-        return Vec::new();
-    };
-    let total_rows = inner.screens.active().pages.total_rows();
-    let viewport_rows = usize::from(geometry.rows());
-    let first_row = total_rows.saturating_sub(viewport_rows + scrollback_rows);
+/// The active screen key switched for the duration of a formatting pass,
+/// and switched back on every exit, a panic's unwinding included: the mint
+/// must leave no observable trace on the authoritative terminal (ADR 0017
+/// D2). `switch_to` flips one field and nothing else, which is why this is
+/// a formatting-only operation and not a screen change.
+struct FormattingScreen<'a> {
+    terminal: &'a mut Terminal,
+    restore: ScreenKey,
+}
 
+impl<'a> FormattingScreen<'a> {
+    fn switch(terminal: &'a mut Terminal, key: ScreenKey) -> Self {
+        let restore = terminal.screens.active_key();
+        terminal.screens.switch_to(key);
+        Self { terminal, restore }
+    }
+}
+
+impl Drop for FormattingScreen<'_> {
+    fn drop(&mut self) {
+        self.terminal.screens.switch_to(self.restore);
+    }
+}
+
+/// The active screen's rows — history within `scrollback_rows`, then the
+/// viewport — as the formatter emits them, plus the padding that makes a
+/// client scroll exactly `history` times (PR9 spike S2).
+///
+/// The formatter never emits trailing blank rows, so the client would
+/// otherwise scroll too few times and history would land on its screen.
+/// The formatter itself says how many rows it emitted: the same range as
+/// plain text, one line per row, under the same trailing-blank rule. A second
+/// pass over a range the budget already bounds (D7); once per attach,
+/// resync, or reflow.
+fn screen_rows(
+    inner: &Terminal,
+    viewport_rows: usize,
+    scrollback_rows: usize,
+    extra: &TerminalExtra,
+) -> Vec<u8> {
+    let total_rows = inner.screens.active().pages.total_rows();
+    let first_row = total_rows.saturating_sub(viewport_rows + scrollback_rows);
     let content = match total_rows.checked_sub(1) {
         None => Content::None,
         Some(last_row) => Content::Range {
@@ -217,27 +276,10 @@ fn render(terminal: &AuthoritativeTerminal, scrollback_rows: usize) -> Vec<u8> {
             ),
         },
     };
-
-    // The palette is not here: it belongs to the subscription, because resync
-    // is the recovery path and 5 KB of unchanging colours would be paid again
-    // at exactly the worst moment (ADR 0003 D4).
-    let extra = TerminalExtra {
-        palette: false,
-        ..TerminalExtra::all()
-    };
-
     let mut payload = inner
-        .format_content(&Options::vt(), &extra, content)
+        .format_content(&Options::vt(), extra, content)
         .into_bytes();
 
-    // The formatter never emits trailing blank rows, so a client scrolls
-    // fewer times than there are history rows and history lands on its
-    // screen (PR9 spike S2). The formatter itself says how many rows it
-    // emitted: the same range as plain text, one row per line, under the
-    // same trailing-blank rule. Each missing row becomes an LF past the last
-    // row, which is exactly one scroll, so the history rows end in history.
-    // A second pass over a range the budget already bounds (D7); once per
-    // attach, resync, or reflow.
     let range_rows = total_rows.saturating_sub(first_row);
     let emitted_rows = match content {
         Content::None => 0,
@@ -259,6 +301,7 @@ fn render(terminal: &AuthoritativeTerminal, scrollback_rows: usize) -> Vec<u8> {
             }
         }
     };
+
     // Everything that constrains movement is opened for the trailer and
     // restored after it: the scrolling region (a line feed scrolls into
     // history only at the bottom of a full-screen region), origin mode (so
@@ -299,20 +342,16 @@ fn render(terminal: &AuthoritativeTerminal, scrollback_rows: usize) -> Vec<u8> {
     if origin_mode {
         payload.extend_from_slice(b"\x1b[?6h");
     }
+    payload
+}
 
-    if let Some(title) = terminal.title() {
-        payload.extend_from_slice(b"\x1b]2;");
-        payload.extend_from_slice(title);
-        payload.push(0x07);
-    }
-
-    // The formatter writes the cursor position before its tab-stop trailer,
-    // whose `CHA`s move the cursor and are never undone, so every client
-    // began on the last tab stop (PR9 spike S1). Corral restates position and
-    // visibility last, after everything that moves the cursor — the padding
-    // above included. The formatter is compensated for, not claimed fixed.
-    // Origin mode makes CUP relative to the region's corner, and the extras
-    // restored that mode, so the restated position is relative when it is on.
+/// The cursor restated last, after everything that moves it (PR9 spike S1).
+///
+/// Origin mode makes CUP relative to the region's corner, and the extras
+/// restored that mode, so the restated position is relative when it is on.
+fn cursor_trailer(inner: &Terminal) -> Vec<u8> {
+    let region = inner.scrolling_region;
+    let origin_mode = inner.modes.get(Mode::Origin);
     let cursor = &inner.screens.active().cursor;
     let (row, col) = if origin_mode {
         let left = if inner.modes.get(Mode::EnableLeftAndRightMargin) {
@@ -324,13 +363,71 @@ fn render(terminal: &AuthoritativeTerminal, scrollback_rows: usize) -> Vec<u8> {
     } else {
         (cursor.y, cursor.x)
     };
-    payload.extend_from_slice(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
-    payload.extend_from_slice(if inner.modes.get(Mode::CursorVisible) {
+    let mut out = format!("\x1b[{};{}H", row + 1, col + 1).into_bytes();
+    out.extend_from_slice(if inner.modes.get(Mode::CursorVisible) {
         b"\x1b[?25h"
     } else {
         b"\x1b[?25l"
     });
+    out
+}
 
+/// Serialize the viewport plus `scrollback_rows` of history.
+fn render(terminal: &mut AuthoritativeTerminal, scrollback_rows: usize) -> Vec<u8> {
+    let Some(geometry) = terminal.geometry() else {
+        return Vec::new();
+    };
+    let title = terminal.title().map(<[u8]>::to_vec);
+    let Some(inner) = terminal.terminal_mut() else {
+        return Vec::new();
+    };
+    let viewport_rows = usize::from(geometry.rows());
+    let mut payload = Vec::new();
+
+    // While the alternate screen is active, the primary behind it comes
+    // first — its history, its viewport, its cursor — then the switch, so a
+    // client that later sees `?1049l` restores the screen the daemon has
+    // (ADR 0017 D2). Formatted through the same path with the active key
+    // switched for the duration and restored on every exit.
+    let alternate = inner.screens.active_key() == ScreenKey::Alternate;
+    if alternate {
+        let primary = FormattingScreen::switch(inner, ScreenKey::Primary);
+        payload = screen_rows(
+            primary.terminal,
+            viewport_rows,
+            scrollback_rows,
+            &TerminalExtra::none(),
+        );
+        // The primary's cursor is what `?1049h` saves and `?1049l` restores.
+        let cursor = &primary.terminal.screens.active().cursor;
+        payload.extend_from_slice(format!("\x1b[{};{}H", cursor.y + 1, cursor.x + 1).as_bytes());
+        drop(primary);
+        // Entering 1049 saves the primary's cursor and clears the alternate,
+        // but keeps the cursor's coordinates; the alternate's rows are
+        // written from home, as the primary's were on a cleared screen.
+        payload.extend_from_slice(b"\x1b[?1049h\x1b[H");
+    }
+
+    let extra = TerminalExtra {
+        palette: false,
+        ..TerminalExtra::all()
+    };
+    payload.extend(screen_rows(
+        inner,
+        viewport_rows,
+        if alternate { 0 } else { scrollback_rows },
+        &extra,
+    ));
+
+    // The emulator tracks the title and its serializer does not re-emit it —
+    // the divergence D1's invariant is about, and Corral's to close (D3).
+    if let Some(title) = title {
+        payload.extend_from_slice(b"\x1b]2;");
+        payload.extend_from_slice(&title);
+        payload.push(0x07);
+    }
+
+    payload.extend(cursor_trailer(inner));
     payload
 }
 
@@ -338,11 +435,16 @@ impl std::fmt::Display for SnapshotError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ViewportExceedsCeiling {
+                screens,
                 encoded_bytes,
                 ceiling_bytes,
             } => write!(
                 f,
-                "the viewport alone encodes to {encoded_bytes} bytes, past the {ceiling_bytes}-byte ceiling"
+                "{} encodes to {encoded_bytes} bytes, past the {ceiling_bytes}-byte ceiling",
+                match screens {
+                    Screens::Primary => "the viewport alone",
+                    Screens::Both => "the primary and alternate viewports together",
+                }
             ),
             Self::ScreenPoisoned(Poisoned::ParserPanicked) => f.write_str(
                 "this terminal's parser failed on provider output and its screen can no longer be read",

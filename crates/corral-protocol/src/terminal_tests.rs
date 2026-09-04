@@ -101,50 +101,49 @@ fn a_stream_survives_an_unknown_kind_between_known_ones() {
     assert_eq!(payloads, vec![b"before".to_vec(), b"after".to_vec()]);
 }
 
-/// The two kinds ADR 0017 assigns, decoded by the build that predates them:
-/// a `Geometry` (7) with its four-byte payload and a `Palette` (8) carrying
-/// OSC text are unknown, skippable, consumed exactly, and leave the snapshot
-/// after them readable. Run on the pre-ADR decoder as the acceptance check
-/// its grill required (docs/decisions/2026-09-05-adr-0017-grill.md Q5).
+/// The two kinds ADR 0017 assigns round-trip, and the kind after them is
+/// still unknown, skippable, and consumed exactly. Before ADR 0017 was
+/// implemented this test ran against the decoder that predated it, asserting
+/// `Unknown(7)`/`Unknown(8)` — the acceptance check recorded in
+/// docs/decisions/2026-09-05-adr-0017-grill.md Q5 (commit e09e82b).
 #[test]
 fn the_geometry_and_palette_kinds_are_skipped_by_a_decoder_that_predates_them() {
-    let geometry = frame(FrameKind::from_byte(7), &[0, 30, 0, 100])
+    let geometry = frame(FrameKind::Geometry, &[0, 30, 0, 100])
         .encode()
         .expect("encode");
-    let palette = frame(
-        FrameKind::from_byte(8),
-        b"\x1b]4;1;rgb:12/34/56\x07\x1b]10;rgb:ff/ff/ff\x07",
-    )
-    .encode()
-    .expect("encode");
+    let palette = frame(FrameKind::Palette, b"\x1b]4;1;rgb:12/34/56\x07")
+        .encode()
+        .expect("encode");
+    let later = frame(FrameKind::from_byte(9), b"a kind from later")
+        .encode()
+        .expect("encode");
     let snapshot = frame(FrameKind::Snapshot, b"a screen")
         .encode()
         .expect("encode");
     let mut stream = Vec::new();
-    stream.extend_from_slice(&geometry);
-    stream.extend_from_slice(&palette);
-    stream.extend_from_slice(&snapshot);
+    for part in [&geometry, &palette, &later, &snapshot] {
+        stream.extend_from_slice(part);
+    }
 
     let mut offset = 0;
     let mut seen = Vec::new();
     while let Some((decoded, consumed)) =
         TerminalFrame::decode_from_daemon(&stream[offset..]).expect("decode")
     {
-        seen.push((
-            decoded.kind.as_byte(),
-            decoded.kind.is_skippable(),
-            consumed,
-        ));
+        seen.push((decoded.kind, decoded.kind.is_skippable(), consumed));
         offset += consumed;
     }
     assert_eq!(
         seen,
         vec![
-            (7, true, geometry.len()),
-            (8, true, palette.len()),
-            (FrameKind::Snapshot.as_byte(), false, snapshot.len()),
+            (FrameKind::Geometry, false, geometry.len()),
+            (FrameKind::Palette, false, palette.len()),
+            (FrameKind::from_byte(9), true, later.len()),
+            (FrameKind::Snapshot, false, snapshot.len()),
         ]
     );
+    assert_eq!(FrameKind::Geometry.as_byte(), 7);
+    assert_eq!(FrameKind::Palette.as_byte(), 8);
     assert_eq!(offset, stream.len(), "the stream stayed frame-synchronised");
 }
 

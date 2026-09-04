@@ -17,6 +17,7 @@
 mod attach;
 mod launch;
 mod occurrence;
+mod palette;
 mod session;
 mod snapshot;
 mod spawn;
@@ -31,6 +32,7 @@ pub use occurrence::{
     ADVISORY_SHARE, Integrity, OBSERVATION_QUEUE, ObservedRuns, RunObservations, RunOccurrence,
     Weight, observe_runs,
 };
+pub use palette::PaletteCheckpoint;
 pub use session::{
     Attachment, ExecutionState, InputRefused, ManagedSession, ManagedSessions, PendingSession,
     ResizeRefused, ScreenUnreadable, SessionGone, SessionHandle, StartError, TerminalAccess,
