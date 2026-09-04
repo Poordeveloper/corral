@@ -1,6 +1,47 @@
+# The graph is resolved for the platforms Corral builds for. Windows-only
+# dependencies (gpui's dwrote, for one) are neither audited nor blessed here:
+# adding Windows as a supported Desktop target widens this list first, so the
+# review happens then rather than never (2026-09-04-pr9-spike-grill.md Q4).
+[graph]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+]
+
 [advisories]
 version = 2
 yanked = "deny"
+# Each entry is a debt record with an exit, never a shrug. All six arrive
+# through gpui 0.2.2 — a transitive owner Corral does not choose crates for —
+# and none has a maintained replacement Corral could substitute on its own.
+# Review triggers, for every entry: any gpui upgrade; an upstream replacement
+# or removal; a change in the advisory's severity; and the M1 public release,
+# before which an entry still standing is re-justified or the dependency cut.
+ignore = [
+    # async-std, via zed-async-tar via gpui_http_client. Discontinued, not
+    # vulnerable; used only for gpui's HTTP/tar helpers, which Corral's
+    # Desktop does not call.
+    { id = "RUSTSEC-2025-0052", reason = "gpui 0.2.2 transitive (zed-async-tar); Corral calls no gpui HTTP path; exits with a gpui release that drops async-std" },
+    # paste, via metal via core-video. A proc-macro used at build time only;
+    # nothing of it ships. Exits when gpui's Metal binding stops using it.
+    { id = "RUSTSEC-2024-0436", reason = "gpui 0.2.2 transitive (metal); build-time proc-macro; exits with a metal release that drops paste" },
+    # proc-macro-error2, via stacksafe. Build-time only; exits when gpui or
+    # stacksafe move off it.
+    { id = "RUSTSEC-2026-0173", reason = "gpui 0.2.2 transitive (stacksafe); build-time proc-macro; exits with an upstream move off proc-macro-error2" },
+    # rustls-pemfile, via zed-reqwest via gpui_http_client. Corral's Desktop
+    # opens no TLS connection through gpui; exits when gpui's reqwest fork
+    # drops it.
+    { id = "RUSTSEC-2025-0134", reason = "gpui 0.2.2 transitive (zed-reqwest); no Corral TLS path through gpui; exits with a gpui release that drops rustls-pemfile" },
+    # rustybuzz (two versions), via cosmic-text and usvg: the text shaper on
+    # the Linux path and inside SVG rendering. On the Desktop's hot path, so
+    # this is the one to watch: exits when gpui adopts a maintained shaper.
+    { id = "RUSTSEC-2026-0206", reason = "gpui 0.2.2 transitive (cosmic-text, usvg); text shaping, no maintained substitute gpui accepts; exits with a gpui release on a maintained shaper" },
+    # ttf-parser (three versions), via fontdb and rustybuzz. Same path and
+    # same exit as rustybuzz.
+    { id = "RUSTSEC-2026-0192", reason = "gpui 0.2.2 transitive (fontdb, rustybuzz); font parsing under the shaper above; exits with it" },
+]
 
 [licenses]
 version = 2
@@ -18,6 +59,30 @@ allow = [
     # foldhash, reached through rusqlite's hash map. The zlib licence is
     # permissive, OSI approved, and imposes no notice requirement on binaries.
     "Zlib",
+    # The five below arrive with gpui 0.2.2 (the PR9 spike measured the
+    # tree; 2026-09-04-pr9-spike-grill.md Q4). Admitted as a set, each read:
+    # BSD-2-Clause (arrayref, av1-grain, rav1e, v_frame) and BSD-3-Clause
+    # (avif-serialize, bindgen, exr, lebe, ravif, sha1_smol, subtle,
+    # tiny-skia, tiny-skia-path): permissive, notice-only.
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    # ISC (libloading, rustls-webpki, untrusted): permissive, MIT-equivalent.
+    "ISC",
+    # MPL-2.0 (cbindgen, option-ext): accepted deliberately as file-level weak
+    # copyleft, not mistaken for permissive. Modifications to those files
+    # must be published under the MPL; Corral modifies none, and linking
+    # carries no obligation. Any applicable source obligation stands.
+    "MPL-2.0",
+    # CC0-1.0 (hexf-parse, tiny-keccak): a public-domain dedication, no
+    # notice requirement.
+    "CC0-1.0",
+    # ar_archive_writer: Apache-2.0 with the LLVM exception, which only
+    # relaxes Apache's attribution-in-binaries clause — strictly more
+    # permissive than the Apache-2.0 already allowed above.
+    "Apache-2.0 WITH LLVM-exception",
+    # Compound expressions in the same tree — `ring` (Apache-2.0 AND ISC) and
+    # `encoding_rs` ((Apache-2.0 OR MIT) AND BSD-3-Clause) — are satisfied by
+    # the entries above and need no per-crate exception.
 ]
 
 [bans]
