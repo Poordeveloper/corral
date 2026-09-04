@@ -1,7 +1,8 @@
-# PR9 Spike Grill — rulings over the GPUI integration spike record (round 1)
+# PR9 Spike Grill — rulings over the GPUI integration spike record (rounds 1–2)
 
-> Status: **round 1 closed** (2026-09-04); round 2 (sequencing and the
-> PR9 plan boundary) pending. The record under grill is
+> Status: **closed** (2026-09-04). Round 1 ruled the decisions the spike
+> asked for; round 2 ruled sequencing, the S6 owner boundary, the fidelity
+> test's home, the PR9 plan boundary, and closed the grill. The record under grill is
 > `docs/references/2026-09-04-pr9-gpui-integration-spike.md` (merged as
 > PR #40). Round 1 rules the decisions the spike asked for: method
 > deviations, the gpui pin, the client replica engine, the dependency
@@ -503,8 +504,411 @@ split internal timing only when a concrete bottleneck requires it.
 然后是 Q6，把 snapshot fidelity harness 正式化；再落 Q7 ADR。这三件清掉之后，PR9 plan 才有一个稳定的 runtime/protocol 地基。
 ```
 
-## What round 1 leaves open
+# Round 2
 
-Sequencing and ownership of the four follow-ups (S6 fix, S1/S2 fix with
-the fidelity regression, the Q7 ADR, the Q4 governance PR) relative to the
-PR9 plan, and the PR9 plan's own boundary. Round 2.
+Digest of what round 2 froze:
+
+| Q | Ruling |
+|---|---|
+| Q9 | Serialize shared owners, parallelize independent governance: S6 → Q6 strictly serial (one terminal-runtime owner); the deny governance PR and the Q7 ADR start now in parallel, each through its own human gate. PR9 plan finalization requires all four: S6 merged and verified, Q6 merged and verified, deny PR merged, Q7 ADR accepted. |
+| Q10 | (B) The 8-frame intermediate outbound queue is deleted. The per-viewer `TerminalStream` delivery state with its 4 MiB budget is the sole backlog authority; a dedicated subscriber writer owns the socket write half and may await, with a 2 s no-progress deadline counted only while a frame is being sent; the client read loop stays separate. Three distinct conditions: jitter → drain; backlog past 4 MiB → explicit resync barrier and fresh snapshot; no socket progress for 2 s → disconnect. Five regressions, the fifth proving a stalled writer never reaches PTY ingestion or other clients' control frames. |
+| Q11 | (A) `runtime/snapshot_fidelity_tests.rs` in corrald: authoritative state → snapshot render → fresh qwertty replica → semantic comparison; 22 deterministic in-code fixtures; nothing Q7 has not accepted is asserted. |
+| Q12 | PR9 scope approved: Desktop shell (window lifecycle, session list, navigation, the PR8 five-state projection, secondary facts), terminal presentation (embedded and standalone, qwertty replica, snapshot/delta/resync, poison isolation), the M1 control actions the accepted ladder allows. Excluded: tray, native notifications, history browser, packaging/install, provider capability expansion. Linux: compile and platform-independent test coverage; rendering explicitly unvalidated. Release-profile rerun of the frame harness is PR9 DoD. Class C. |
+| Q13 | The spike grill closes. Next implementation task: S6, `docs/plans/2026-09-04-terminal-channel-backpressure.md`, high-consequence Class B, narrow, with the Q10 regression set; a genuinely new semantic choice found while planning stops and surfaces rather than extending this grill. |
+
+## Questions as asked (abridged)
+
+- **Q9** — where the deny PR sits and whether the Q7 ADR drafts in
+  parallel with S6/Q6.
+- **Q10** — keep the 8-frame queue with an awaited send, or make the
+  per-viewer delivery state the only budget with a dedicated writer.
+- **Q11** — fidelity regression in-crate, over the real channel, or from
+  `docs/evidence` fixtures.
+- **Q12** — the PR9 plan boundary.
+- **Q13** — close the grill and draft the S6 plan.
+
+## Founder rulings, verbatim (round 2)
+
+```text
+这轮可以收口。我的裁决：
+
+* Q9：部分改。S6→Q6 串行；deny PR 和 Q7 ADR 都可以现在并行启动，但二者必须在 PR9 plan 定稿前完成各自的人门。
+* Q10：B
+* Q11：A
+* Q12：接受这个 PR9 边界
+* Q13：是，round 2 后关闭 spike grill；下一件实现工作就是 S6
+
+PR9 spike grill — round 2 rulings
+Q9 — follow-up ordering and parallelism
+裁决：
+Runtime implementation path:
+S6 backpressure fix
+→ Q6 snapshot fidelity fix
+→ PR9 implementation
+Governance / design work may proceed in parallel:
+
+* deny.toml governance PR
+* Q7 terminal-protocol ADR drafting/grill
+
+具体安排：
+Track A — runtime owner
+
+1. S6 backpressure fix
+2. Q6 snapshot fidelity fix
+
+这两项串行。
+原因：
+两者都靠近 terminal runtime/data-path owner，
+没有必要为了赶时间制造同 owner 的并发 diff / rebase / audit debt。
+S6 是 P1，优先于 Q6。
+Track B — dependency governance
+Q4 deny.toml PR 可以现在就起，不需要等 S6。
+它与 terminal runtime implementation 无依赖。
+但必须：
+HUMAN_REVIEW_REQUIRED
+→ human merge
+并且必须在：
+PR9 implementation plan final acceptance
+之前合入 main。
+原因：
+PR9 plan 应针对最终实际 merge gate 写，
+而不是计划写完后 dependency policy 又变化。
+因此不必人为：
+S6 merge
+→ 才开始 deny PR
+可以并行等待 human review。
+Track C — protocol ADR
+Q7 new ADR 可以现在并行起草为：
+status: proposed
+它的研究和 grill 不依赖 S6/Q6 implementation。
+允许：
+
+* write ADR
+* spell out geometry / dual-screen / palette semantics
+* investigate compatibility choices
+* write non-semantic scaffolding if useful
+
+不允许在 ADR accepted 前：
+merge the new wire semantics.
+ADR 可以与 Q6 同期 grill/accept。
+无需为了保持文档上的线性顺序等 Q6 merge 后才开始讨论。
+Gate into PR9 plan
+PR9 implementation plan finalization requires:
+
+* S6 fix merged and verified
+* Q6 fidelity fix merged and verified
+* deny governance PR merged
+* Q7 ADR accepted
+
+Then PR9 plan is written against a stable:
+runtime
++
+snapshot fidelity
++
+wire contract
++
+dependency policy
+所以真正的依赖图是：
+
+          ┌─ deny governance ───────┐
+S6 → Q6 ──┼─────────────────────────┼→ PR9 plan
+          └─ Q7 ADR accepted ───────┘
+
+不是人为的一条长串：
+S6 → deny → Q6 → ADR → plan
+核心原则：
+Serialize shared owners.
+Parallelize independent governance/evidence work.
+PR9 planning begins only after all four foundations are stable.
+Q10 — S6 implementation owner boundary
+选择 B。
+删除独立的 8-frame intermediate outbound mpsc queue。
+每个 terminal subscriber 的唯一 backlog/budget owner
+应当是现有 TerminalStream per-viewer delivery machinery。
+结构：
+authoritative PTY reader
+→ authoritative VT update
+→ subscriber delivery state
+→ dedicated subscriber writer
+→ socket
+client-channel read loop:
+socket
+→ Input / Resize / ResyncRequest / other client frames
+读和写职责分离。
+Writer task
+每个 subscriber writer：
+
+* 从该 viewer 的 TerminalStream delivery state 取可发送 frame
+* 独占 socket write half
+* 可以等待 kernel/socket write progress
+* no-progress deadline initial default = 2 s
+
+这里的：
+2 s
+只从开始尝试实际发送但没有取得有用 write progress 时计。
+不能把：
+"当前没有 frame 可写"
+算作 no-progress。
+PTY authority never waits
+任何 subscriber writer 的 await 都不得反压：
+
+* PTY reader
+* authoritative VT mutation
+* other subscriber delivery
+* other client control input
+
+尤其不能重新把 await 搬回：
+`serve()` 的 shared `select!`
+里。
+否则会复活已经发现的：
+writer blocked
+→ channel stops reading Input/Resize
+→ peer waits
+→ mutual stall
+4 MiB budget
+Existing per-viewer 4 MiB encoded backlog remains the sole subscriber
+delivery budget.
+Do not retain:
+4 MiB budget
++
+8 frames second queue
+as two independent notions of "slow".
+If subscriber falls beyond 4 MiB:
+→ subscriber becomes desynchronized
+→ obsolete queued delta chain is not treated as valid
+→ establish an explicit resync barrier
+→ deliver a fresh authoritative snapshot/current epoch
+→ resume ordered deltas from that point
+Do not close merely because the subscriber temporarily exceeded the old
+8-frame queue.
+Do not:
+drop middle deltas
++
+continue current epoch as synchronized.
+2-second failure condition
+Only a subscriber that makes no useful socket progress for the bounded
+deadline is disconnected.
+Thus:
+brief jitter
+→ await/drain
+material backlog
+→ resync
+non-reader
+→ disconnect
+These are three distinct conditions.
+Regression matrix
+Required:
+
+1. healthy reader + 10 s sustained output storm
+→ no disconnect
+→ final replica matches authoritative state
+2. client stops reading
+→ writer times out
+→ only that subscriber is dropped
+3. subscriber crosses 4 MiB
+→ explicit resync
+→ converges correctly
+4. two viewers, one stalled
+→ healthy viewer remains responsive and synchronized
+5. stalled terminal writer
+→ Input/Resize from other clients and PTY ingestion continue
+
+最后一条建议补上。
+它直接证明：
+writer backpressure has not leaked back into control/runtime authority.
+核心不变量：
+There is one per-subscriber backlog authority.
+Socket backpressure belongs to the subscriber writer, never the terminal
+runtime authority.
+Q11 — snapshot fidelity regression location
+选择 A：
+`corrald` 内部 snapshot fidelity test module。
+例如：
+runtime/snapshot_fidelity_tests.rs
+它验证的 contract 是：
+authoritative terminal state
+→ Corral snapshot render
+→ fresh replica
+→ equivalent terminal state
+不是：
+Unix socket framing works.
+所以无需每个 fidelity fixture 都走真实 data channel。
+真实 channel：
+已有自己的 protocol/framing/resync tests。
+Fixture form
+22 个 spike scenarios 蒸馏为 deterministic in-code fixtures。
+每个 fixture 至少定义：
+
+* initial geometry
+* input terminal byte sequence
+* any resize/action sequence required
+* expected fidelity dimensions
+
+Comparison 应尽量 semantic，
+不要只比较最终 ANSI bytes。
+比较：
+
+* rows / cols
+* visible cells
+* codepoint/grapheme representation according to qwertty model
+* cell attributes/styles covered by current contract
+* cursor position
+* cursor visibility
+* modes already covered by ADR 0003
+
+Q7 尚未 accepted 的：
+
+* preserved main + alternate screen pair
+* new palette semantics
+* new geometry transport semantics if not already represented
+
+不能由这个 test module 偷偷变成 accepted behavior。
+这些在 Q7 accepted 后再扩展同一 harness。
+Why not docs/evidence fixtures?
+因为这 22 条现在已经是：
+permanent deterministic correctness regressions
+而不是一次性 research evidence。
+Evidence 文档可以引用测试，
+但 test input 不应依赖 docs tree 作为 runtime fixture database。
+Why not full integration tests?
+避免：
+
+* PTY scheduling noise
+* socket timing noise
+* subprocess lifetime noise
+
+污染 serializer fidelity test。
+如果某个 bug 后来被证明只在 full channel 上出现，
+再单独增加 integration regression。
+核心原则：
+Test the snapshot contract at the narrowest deterministic layer that owns
+the defect.
+Q12 — PR9 implementation-plan scope
+批准 proposed scope。
+PR9 = first graphical session / attention / control surface.
+Included:
+Desktop shell
+
+* GPUI application/window lifecycle
+* session list
+* selection/navigation
+* PR8 five-state projection
+* secondary runtime/capability facts
+
+Terminal presentation
+
+* embedded terminal view inside selected session surface
+* standalone terminal window/view where the plan requires it
+* client qwertty replica
+* snapshot/delta/resync handling
+* replica poison isolation
+
+M1 control actions needed by Desktop
+
+* New Session
+* Open / Attach
+* terminal input
+* interrupt
+* detach / navigation back
+* resume/continuation where already allowed by accepted control ladder
+* relevant disclosure flow
+* existing advisory control semantics
+
+PR9 consumes existing daemon/provider/session truth.
+It does not invent a second Desktop-owned runtime model.
+Excluded:
+Tray
+No tray/watchfulness UI in PR9.
+Native notifications
+No Needs You / Ready desktop notification delivery in PR9.
+These belong to M1 completion,
+where tray presence/watchfulness semantics are already separately important.
+Historical browser
+Do not turn PR9 into a rich history/transcript browser.
+Using existing session/recent data as needed for navigation is fine;
+history reading/search/transcript UI remains outside this scope.
+One-command packaging/install
+Not PR9.
+Packaging / normal installer / default integration installation belongs to
+M1 completion.
+Provider orchestration expansion
+No new provider protocol/control capabilities merely because Desktop would
+look better with them.
+PR9 renders the accepted capability ladder honestly.
+Linux
+PR9 requires:
+
+* Linux compile coverage
+* Linux test coverage for platform-independent/client mechanics where
+feasible
+
+but:
+real Linux Desktop rendering = unvalidated
+Support/product matrix must say so explicitly.
+If public M1 intends to claim Linux Desktop support:
+real Linux rendering validation becomes a support/release gate before that
+claim.
+PR9 merge itself need not wait for a Linux display environment.
+Performance DoD
+PR9 DoD includes:
+rerun the relevant rendering/frame harness in release profile
+on the actually validated macOS Desktop path.
+Debug/spike frame numbers do not satisfy final PR9 evidence.
+Classification
+PR9 plan is Class C because it materializes the first full graphical
+product surface and will consume the newly accepted terminal protocol /
+dependency decisions.
+Founder accepts the plan before implementation crosses that boundary.
+Q13 — close spike grill / next action
+是。
+Round 2 closes the PR9 spike grill.
+No further founder questions remain from the spike itself.
+Next implementation task:
+S6 terminal-channel backpressure P1
+Create:
+`docs/plans/2026-09-04-terminal-channel-backpressure.md`
+The plan should remain narrow and include the already-required regression
+set from Q10.
+It does NOT need a new founder architecture decision merely to implement
+the accepted S6 semantics.
+Classification:
+high-consequence Class B
+because it touches:
+
+* terminal data path
+* subscriber lifecycle
+* backpressure/resync behavior
+
+Plan:
+required
+Review:
+high-consequence owner rules apply
+Merge:
+human gate only if another existing trigger requires it;
+otherwise follow the repository's accepted high-consequence-B review/audit
+rules.
+If writing the plan exposes a genuinely new semantic choice rather than an
+implementation mechanism:
+STOP
+→ surface that one decision
+rather than silently extending this grill.
+After S6:
+Q6 fidelity fix
+while in parallel:
+
+* deny governance PR can already be under human review
+* Q7 ADR can already be under grill/acceptance
+
+Then:
+stable foundations
+→ PR9 plan
+有一个排序上的小改动：deny PR 不必"紧随 S6 之后才提交"。它完全独立，而且需要 human turnaround，所以越早开越好；只是必须在 PR9 plan 最终接受前 merge。这样不会让人工 review latency 卡住 critical path。
+同理，Q7 ADR 现在就可以起草/grill。真正需要严格串行的是 S6 → Q6，因为这两个最接近同一个 terminal runtime owner。
+```
+
+## What this grill leaves open
+
+Nothing from the spike. Four tracks follow: S6 (plan
+`docs/plans/2026-09-04-terminal-channel-backpressure.md`), then Q6; the
+deny governance PR and the Q7 ADR in parallel, each through its human gate;
+the PR9 plan only once all four are stable.
