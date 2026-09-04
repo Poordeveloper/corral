@@ -168,3 +168,10 @@ values; the storm test is the one long test and is budgeted as such.
 - PR body: `Class: B`, high-consequence; `Applicable escalation triggers:
   none` — implements the invariant the pr3 plan grill froze and grill
   Q5/Q10 ruled; review under the high-consequence owner rules.
+
+## Plan Size Justification
+
+Twenty lines over the target: one owner boundary (the channel's writer and
+reader) and the six regressions grill Q10 mandated, each of which names a
+distinct failure the fix must separate. Splitting the tests from the fix
+would ship the fix without the evidence that it separates them.
