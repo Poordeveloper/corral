@@ -2,7 +2,7 @@
 status: done   # reference: docs/references/2026-09-02-pr7-global-integration-spike.md; grill rounds 3–4 ruled over it, ADRs 0013/0014 accepted 2026-09-02
 class: B
 writes: [docs/references]
-reads: [docs/adr/0013-global-hook-integration.md, docs/adr/0014-external-session-evidence.md, docs/adr/0004-hook-delivery.md, docs/adr/0009-codex-notify-delivery.md, docs/references/2026-08-27-pr5-claude-code-hook-matrix.md, docs/references/2026-08-31-codex-0.145.0-notify-spike.md, docs/plans/2026-09-01-pr7-external-sessions.md]
+reads: [docs/adr/0013-global-hook-integration.md, docs/adr/0014-external-session-evidence.md, docs/adr/0004-hook-delivery.md, docs/adr/0009-codex-notify-delivery.md, docs/references/2026-08-27-pr5-claude-code-hook-matrix.md, docs/references/2026-08-31-codex-0.145.0-notify-spike.md, docs/plans/done/2026-09-01-pr7-external-sessions.md]
 ---
 
 # PR7 spike — the facts ADR 0013 / ADR 0014 stand on

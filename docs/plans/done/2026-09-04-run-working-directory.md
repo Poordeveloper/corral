@@ -1,5 +1,5 @@
 ---
-status: active
+status: done   # merged in PR #38
 class:  C
 writes:
   - crates/corral-state (durable schema, RunStarted event, Run)
