@@ -2,21 +2,24 @@
 //!
 //! One `Watch` per process, installed before its first window (tray grill
 //! Q14): the bridge to corrald, the 1 Hz poll and the list it fills, the
-//! tray's presence, and the one Quit gate every exit Corral offers runs
-//! (Q8): ⌘Q, the app menu, and closing the main window when no status item
-//! keeps the process. The platform's own termination — Dock Quit, logout,
-//! shutdown — is the recorded exception: gpui 0.2.2 routes
-//! `applicationShouldTerminate` nowhere and only reports `will_terminate`,
-//! after the decision (plan D4). A window presents this and holds nothing
-//! the process needs. Closing a window stops presentation; quitting Corral
-//! stops watchfulness; neither terminates managed work.
+//! tray's presence and what its status item is shown, and the one Quit gate
+//! every exit Corral offers runs (Q8): ⌘Q, the app menu, the tray's Quit,
+//! and closing the main window when no status item keeps the process. The
+//! platform's own termination — Dock Quit, logout, shutdown — is the
+//! recorded exception: gpui 0.2.2 routes `applicationShouldTerminate`
+//! nowhere and only reports `will_terminate`, after the decision (plan D4).
+//! A window presents this and holds nothing the process needs. Closing a
+//! window stops presentation; quitting Corral stops watchfulness; neither
+//! terminates managed work.
 
+use std::fmt;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use corral_client::launch::{Continued, LaunchSite, Requested, Shown};
 use corral_protocol::method::SessionNewResult;
+use futures::StreamExt;
 use gpui::prelude::*;
 use gpui::{AnyWindowHandle, App, Context, Entity, Global, PromptLevel, Subscription, Task};
 
@@ -24,6 +27,7 @@ use crate::app;
 use crate::bridge::{Attached, BRIDGE_STOPPED, Bridge, Polled, Reply, Unanswered};
 use crate::quit::{self, Gate, Warning};
 use crate::sessions::SessionList;
+use crate::tray::{Clicks, StatusItem, TrayAction, TrayProjection};
 
 /// How often the list asks the daemon what it holds. A client refresh policy
 /// and not a wire contract: a push channel is a protocol addition and not
@@ -36,16 +40,25 @@ pub const TRAY_UNAVAILABLE: &str = "Menu bar icon unavailable — closing this w
 /// Whether this process has a menu-bar status item: the one fact that
 /// licenses staying alive without windows (grill Q1). Decided once per run,
 /// before the first window, and never retried within it (Q14).
-///
-/// No variant here claims an item. The tray mechanism, once its probe seals
-/// it, adds the variant that owns one; until then no build is watchful.
-#[derive(Debug)]
 pub enum TrayPresence {
+    /// The status item exists and is shown what the Watch projects; the
+    /// process outlives its windows.
+    Established(Box<dyn StatusItem>),
     /// macOS: the status item was not established. The reason is logged and
     /// the main window carries [`TRAY_UNAVAILABLE`].
     Unavailable(String),
     /// A platform with no tray: a known gap, never a failure (Q2).
     Unsupported,
+}
+
+impl fmt::Debug for TrayPresence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Established(_) => f.write_str("Established"),
+            Self::Unavailable(reason) => f.debug_tuple("Unavailable").field(reason).finish(),
+            Self::Unsupported => f.write_str("Unsupported"),
+        }
+    }
 }
 
 impl TrayPresence {
@@ -54,6 +67,7 @@ impl TrayPresence {
     #[must_use]
     pub fn keeps_process(&self) -> bool {
         match self {
+            Self::Established(_) => true,
             Self::Unavailable(_) | Self::Unsupported => false,
         }
     }
@@ -63,7 +77,14 @@ impl TrayPresence {
     pub fn banner(&self) -> Option<&'static str> {
         match self {
             Self::Unavailable(_) => Some(TRAY_UNAVAILABLE),
-            Self::Unsupported => None,
+            Self::Established(_) | Self::Unsupported => None,
+        }
+    }
+
+    fn item_mut(&mut self) -> Option<&mut dyn StatusItem> {
+        match self {
+            Self::Established(item) => Some(item.as_mut()),
+            Self::Unavailable(_) | Self::Unsupported => None,
         }
     }
 }
@@ -78,6 +99,9 @@ pub struct Watch {
     bridge: Rc<Bridge>,
     list: SessionList,
     presence: TrayPresence,
+    /// What the status item was last shown, so it is rebuilt only when the
+    /// projection changes (grill Q10).
+    shown: Option<TrayProjection>,
     /// The main window while one is open: the only selector and Open path.
     main_window: Option<AnyWindowHandle>,
     /// One poll in flight at a time (round 1, #3).
@@ -130,17 +154,76 @@ impl Watch {
             let _ = weak.update(cx, |this, cx| this.window_closed(cx));
         });
 
-        Self {
+        let mut this = Self {
             bridge,
             list: SessionList::default(),
             presence,
+            shown: None,
             main_window: None,
             polling: false,
             quit_pending: false,
             quitting: false,
             _poll: poll,
             _window_closed: window_closed,
+        };
+        // The item says "asking" from its first moment, never nothing.
+        this.publish(SystemTime::now());
+        this
+    }
+
+    /// Deliver the status item's clicks to the Watch on gpui's foreground
+    /// (grill Q3): the platform's handler only forwarded the id, and here it
+    /// becomes an action — or a logged nothing, for an id this build has no
+    /// word for.
+    pub fn bind_tray(watch: &Entity<Self>, mut clicks: Clicks, cx: &mut App) {
+        let watch = watch.clone();
+        cx.spawn(async move |cx| {
+            while let Some(id) = clicks.next().await {
+                let _ = cx.update(|cx| match TrayAction::from_menu_id(&id) {
+                    Some(action) => Self::act(&watch, action, cx),
+                    None => eprintln!("corral-desktop: menu item ignored: {id}"),
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// What a click on the status item's menu does. Outside any update of
+    /// the Watch, because every path may open the main window.
+    pub fn act(watch: &Entity<Self>, action: TrayAction, cx: &mut App) {
+        match action {
+            TrayAction::OpenCorral | TrayAction::More => {
+                Self::ensure_main_window(watch, cx);
+            }
+            TrayAction::NewSession => {
+                if let Some(window) = Self::ensure_main_window(watch, cx) {
+                    app::new_session_in(window, cx);
+                }
+            }
+            TrayAction::OpenSession(session_id) => Self::open_session(watch, &session_id, cx),
+            TrayAction::Quit => watch.update(cx, |this, cx| this.request_quit(cx)),
         }
+    }
+
+    /// A row click resolves the session it named against current truth
+    /// (grill Q10). Listed: selected, then the window's own Open path with
+    /// its refusals. Gone since the menu was built: the window, showing the
+    /// list as it is now, and nothing else — never another session.
+    fn open_session(watch: &Entity<Self>, session_id: &str, cx: &mut App) {
+        let Some(window) = Self::ensure_main_window(watch, cx) else {
+            return;
+        };
+        let listed = watch
+            .read(cx)
+            .list
+            .rows()
+            .iter()
+            .any(|row| row.session_id == session_id);
+        if !listed {
+            return;
+        }
+        watch.update(cx, |this, cx| this.select(session_id, cx));
+        app::open_selected_in(window, cx);
     }
 
     pub fn list(&self) -> &SessionList {
@@ -161,8 +244,34 @@ impl Watch {
 
     fn finish_poll(&mut self, polled: Result<Polled, Unanswered>, cx: &mut Context<Self>) {
         self.polling = false;
-        self.list.take(polled, SystemTime::now());
+        self.take(polled, cx);
+    }
+
+    /// One answer, or its absence, for the list and the status item alike.
+    fn take(&mut self, polled: Result<Polled, Unanswered>, cx: &mut Context<Self>) {
+        let now = SystemTime::now();
+        self.list.take(polled, now);
+        self.publish(now);
         cx.notify();
+    }
+
+    /// Show the status item the list as it stands — only when that differs
+    /// from what it shows (grill Q10): the 1 Hz poll is never a per-second
+    /// rebuild of native menu objects, and an age changes it once a bucket.
+    fn publish(&mut self, now: SystemTime) {
+        let Some(item) = self.presence.item_mut() else {
+            return;
+        };
+        let projection = TrayProjection::of(&self.list, now);
+        if self.shown.as_ref() == Some(&projection) {
+            return;
+        }
+        match item.show(&projection) {
+            Ok(()) => self.shown = Some(projection),
+            // The item stands with the generation before; the next answer
+            // tries again rather than the item vanishing mid-run (Q14).
+            Err(error) => eprintln!("corral-desktop: the menu bar item was not updated: {error}"),
+        }
     }
 
     /// Ask now rather than at the next tick: after something the person did,
@@ -246,8 +355,10 @@ impl Watch {
         if quitting {
             return None;
         }
+        // Whichever way in, the person asked for Corral: it comes forward,
+        // window and all, from behind whatever they were in.
+        cx.activate(true);
         if let Some(handle) = open {
-            cx.activate(true);
             let _ = handle.update(cx, |_, window, _| window.activate_window());
             return Some(handle);
         }
@@ -285,8 +396,7 @@ impl Watch {
     }
 
     fn decide_quit(&mut self, polled: Result<Polled, Unanswered>, cx: &mut Context<Self>) {
-        self.list.take(polled, SystemTime::now());
-        cx.notify();
+        self.take(polled, cx);
         match quit::gate(&self.list) {
             Gate::Quit => self.quit(cx),
             Gate::Warn(warning) => {

@@ -25,9 +25,10 @@ gpui = { workspace = true }
 qwertty-term-vt = { workspace = true }
 tokio = { workspace = true }
 
-# Design 0 probe only: adopted as the tray mechanism when the probe passes
-# (docs/decisions/2026-09-05-tray-grill.md Q3), target-scoped so Linux
-# graphs never acquire GTK (Q2).
+# The tray mechanism (docs/decisions/2026-09-05-tray-grill.md Q3, sealed on
+# the probe in docs/references/2026-09-05-tray-probe.md): the status item and
+# its menu over the objc2 AppKit bindings gpui already links. Target-scoped so
+# Linux graphs never acquire GTK (Q2).
 [target.'cfg(target_os = "macos")'.dependencies]
 # Default features off: both crates' defaults are their Linux GTK3 and libxdo
 # paths, which would enter the lockfile (and cargo-deny's advisory sweep of

@@ -183,6 +183,12 @@ violation.
 Evidence windows count only after the storage epoch advances to `dogfood`,
 and restart if the data behind them is discarded (AGENTS.md §Durable state).
 
+Three windows run apart, because they measure different claims: attention
+inference (the counts above); tray watchfulness — the macOS status item
+keeping the process and its counts honest through days of window-closed
+use; and OS notification fidelity, which cannot start before bundled
+delivery supplies an `.app`.
+
 Success criterion:
 
 > A user running several coding agents starts opening Corral instead of

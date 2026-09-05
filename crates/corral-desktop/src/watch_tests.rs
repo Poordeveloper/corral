@@ -1,13 +1,43 @@
 use super::*;
 
+use std::cell::RefCell;
+
 use corral_client::launch::{LaunchSite, Requested, Shown};
 use corral_client::sessions::Listing;
 use corral_protocol::method::{AttentionCount, AttentionSummaryResult, SessionListResult};
+use futures::channel::mpsc::unbounded;
 use gpui::{TestAppContext, VisualTestContext};
 use serde_json::json;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::bridge::{Capabilities, Request};
+use crate::sessions::ASKING;
+
+/// A status item that remembers what it was shown, in order.
+#[derive(Clone, Default)]
+struct Remembered(Rc<RefCell<Vec<TrayProjection>>>);
+
+impl Remembered {
+    fn count(&self) -> usize {
+        self.0.borrow().len()
+    }
+
+    fn last(&self) -> TrayProjection {
+        self.0.borrow().last().expect("shown something").clone()
+    }
+}
+
+impl StatusItem for Remembered {
+    fn show(&mut self, projection: &TrayProjection) -> Result<(), String> {
+        self.0.borrow_mut().push(projection.clone());
+        Ok(())
+    }
+}
+
+fn established() -> (TrayPresence, Remembered) {
+    let shown = Remembered::default();
+    (TrayPresence::Established(Box::new(shown.clone())), shown)
+}
 
 /// The bridge's questions, to answer as the test decides.
 type Questions = UnboundedReceiver<Request>;
@@ -48,6 +78,41 @@ fn one_running() -> Result<Polled, Unanswered> {
         "origin": "managed",
         "execution_state": "running",
     })])
+}
+
+/// A current answer with one session needing you, unacknowledged: a row the
+/// tray lists.
+fn one_needs_you() -> Result<Polled, Unanswered> {
+    Ok(Polled {
+        listing: Listing::of(SessionListResult {
+            sessions: vec![json!({
+                "session_id": "needs-1",
+                "title": "fix the test",
+                "execution_state": "running",
+                "attention": {
+                    "state": "needs_you",
+                    "since_unix_ms": 0,
+                    "items": [{
+                        "attention_item_id": "item-1",
+                        "reason": "needs_input",
+                        "since_unix_ms": 0,
+                        "acknowledged": false,
+                    }],
+                },
+            })],
+        }),
+        summary: AttentionSummaryResult {
+            needs_you: AttentionCount {
+                total: 1,
+                unacknowledged: 1,
+            },
+            ready: AttentionCount {
+                total: 0,
+                unacknowledged: 0,
+            },
+        },
+        capabilities: Capabilities::default(),
+    })
 }
 
 fn unanswered() -> Result<Polled, Unanswered> {
@@ -114,6 +179,7 @@ fn continue_session(watch: &Entity<Watch>, cx: &TestAppContext) -> bool {
 
 #[test]
 fn only_an_established_status_item_keeps_the_process() {
+    assert!(established().0.keeps_process());
     assert!(!TrayPresence::Unavailable("no item".to_owned()).keeps_process());
     assert!(!TrayPresence::Unsupported.keeps_process());
 }
@@ -125,6 +191,132 @@ fn the_banner_names_a_failure_and_never_the_platform_gap() {
         Some(TRAY_UNAVAILABLE)
     );
     assert_eq!(TrayPresence::Unsupported.banner(), None);
+    assert_eq!(established().0.banner(), None);
+}
+
+/// With a status item the main window is presentation: it closes without a
+/// question, the process stays, and the next way in opens a new one.
+#[gpui::test]
+fn with_a_status_item_the_main_window_closes_and_the_process_stays(cx: &mut TestAppContext) {
+    let (presence, _shown) = established();
+    let (watch, _questions) = watch(presence, cx);
+    let window = ensure_main_window(&watch, cx);
+    let mut visual = VisualTestContext::from_window(window, cx);
+
+    assert!(visual.simulate_close());
+    assert!(!visual.has_pending_prompt());
+    let _ = window.update(&mut *visual, |_, window, _| window.remove_window());
+    visual.run_until_parked();
+
+    assert!(visual.windows().is_empty());
+    assert!(!quitting(&watch, &visual));
+    let again = ensure_main_window(&watch, &mut visual);
+    assert!(again != window);
+    assert!(visual.windows() == vec![again]);
+}
+
+/// The item says "asking" from the first moment, then each generation as it
+/// arrives — and not again for the same one: the poll is not a rebuild.
+#[gpui::test]
+fn the_status_item_is_shown_a_generation_only_when_it_differs(cx: &mut TestAppContext) {
+    let (presence, shown) = established();
+    let (_watch, mut questions) = watch(presence, cx);
+    assert_eq!(shown.count(), 1);
+    assert_eq!(
+        shown.last(),
+        TrayProjection::Unreachable {
+            line: ASKING.to_owned()
+        }
+    );
+
+    answer_polls(&mut questions, nothing_continuing, cx);
+    assert_eq!(shown.count(), 2);
+    assert_eq!(shown.last().header(), "Needs You 0 · Ready 0");
+
+    cx.executor().advance_clock(POLL);
+    answer_polls(&mut questions, nothing_continuing, cx);
+    assert_eq!(shown.count(), 2);
+
+    cx.executor().advance_clock(POLL);
+    answer_polls(&mut questions, one_needs_you, cx);
+    assert_eq!(shown.count(), 3);
+    assert_eq!(shown.last().badge_text(), Some("1".to_owned()));
+
+    cx.executor().advance_clock(POLL);
+    answer_polls(&mut questions, unanswered, cx);
+    assert_eq!(shown.count(), 4);
+    assert_eq!(shown.last().badge_text(), None);
+    assert_eq!(
+        shown.last().header(),
+        "corrald did not answer: nobody there"
+    );
+}
+
+/// A row click names a session: listed, it is selected and opened through
+/// the window's own path; gone since the menu was built, the window opens on
+/// the list as it is now and nothing else happens.
+#[gpui::test]
+fn a_row_click_opens_the_session_it_named_and_a_stale_one_converges(cx: &mut TestAppContext) {
+    let (presence, _shown) = established();
+    let (watch, mut questions) = watch(presence, cx);
+    answer_polls(&mut questions, one_needs_you, cx);
+    assert!(watch.read_with(cx, |watch, _| watch.list().selected().is_none()));
+
+    cx.update(|cx| Watch::act(&watch, TrayAction::OpenSession("needs-1".to_owned()), cx));
+    cx.run_until_parked();
+    assert_eq!(cx.windows().len(), 1);
+    assert_eq!(
+        watch.read_with(cx, |watch, _| watch
+            .list()
+            .selected()
+            .map(|row| row.session_id.clone())),
+        Some("needs-1".to_owned())
+    );
+    // Held, not dropped: a dropped request is a refused attach, which the
+    // window answers with a refresh of its own.
+    let attach = questions.try_recv().expect("the window asked to attach");
+    assert!(matches!(&attach, Request::Attach { session_id, .. } if session_id == "needs-1"));
+
+    cx.update(|cx| Watch::act(&watch, TrayAction::OpenSession("gone".to_owned()), cx));
+    cx.run_until_parked();
+    assert_eq!(cx.windows().len(), 1);
+    assert_eq!(
+        watch.read_with(cx, |watch, _| watch
+            .list()
+            .selected()
+            .map(|row| row.session_id.clone())),
+        Some("needs-1".to_owned())
+    );
+    assert!(
+        questions.try_recv().is_err(),
+        "nothing was asked for a session not listed"
+    );
+    drop(attach);
+}
+
+/// What the platform's handler forwarded reaches the Watch on the
+/// foreground as an action; an id this build cannot read is dropped; the
+/// tray's Quit runs the one gate.
+#[gpui::test]
+fn tray_clicks_reach_the_watch_on_the_foreground(cx: &mut TestAppContext) {
+    let (presence, _shown) = established();
+    let (watch, mut questions) = watch(presence, cx);
+    let (clicks, receiver) = unbounded();
+    cx.update(|cx| Watch::bind_tray(&watch, receiver, cx));
+
+    clicks.unbounded_send("open".to_owned()).expect("bound");
+    cx.run_until_parked();
+    assert_eq!(cx.windows().len(), 1);
+
+    clicks.unbounded_send("session:".to_owned()).expect("bound");
+    clicks.unbounded_send("new".to_owned()).expect("bound");
+    cx.run_until_parked();
+    assert_eq!(cx.windows().len(), 1);
+    assert!(!quitting(&watch, cx));
+
+    clicks.unbounded_send("quit".to_owned()).expect("bound");
+    answer_polls(&mut questions, nothing_continuing, cx);
+    assert!(quitting(&watch, cx));
 }
 
 #[gpui::test]

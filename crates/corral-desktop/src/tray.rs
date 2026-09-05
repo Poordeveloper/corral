@@ -14,8 +14,13 @@
 use std::time::{Duration, SystemTime};
 
 use corral_client::presentation::MainState;
+use futures::channel::mpsc::UnboundedReceiver;
 
 use crate::sessions::{ASKING, SessionList};
+
+#[cfg(target_os = "macos")]
+#[path = "tray_macos.rs"]
+pub mod macos;
 
 /// Rows shown per group before the rest is counted (grill Q6).
 pub const ROWS_PER_GROUP: usize = 10;
@@ -200,7 +205,81 @@ impl TrayProjection {
             Self::Current(current) => current.badge.text(),
         }
     }
+
+    /// The menu, top to bottom: the header, the groups that have rows, then
+    /// the ways into Corral. Decided here, as words, so the native menu is
+    /// built mechanically and what it says is under test. While the daemon
+    /// is unreachable nothing that would ask it for a runtime is offered,
+    /// as in the window; Open Corral is the route to the reason.
+    #[must_use]
+    pub fn menu(&self) -> Vec<MenuLine> {
+        let mut lines = vec![MenuLine::Note(self.header())];
+        let mut current = false;
+        if let Self::Current(projection) = self {
+            current = true;
+            for group in [&projection.needs_you, &projection.ready] {
+                if group.rows.is_empty() {
+                    continue;
+                }
+                lines.push(MenuLine::Separator);
+                lines.push(MenuLine::Note(group.label.to_owned()));
+                for row in &group.rows {
+                    lines.push(MenuLine::Item {
+                        action: TrayAction::OpenSession(row.session_id.clone()),
+                        text: row.text(),
+                    });
+                }
+                if let Some(text) = group.overflow_line() {
+                    lines.push(MenuLine::Item {
+                        action: TrayAction::More,
+                        text,
+                    });
+                }
+            }
+        }
+        lines.push(MenuLine::Separator);
+        lines.push(MenuLine::Item {
+            action: TrayAction::OpenCorral,
+            text: "Open Corral".to_owned(),
+        });
+        if current {
+            lines.push(MenuLine::Item {
+                action: TrayAction::NewSession,
+                text: "New Session…".to_owned(),
+            });
+        }
+        lines.push(MenuLine::Separator);
+        lines.push(MenuLine::Item {
+            action: TrayAction::Quit,
+            text: "Quit Corral".to_owned(),
+        });
+        lines
+    }
 }
+
+/// One line of the menu. A `Note` is words that do nothing — the header, a
+/// group's label; an `Item` carries its action in the id the platform hands
+/// back on a click.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MenuLine {
+    Note(String),
+    Separator,
+    Item { action: TrayAction, text: String },
+}
+
+/// The native status item, behind the one thing the Watch asks of it. The
+/// Watch decides when — only when the projection changed (grill Q10) — and
+/// the platform decides how; a test item merely remembers what it was shown.
+pub trait StatusItem {
+    /// Show this projection as one generation: menu and badge together,
+    /// never one and then the other.
+    fn show(&mut self, projection: &TrayProjection) -> Result<(), String>;
+}
+
+/// The menu ids the platform's handler forwarded, in click order and as it
+/// spelled them. Read on gpui's foreground by `TrayAction::from_menu_id`:
+/// the handler itself touches nothing of gpui (grill Q3).
+pub type Clicks = UnboundedReceiver<String>;
 
 fn elapsed_since(unix_ms: i64, now: SystemTime) -> Duration {
     let at = if unix_ms < 0 {

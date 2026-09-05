@@ -107,9 +107,9 @@ rejected alternative → confidence → remaining gap.
 ### 10. Tray / background lifecycle
 - Strongest: CC Switch.
 - Evidence: exit-request classification (runtime auto-exit vs restart vs user quit); macOS Accessory/Regular activation-policy flips + dock-click Reopen; Windows ghost-tray-icon removal before hard exit; single-instance socket cleanup before restart; autostart strictly opt-in (`auto-launch`, macOS .app-bundle path fix). ~500 lines of platform edge-case handling.
-- Decision: tray is a thin client of corrald (attention counts via protocol); adopt CC Switch's lifecycle edge-case catalog when Tray lands (M1 completion, after PR8); zero-background default unchanged.
-- Rejected: tray process owning any runtime truth; autostart-by-default.
-- Confidence: high for the problem catalog; medium for Corral-specific shape (tray tech not yet chosen: GPUI window vs native menubar helper). Gap: tray technology choice — deferred until after PR8.
+- Decision: tray is a thin client of corrald (attention counts via protocol); adopt CC Switch's lifecycle edge-case catalog when Tray lands (M1 completion, after PR8); zero-background default unchanged. Mechanism (2026-09-05, `docs/plans/2026-09-05-tray.md`, grill Q3): `tray-icon` + `muda` over the objc2 AppKit bindings gpui already links, macOS only; the Desktop process owns the status item (no tray process), the item is shown a pure projection of daemon truth rebuilt only when it changes, callbacks only forward the clicked id to gpui's foreground. Validated by the Design 0 probe's self-driven cases (`docs/references/2026-09-05-tray-probe.md`: creation, windowless cycles, dynamic menu, idle resources); the human click cases are the feature's DoD walk. Watchfulness ⇔ an established status item: no item, no claim, quit on close.
+- Rejected: tray process owning any runtime truth; autostart-by-default; a Corral-owned unsafe AppKit boundary crate (its own decision if the safe crates ever fail).
+- Confidence: high for the problem catalog and the mechanism's composition with gpui. Known gap: Dock-menu Quit, logout and shutdown reach AppKit's default `applicationShouldTerminate`, which gpui 0.2.2 gives no hook for, so the Quit warning cannot be shown on those paths (plan D4).
 
 ### 11. History / search
 - Strongest: Wake (primary), OpenCode (storage model).
