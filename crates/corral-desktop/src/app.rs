@@ -62,6 +62,9 @@ pub fn bind_keys(cx: &mut App) {
 
 const LIST_WIDTH: f32 = 340.;
 
+/// What an action that could start a runtime meets while a Quit is decided.
+const QUIT_PENDING: &str = "Quit is pending: nothing new starts until it is cancelled.";
+
 enum Overlay {
     None,
     NewSession,
@@ -255,7 +258,7 @@ impl MainWindow {
         self.busy = true;
         self.notice = None;
         cx.notify();
-        let reply = self.watch.read(cx).bridge().attach(session_id.clone());
+        let reply = self.watch.read(cx).attach(session_id.clone());
         cx.spawn_in(window, async move |this, cx| {
             let attached = reply
                 .await
@@ -401,13 +404,17 @@ impl MainWindow {
                 return;
             }
         };
-        self.busy = true;
-        cx.notify();
-        let reply = self
+        let Some(reply) = self
             .watch
             .read(cx)
-            .bridge()
-            .start_session(launch.requested, launch.site);
+            .start_session(launch.requested, launch.site)
+        else {
+            self.notice = Some(QUIT_PENDING.to_owned());
+            cx.notify();
+            return;
+        };
+        self.busy = true;
+        cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let started = reply
                 .await
@@ -473,16 +480,20 @@ impl MainWindow {
         if self.busy || !self.offered(cx).continue_in_corral {
             return;
         }
+        // This process's own working directory: client policy, the same the
+        // CLI and TUI apply, and the directory the disclosure names.
+        let Some(reply) =
+            self.watch
+                .read(cx)
+                .continue_session(session_id.clone(), shown, working_directory())
+        else {
+            self.notice = Some(QUIT_PENDING.to_owned());
+            cx.notify();
+            return;
+        };
         self.busy = true;
         self.notice = None;
         cx.notify();
-        // This process's own working directory: client policy, the same the
-        // CLI and TUI apply, and the directory the disclosure names.
-        let reply = self.watch.read(cx).bridge().continue_session(
-            session_id.clone(),
-            shown,
-            working_directory(),
-        );
         cx.spawn_in(window, async move |this, cx| {
             let continued = reply
                 .await
@@ -526,7 +537,6 @@ impl MainWindow {
         let reply = self
             .watch
             .read(cx)
-            .bridge()
             .acknowledge(row.session_id.clone(), item.to_owned());
         cx.spawn(async move |this, cx| {
             let acknowledged = reply

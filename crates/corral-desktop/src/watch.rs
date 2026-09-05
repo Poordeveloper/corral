@@ -11,14 +11,17 @@
 //! the process needs. Closing a window stops presentation; quitting Corral
 //! stops watchfulness; neither terminates managed work.
 
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
+use corral_client::launch::{Continued, LaunchSite, Requested, Shown};
+use corral_protocol::method::SessionNewResult;
 use gpui::prelude::*;
 use gpui::{AnyWindowHandle, App, Context, Entity, Global, PromptLevel, Subscription, Task};
 
 use crate::app;
-use crate::bridge::{BRIDGE_STOPPED, Bridge, Polled, Reply, Unanswered};
+use crate::bridge::{Attached, BRIDGE_STOPPED, Bridge, Polled, Reply, Unanswered};
 use crate::quit::{self, Gate, Warning};
 use crate::sessions::SessionList;
 
@@ -80,7 +83,8 @@ pub struct Watch {
     /// One poll in flight at a time (round 1, #3).
     polling: bool,
     /// A Quit is being decided — its question is out, or its confirmation is
-    /// up; a request meanwhile waits for that answer.
+    /// up. Another request waits for that answer, and nothing that could
+    /// start a runtime is sent until Cancel.
     quit_pending: bool,
     /// The platform has been asked to quit; nothing is asked or opened after.
     quitting: bool,
@@ -139,10 +143,6 @@ impl Watch {
         }
     }
 
-    pub fn bridge(&self) -> &Bridge {
-        &self.bridge
-    }
-
     pub fn list(&self) -> &SessionList {
         &self.list
     }
@@ -176,6 +176,51 @@ impl Watch {
             let _ = this.update(cx, |this, cx| this.finish_poll(polled, cx));
         })
         .detach();
+    }
+
+    pub fn attach(&self, session_id: String) -> Reply<Result<Attached, String>> {
+        self.bridge.attach(session_id)
+    }
+
+    pub fn acknowledge(
+        &self,
+        session_id: String,
+        attention_item_id: String,
+    ) -> Reply<Result<(), String>> {
+        self.bridge.acknowledge(session_id, attention_item_id)
+    }
+
+    /// Ask the daemon to start a session — unless a Quit is being decided,
+    /// when nothing is sent and `None` says so. The bridge answers in order:
+    /// a start queued behind the gate's question would begin a runtime the
+    /// answer does not carry, and Quit would commit over it. Cancel lifts
+    /// the refusal.
+    pub fn start_session(
+        &self,
+        requested: Requested,
+        site: LaunchSite,
+    ) -> Option<Reply<Result<SessionNewResult, String>>> {
+        if self.quit_pending || self.quitting {
+            return None;
+        }
+        Some(self.bridge.start_session(requested, site))
+    }
+
+    /// Continue a session as a new Run, under the same rule as a start: a
+    /// Continue may end in one.
+    pub fn continue_session(
+        &self,
+        session_id: String,
+        shown: Shown,
+        working_directory: Option<PathBuf>,
+    ) -> Option<Reply<Result<Continued, String>>> {
+        if self.quit_pending || self.quitting {
+            return None;
+        }
+        Some(
+            self.bridge
+                .continue_session(session_id, shown, working_directory),
+        )
     }
 
     pub fn select(&mut self, session_id: &str, cx: &mut Context<Self>) {

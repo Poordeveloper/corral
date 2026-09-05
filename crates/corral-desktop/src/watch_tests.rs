@@ -1,5 +1,6 @@
 use super::*;
 
+use corral_client::launch::{LaunchSite, Requested, Shown};
 use corral_client::sessions::Listing;
 use corral_protocol::method::{AttentionCount, AttentionSummaryResult, SessionListResult};
 use gpui::{TestAppContext, VisualTestContext};
@@ -87,6 +88,29 @@ fn request_quit(watch: &Entity<Watch>, cx: &mut TestAppContext) {
 }
 
 const ONE_RUNNING: &str = "1 session will continue running.";
+
+fn start(watch: &Entity<Watch>, cx: &TestAppContext) -> bool {
+    watch
+        .read_with(cx, |watch, _| {
+            watch.start_session(
+                Requested::Command(vec!["sh".to_owned()]),
+                LaunchSite {
+                    working_directory: None,
+                    rows: None,
+                    cols: None,
+                },
+            )
+        })
+        .is_some()
+}
+
+fn continue_session(watch: &Entity<Watch>, cx: &TestAppContext) -> bool {
+    watch
+        .read_with(cx, |watch, _| {
+            watch.continue_session("managed-1".to_owned(), Shown::NotYet, None)
+        })
+        .is_some()
+}
 
 #[test]
 fn only_an_established_status_item_keeps_the_process() {
@@ -205,4 +229,49 @@ fn closing_the_main_window_without_a_status_item_runs_the_gate(cx: &mut TestAppC
     answer_polls(&mut questions, nothing_continuing, &mut visual);
     assert!(quitting(&watch, &visual));
     assert!(!visual.has_pending_prompt());
+}
+
+/// While the gate's question is out, nothing that could start a runtime is
+/// sent: the bridge answers in order, so a start queued behind the question
+/// would begin a session its answer does not carry, and Quit would commit
+/// over it.
+#[gpui::test]
+fn a_pending_quit_refuses_what_could_start_a_runtime(cx: &mut TestAppContext) {
+    let (watch, mut questions) = watch(TrayPresence::Unsupported, cx);
+    answer_polls(&mut questions, nothing_continuing, cx);
+
+    request_quit(&watch, cx);
+    cx.run_until_parked();
+    let Ok(Request::Poll(question)) = questions.try_recv() else {
+        panic!("the gate's question is out");
+    };
+    assert!(!start(&watch, cx));
+    assert!(!continue_session(&watch, cx));
+    assert!(
+        questions.try_recv().is_err(),
+        "nothing queued behind the question"
+    );
+
+    let _ = question.send(nothing_continuing());
+    cx.run_until_parked();
+    assert!(quitting(&watch, cx));
+    assert!(!start(&watch, cx));
+}
+
+/// Cancel lifts the refusal: the next start is sent.
+#[gpui::test]
+fn cancel_lifts_the_refusal(cx: &mut TestAppContext) {
+    let (watch, mut questions) = watch(TrayPresence::Unsupported, cx);
+    request_quit(&watch, cx);
+    answer_polls(&mut questions, one_running, cx);
+    assert!(cx.has_pending_prompt());
+    assert!(!start(&watch, cx));
+
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+
+    assert!(start(&watch, cx));
+    assert!(matches!(questions.try_recv(), Ok(Request::Start { .. })));
+    assert!(continue_session(&watch, cx));
+    assert!(matches!(questions.try_recv(), Ok(Request::Continue { .. })));
 }
