@@ -1,9 +1,12 @@
-# PR9 Plan Grill — structural rulings over the Desktop plan (round 1)
+# PR9 Plan Grill — structural rulings over the Desktop plan (rounds 1–2)
 
-> Status: **structural round closed; plan conditionally accepted**
-> (2026-09-05). The founder read `docs/plans/2026-09-05-pr9-desktop.md`
-> in full and ruled its six decisions, adding a hard constraint to two of
-> them and two plan-level corrections. The plan stays *conditionally
+> Status: **structural frontier cleared; plan conditionally accepted**
+> (2026-09-05). Round 1: the founder read
+> `docs/plans/2026-09-05-pr9-desktop.md` in full and ruled its six
+> decisions, adding a hard constraint to two of them and two plan-level
+> corrections. Round 2 ruled the seven questions those rulings unblocked;
+> one recommendation was overturned (Q8: no raw command in New Session,
+> and the launch grammar's authority stays in corrald). The plan stays *conditionally
 > accepted, pending foundation reconciliation*: once `task/adr-0017-accept`
 > and `task/adr-0017-impl` are on `main`, one reconciliation pass — frame
 > and capability names, the replica's prefix assumptions against the final
@@ -342,6 +345,519 @@ pending foundation reconciliation
 * dependency gate 最终状态与 `gpui = "=0.2.2"` 是否一致。
 
 **如果只是忠实物化，没有新决策，直接把 PR9 plan 从 conditional → accepted，不再 grill。**
+```
+
+# Round 2
+
+Digest of what round 2 froze:
+
+| Q | Ruling |
+|---|---|
+| Q7 | Desktop activates corrald through the same `corral-client::activate` contract as the CLI and TUI; no Desktop-side discovery, endpoint choice, startup policy, or lifetime ownership; closing a window or quitting never stops corrald. Desktop is another client, not a daemon lifecycle authority. |
+| Q8 | **Recommendation overturned.** New Session = Claude Code or Codex + explicit working directory + optional provider arguments under the accepted grammar. No raw command, custom executable, or shell command: `corral new -- <cmd>` was PR3's walking skeleton, never a product promise; a Custom Agent needs its own decisions first. The provider grammar's authority stays in corrald — clients may share an input model, preflight helpers, and typed error rendering, and may reject early; only corrald decides whether a managed launch is valid. |
+| Q9 | Keyboard path: printable text, Enter, Backspace, Tab, Escape, arrows under DECCKM, Ctrl+letter, paste under bracketed paste, Interrupt. No terminal mouse reporting in any encoding; the Desktop's own mouse UI is unaffected. No claim of every keyboard protocol. |
+| Q10 | `Resize` only from a local change of the rendered cell grid, coalesced but prompt at rest; observed daemon geometry (Geometry frames, snapshot size, epochs, other viewers) never echoes back; a host transition counts as local. |
+| Q11 | No terminal selection, highlighting, copy, rectangular or link selection in PR9; paste stays; stated as a limitation. |
+| Q12 | (B) No dev-dependency on `corrald`; cross-process tests launch a validated test-support corrald binary under an isolated test root, inheriting the e2e isolation contract in full (validated binaries, explicit root, fail before spawning without the test-build marker, never canonical endpoint or `~/.corral`, correct under a concurrent `cargo build` elsewhere). Unit tests own the replica; process-boundary tests cover only the public client contract. |
+| Q13 | Legacy fallback under an old daemon: the attachment's last explicitly requested geometry, never labelled daemon-confirmed, no UI fact; a real local cell grid is established and sent before the first legacy snapshot, never a guessed 80×24. With `terminal.geometry.v1` advertised the fallback is forbidden: a snapshot without its Geometry is a desync. |
+
+## Founder rulings, verbatim (round 2)
+
+```text
+这轮我会改 **Q8**，其余基本照收。最重要的是：**PR3 的 generic `corral new -- <cmd>` 当时明确只是 walking-skeleton，不能在第一个正式 Desktop 里悄悄变成"Corral 是通用终端启动器"的产品承诺。** 另外 Q12 要继承之前已经踩过的 e2e 隔离教训。
+
+# PR9 plan grill — round 2 rulings
+
+## Q7 — Desktop daemon activation
+
+接受。
+
+Desktop 与 CLI/TUI 使用同一 activation contract：
+
+Desktop startup
+→ `corral-client::activate`
+→ connect to canonical corrald
+→ if absent and activation is permitted, start the canonical daemon according to ADR 0001
+
+Desktop 不建立第二套：
+
+* daemon discovery
+* endpoint choice
+* startup policy
+* lifetime ownership
+
+Closing a Desktop window:
+
+→ disconnects that client/window
+→ does NOT stop corrald
+
+Quitting the Desktop application:
+
+→ disconnects Desktop-owned clients
+→ does NOT explicitly stop corrald
+
+daemon 是否退出仍由自己的：
+
+* established clients
+* managed runtime ownership
+* idle lifecycle
+
+决定。
+
+PR9 没有 tray，
+所以不要在 Desktop quit 上偷偷引入未来 tray/watchfulness 的生命周期语义。
+
+核心不变量：
+
+Desktop is another corrald client, not a daemon lifecycle authority.
+
+## Q8 — New Session input surface
+
+修改推荐。
+
+接受：
+
+* provider selection
+* working directory
+* provider-specific additional arguments
+
+但 PR9 Desktop **不提供 first-class raw command mode**。
+
+因此 PR9 New Session：
+
+Provider:
+
+* Claude Code
+* Codex
+
+Working directory:
+
+* explicit directory
+
+Advanced arguments:
+
+* optional provider arguments
+* subject to the accepted managed-launch grammar/policy
+
+不提供：
+
+Custom command
+Raw executable
+Arbitrary shell command
+
+理由：
+
+之前的：
+
+`corral new -- <cmd>`
+
+是 PR3 walking-skeleton/runtime harness。
+
+当时已经明确：
+
+它不定义最终 M1 "New Session" product UX。
+
+如果现在 Desktop 把 raw command 放进 provider picker，
+就会把一个测试/底层能力升级成新的产品承诺：
+
+Corral manages arbitrary interactive terminal programs.
+
+这超出了：
+
+Every coding agent. One place.
+
+以及当前 Claude/Codex supported-provider scope。
+
+未来若真实需求证明需要：
+
+Custom Agent / Generic Command
+
+再单独定义它的：
+
+* identity semantics
+* attention semantics
+* title/provider presentation
+* continuation capability
+* support boundary
+
+### Validation ownership
+
+另一个重要修正：
+
+不要把 ADR 0012 的 authoritative provider grammar 从 daemon 搬进
+`corral-client`。
+
+Daemon remains the authority for:
+
+managed launch argument acceptance.
+
+Desktop/CLI 可以共享：
+
+* argument input model
+* UX-side preflight helpers
+* typed rendering of daemon validation errors
+
+但客户端验证不能成为唯一安全边界。
+
+如果目前 CLI 有一份纯客户端重复 validator：
+
+可以提取可共享的 UX/preflight部分，
+
+但：
+
+`session.new`
+→ daemon MUST revalidate using its canonical provider grammar
+
+不能形成：
+
+Desktop validated it, therefore daemon trusts it.
+
+所以 D1 可以增加：
+
+shared launch-form / validation-error presentation
+
+但不要写成：
+
+"move the provider allowlist authority into corral-client."
+
+核心不变量：
+
+Clients may reject bad launch input early.
+Only corrald decides whether a managed provider launch is valid.
+
+## Q9 — keyboard input scope
+
+接受 proposed PR9 set。
+
+Supported keyboard/input behavior:
+
+* printable text
+* Enter
+* Backspace
+* Tab
+* Escape
+* arrow keys
+* Ctrl+letter combinations
+* paste
+* interrupt / Ctrl-C behavior already accepted by the terminal-input path
+
+Arrow encoding follows the replica's current terminal mode where required,
+including DECCKM.
+
+Paste follows bracketed-paste mode where active.
+
+PR9 does NOT implement terminal mouse reporting.
+
+因此暂不支持：
+
+* mouse button reports
+* motion reports
+* wheel-as-terminal-mouse protocol
+* SGR/X10/etc mouse encoding
+
+普通 Desktop UI mouse interaction仍然当然可以用于：
+
+* selecting a session row
+* clicking actions
+* focusing terminal
+* resizing windows
+
+这里只是不把 mouse events 转译给 PTY application。
+
+同样不要因为键盘 scope 看起来简单就声明：
+
+all terminal keyboard protocols supported.
+
+未列入的特殊键可以后续按真实需求增加。
+
+核心原则：
+
+PR9 implements the keyboard path needed for ordinary agent TUIs;
+terminal mouse protocol is a separate capability.
+
+## Q10 — Resize policy
+
+接受。
+
+Desktop sends Resize only as the result of a local terminal-view geometry
+change.
+
+Geometry source:
+
+actual rendered terminal cell grid
+
+not raw pixel dimensions.
+
+Flow:
+
+view pixels/layout change
+→ recompute rows/cols
+→ if cell geometry changed
+→ send Resize
+
+Do not emit Resize merely because:
+
+* daemon reports Geometry
+* a Snapshot carries a different geometry
+* epoch changes
+* another viewer resized the authoritative terminal
+
+Those are observations of daemon truth,
+not local resize intent.
+
+This preserves the already-accepted anti-feedback rule:
+
+server geometry update
+MUST NOT automatically cause resize echo.
+
+Embedded ↔ standalone host transition:
+
+counts as a local presentation geometry change
+
+and may therefore produce one Resize to the new grid dimensions.
+
+Coalesce normal window-resize churn sufficiently that Desktop does not send
+a Resize for every pixel event,
+but the final local cell geometry must be delivered promptly.
+
+Same rows/cols:
+
+→ no Resize
+
+核心不变量：
+
+Only local desired geometry produces a Desktop resize command;
+observed authoritative geometry never echoes itself back.
+
+## Q11 — terminal selection / copy
+
+接受：
+
+no terminal text selection/copy in PR9.
+
+PR9 terminal element owns:
+
+* rendering
+* keyboard input
+* paste
+* cursor/display fidelity
+* control loop
+
+它暂不拥有：
+
+* mouse text selection
+* selection highlighting
+* terminal-to-clipboard copy
+* rectangular selection
+* semantic link selection
+
+Paste remains supported because it is an input capability,
+not evidence that clipboard output is also implemented.
+
+这应该作为明确的 PR9 limitation，
+不要让用户以为 selection 坏了。
+
+M1 completion 或后续 Desktop surface 可以增加 selection/copy，
+不需要 terminal wire change。
+
+核心原则：
+
+PR9 proves graphical See → Know → Control;
+it does not need to become a complete terminal emulator UX in the same PR.
+
+## Q12 — Desktop cross-process test topology
+
+选择 B。
+
+`corral-desktop` MUST NOT dev-depend on `corrald` merely to make tests easy.
+
+Pure replica/state-machine behavior：
+
+→ unit tests inside corral-desktop
+
+Cross-process behavior：
+
+→ launch a real test-support corrald binary under an isolated test root
+
+This preserves production dependency direction:
+
+Desktop/client code consumes public client/protocol contracts,
+not daemon implementation internals.
+
+### Mandatory isolation inheritance
+
+The earlier e2e binary-contamination incident applies here in full.
+
+Desktop e2e harness MUST:
+
+1. use an immutable/validated test-support `corrald` binary;
+
+2. validate any `corral` helper binary too, if used;
+
+3. use an explicit isolated test root;
+
+4. fail before spawning if the expected test-build marker/isolation
+   contract is missing;
+
+5. never fall back to:
+
+   * canonical endpoint
+   * `~/.corral`
+   * user's registry/log/state
+
+6. remain correct even if another shell concurrently runs:
+   `cargo build -p corral`
+   or
+   `cargo build -p corrald`
+
+A wrong binary:
+
+→ test failure
+
+never:
+
+→ production daemon activation
+
+### Test split
+
+Replica unit tests:
+
+* prefix state machine
+* epoch handling
+* poison/resync budget
+* input encoding
+
+Cross-process tests:
+
+* actual hello/capabilities
+* terminal attach
+* Geometry/Palette/Snapshot prefix
+* resync request/response
+* channel termination/reconnect
+* daemon compatibility behavior
+
+Do not duplicate the entire corrald fidelity test suite from the client side.
+
+Only cross the process boundary where the public client contract itself is
+under test.
+
+核心原则：
+
+Tests may run the real daemon;
+client crates must not link against daemon internals.
+
+## Q13 — old daemon without `terminal.geometry.v1`
+
+接受 fallback，
+不增加用户可见 secondary fact。
+
+This is a compatibility mechanism,
+not a product status worth occupying the PR9 UI.
+
+Rules:
+
+### Capability absent
+
+If daemon hello does NOT advertise:
+
+terminal.geometry.v1
+
+Desktop may use:
+
+the last geometry that this Desktop terminal attachment explicitly
+requested
+
+as the legacy replica geometry assumption.
+
+It must NOT internally label that value:
+
+daemon-confirmed authoritative geometry.
+
+### First snapshot problem
+
+There must be a defined requested geometry before the first legacy
+Snapshot is installed.
+
+Therefore on an old-daemon attachment:
+
+Desktop waits until the terminal host has a real local cell geometry,
+then establishes/sends its initial Resize,
+then uses that requested size as the legacy assumption.
+
+Do not fall back to an arbitrary:
+
+80×24
+
+merely because layout was not ready yet.
+
+If no valid local geometry can yet be established:
+
+→ delay installing the terminal replica
+→ do not guess
+
+### Capability present
+
+If daemon advertises:
+
+terminal.geometry.v1
+
+then legacy fallback is forbidden.
+
+Snapshot without required Geometry:
+
+→ protocol desync
+→ do not install
+→ bounded resync policy
+
+Do not say:
+
+"Geometry missing, but we happen to know what size we requested,
+so carry on."
+
+That would defeat ADR 0017's capability contract.
+
+### Multi-viewer consequence
+
+Under an old daemon,
+another viewer can resize after Desktop's request.
+
+Therefore the fallback is intentionally only:
+
+legacy best-effort compatibility
+
+not an authoritative geometry guarantee.
+
+No extra UI label is required because:
+
+* PR9 and daemon normally ship together;
+* compatibility mode is transient;
+* exposing "geometry unconfirmed" is too implementation-specific for the
+  session product surface.
+
+核心不变量：
+
+Legacy fallback may use the client's own explicit geometry assumption;
+a geometry-capable daemon must satisfy the authoritative Geometry contract.
+
+所以这轮里我唯一真正反对的是 **Q8 的"原始命令"**。
+
+之前已经专门裁过一次：
+
+> `corral new -- <cmd>` 是 managed-runtime walking skeleton，不定义最终 New Session 产品。
+
+PR9 是第一个真正会被人"当产品用"的图形界面。如果现在下拉框里出现：
+
+> Claude / Codex / Raw command
+
+那个决策以后很难再说"只是测试 harness"。
+
+我建议 PR9 就非常明确：
+
+> **New Session = Claude or Codex + working directory + advanced provider args.**
+
+另外，provider arg allowlist 也别随着 UI helper 一起从 daemon 权威层搬走。**共享客户端预检可以，最终裁决必须继续在 corrald。**
+
+这轮落完以后，我认为真正的结构性 frontier 已经清空。接下来等 ADR 0017 两个 PR 进 `main`，然后只做一次 plan reconciliation；只要最终 wire/runtime contract 与这两轮裁决一致，就可以把 PR9 plan 正式 `accepted`，不用再 grill。
 ```
 
 ## What this leaves open
