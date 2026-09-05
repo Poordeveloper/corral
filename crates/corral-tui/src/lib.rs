@@ -11,9 +11,10 @@
 //!
 //! `corral` drives this crate: `corral tui` runs the list, and `corral attach`
 //! and `corral new` reach a session through the same attachment the list uses.
-//! What a session is allowed to *say* is `presentation`'s, and the CLI renders
-//! from there too, so the two surfaces cannot contradict each other about the
-//! same session (grill Q2).
+//! What a session is allowed to *say* is `corral_client::presentation`'s, and
+//! the CLI renders from there too, so the two surfaces cannot contradict each
+//! other about the same session (grill Q2); it is re-exported here so the CLI
+//! keeps one door into the terminal surfaces.
 //!
 //! This crate is a client. It renders what `corrald` reports and derives no
 //! state of its own (`AGENTS.md` §Runtime truth).
@@ -32,12 +33,13 @@ mod daemon;
 mod keys;
 mod launch;
 mod list;
-mod presentation;
 mod screen;
 
 pub use attach::{LocalKeys, OpenFailed, RawMode, open};
-pub use launch::{
-    Continued, Requested, Shown, continue_session, requested, start_session, working_directory,
+pub use corral_client::launch::{
+    Continued, Requested, Shown, continue_session, requested, working_directory,
 };
-pub use list::{run, short_id};
-pub use presentation::{MainState, SessionPresentation, present, present_at};
+pub use corral_client::presentation::{MainState, SessionPresentation, present, present_at};
+pub use corral_client::sessions::short_id;
+pub use launch::start_session;
+pub use list::run;

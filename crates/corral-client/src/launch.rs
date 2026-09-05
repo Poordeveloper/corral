@@ -1,20 +1,27 @@
-//! Starting a session: the one request both surfaces make.
+//! Starting and continuing a session: the one request every surface makes.
 //!
-//! `corral new` and the list's `new` differ in what they do with the session
-//! afterwards, not in how they ask for one. Asked twice, the two would drift
-//! on the parts a person never sees — the size the session is born at, the
-//! directory it starts in, whether an id is minted per attempt — and the
-//! divergence would show up as two surfaces starting subtly different
-//! sessions from the same words.
+//! `corral new`, the list's `new` and the Desktop's New Session differ in
+//! what they do with the session afterwards, not in how they ask for one.
+//! Asked three times, the surfaces would drift on the parts a person never
+//! sees — the size the session is born at, the directory it starts in,
+//! whether an id is minted per attempt — and the divergence would show up as
+//! surfaces starting subtly different sessions from the same words.
+//!
+//! Nothing here is the provider grammar's authority. `corrald` revalidates
+//! every `session.new` against ADR 0012 whatever a client checked, and no
+//! client's acceptance is ever the safety boundary (PR9 plan, round 2 Q8):
+//! what a surface may do in advance is refuse what the daemon's hello already
+//! says it cannot serve, and render the daemon's refusal in its own words.
 
-use corral_client::{Connection, RequestError};
+use std::path::{Path, PathBuf};
+
 use corral_protocol::method::{
     self, SessionContinuationParams, SessionNewParams, SessionNewResult, SessionResumeParams,
     SessionResumeResult,
 };
 use corral_protocol::{ErrorCode, ProtocolError};
 
-use crate::attach::Geometry;
+use crate::{Connection, RequestError};
 
 /// What a person asked to start.
 ///
@@ -61,18 +68,28 @@ pub fn requested(words: &[String]) -> Option<Requested> {
 /// What separates Corral's own words from the ones it passes through.
 pub const SEPARATOR: &str = "--";
 
-/// Ask `corrald` to start a session.
+/// Where a session is born: facts about where the person asked from, which
+/// only a surface knows.
 ///
-/// Born at this terminal's size and in this process's directory: both are
-/// facts about where the person asked from, which only a surface knows.
+/// A terminal surface reads both off the terminal it is at; a graphical one
+/// asks. Either way they are preferences the daemon reconciles, never part of
+/// what the command means (`SessionNewParams`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LaunchSite {
+    /// The directory the session starts in. Absent lets the daemon supply
+    /// one; present is never silently replaced.
+    pub working_directory: Option<PathBuf>,
+    /// The size the first attaching client wants, when it has one.
+    pub rows: Option<u16>,
+    pub cols: Option<u16>,
+}
+
+/// Ask `corrald` to start a session.
 pub async fn start_session(
     connection: &mut Connection,
     requested: Requested,
+    site: LaunchSite,
 ) -> Result<SessionNewResult, RequestError> {
-    let geometry = Geometry::of(std::io::stdin());
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|path| path.to_string_lossy().into_owned());
     let (provider, args, argv) = match requested {
         Requested::Provider { name, args } => {
             serves_managed_sessions(connection)?;
@@ -87,7 +104,7 @@ pub async fn start_session(
     // protection against a client that does (ADR 0002, Q13).
     let command_id = uuid::Uuid::new_v4().as_hyphenated().to_string();
 
-    // Unbounded on purpose, unlike the questions this crate asks about state
+    // Unbounded on purpose, unlike the questions a surface asks about state
     // that already exists. Starting a session builds a PTY and spawns a child,
     // which on a loaded machine can take longer than any patience worth
     // having — and a client that gave up would report a failure for a session
@@ -100,9 +117,11 @@ pub async fn start_session(
             argv,
             provider,
             args,
-            cwd,
-            rows: geometry.map(|geometry| geometry.rows),
-            cols: geometry.map(|geometry| geometry.cols),
+            cwd: site
+                .working_directory
+                .map(|path| path.to_string_lossy().into_owned()),
+            rows: site.rows,
+            cols: site.cols,
         })
         .await
 }
@@ -116,7 +135,7 @@ pub async fn continue_session(
     connection: &mut Connection,
     session_id: &str,
     shown: Shown,
-    working_directory: Option<&std::path::Path>,
+    working_directory: Option<&Path>,
     show: &mut dyn FnMut(&str),
 ) -> Result<Continued, RequestError> {
     serves_managed_sessions(connection)?;
@@ -202,7 +221,7 @@ pub async fn continue_session(
 /// for it (Q35). `None` when the process cannot name its own, which refuses
 /// a continuation that needs one.
 #[must_use]
-pub fn working_directory() -> Option<std::path::PathBuf> {
+pub fn working_directory() -> Option<PathBuf> {
     std::env::current_dir().ok()
 }
 
@@ -281,6 +300,15 @@ fn serves_managed_sessions(connection: &Connection) -> Result<(), RequestError> 
 }
 
 /// Whether the daemon named this contract in its hello.
-fn serves(connection: &Connection, capability: &str) -> bool {
+///
+/// The one question a surface asks before offering an action: an action the
+/// daemon cannot serve is absent, not disabled, and never attempted on the
+/// chance that it might work (`AGENTS.md` §Protocol).
+#[must_use]
+pub fn serves(connection: &Connection, capability: &str) -> bool {
     connection.peer().capabilities.contains(capability)
 }
+
+#[cfg(test)]
+#[path = "launch_tests.rs"]
+mod tests;

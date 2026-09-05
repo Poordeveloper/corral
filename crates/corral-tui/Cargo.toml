@@ -14,17 +14,14 @@ corral-protocol = { workspace = true }
 # Already this surface's dependency before the crate existed — the attach loop
 # moved here with it.
 rustix = { workspace = true }
-serde_json = { workspace = true }
 tokio = { workspace = true }
-# A command id for every mutation this surface sends, on the same terms as the
-# CLI's: already in the tree, and hand-rolling a random token from `getrandom`
-# is nobody's job here.
-uuid = { workspace = true }
 
 
 [dev-dependencies]
 # Snapshot coverage for what a person actually sees (workflow §6).
 insta = { workspace = true }
+# Rows in the shapes a daemon sends, for the list's decoding tests.
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

@@ -14,6 +14,9 @@
 use std::ops::RangeInclusive;
 use std::time::{Duration, SystemTime};
 
+use corral_client::launch::requested;
+use corral_client::presentation::{SessionPresentation, present_at};
+use corral_client::sessions::{Listing, short_id};
 use corral_client::{ClientActivationPolicy, Connection};
 use corral_protocol::method::{SessionListItem, SessionListResult};
 
@@ -21,8 +24,6 @@ use crate::ANSWER;
 use crate::attach::{Geometry, LocalKeys, OpenFailed, RawMode};
 use crate::daemon::{Daemon, Unanswered};
 use crate::keys::{Key, Keyboard};
-use crate::launch::requested;
-use crate::presentation::{SessionPresentation, present_at};
 use crate::screen::{Emphasis, Frame, FullScreen};
 
 /// How often the list asks the daemon what it holds.
@@ -109,7 +110,7 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
                 let answered = continue_into(
                     &mut daemon,
                     &session,
-                    crate::launch::Shown::NotYet,
+                    corral_client::launch::Shown::NotYet,
                     &mut keys,
                 )
                 .await;
@@ -121,7 +122,7 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
                 let answered = continue_into(
                     &mut daemon,
                     &session,
-                    crate::launch::Shown::Accepted(revision),
+                    corral_client::launch::Shown::Accepted(revision),
                     &mut keys,
                 )
                 .await;
@@ -148,7 +149,7 @@ pub async fn run(policy: &ClientActivationPolicy, connection: Connection) -> std
 enum Chosen {
     Quit,
     Open(String),
-    New(crate::launch::Requested),
+    New(corral_client::launch::Requested),
     /// Continue a Session as a new Run, and go straight into it.
     Continue(String),
     /// The same, after the person read what the daemon required disclosing
@@ -419,7 +420,7 @@ async fn open(daemon: &mut Daemon<'_>, session_id: &str, keys: &mut LocalKeys) -
 /// Start a session and go straight into it, the way `corral new` does.
 async fn start(
     daemon: &mut Daemon<'_>,
-    requested: crate::launch::Requested,
+    requested: corral_client::launch::Requested,
     keys: &mut LocalKeys,
 ) -> Option<String> {
     let started = {
@@ -464,12 +465,12 @@ async fn start(
 async fn continue_into(
     daemon: &mut Daemon<'_>,
     session: &str,
-    shown: crate::launch::Shown,
+    shown: corral_client::launch::Shown,
     keys: &mut LocalKeys,
 ) -> Answered {
     // The TUI's own working directory, read before the borrow below: client
     // policy, and the only directory this surface may ask for (Q35).
-    let directory = crate::launch::working_directory();
+    let directory = corral_client::launch::working_directory();
     let continued = {
         let connection = match daemon.connection() {
             Ok(connection) => connection,
@@ -477,7 +478,7 @@ async fn continue_into(
         };
         match tokio::time::timeout(
             ANSWER,
-            crate::launch::continue_session(
+            corral_client::launch::continue_session(
                 connection,
                 session,
                 shown,
@@ -501,7 +502,7 @@ async fn continue_into(
     };
 
     match continued {
-        Ok(crate::launch::Continued::Started { started }) => {
+        Ok(corral_client::launch::Continued::Started { started }) => {
             match open(daemon, &started.session_id, keys).await {
                 Some(notice) => Answered::Notice(notice),
                 None => Answered::Nothing,
@@ -509,7 +510,7 @@ async fn continue_into(
         }
         // The words are the daemon's and are shown unchanged; the list only
         // asks the question.
-        Ok(crate::launch::Continued::NeedsDisclosure { text, revision }) => {
+        Ok(corral_client::launch::Continued::NeedsDisclosure { text, revision }) => {
             Answered::Disclose(Confirming {
                 session: session.to_owned(),
                 text,
@@ -523,7 +524,7 @@ async fn continue_into(
     }
 }
 
-/// What one answer to `session.list` produced.
+/// What one answer to `session.list` produced, laid out for this surface.
 struct Listed {
     rows: Vec<Row>,
     /// Sessions a newer daemon described in a shape this build cannot read.
@@ -532,22 +533,20 @@ struct Listed {
 }
 
 fn decode(listed: SessionListResult) -> Listed {
-    let mut rows = Vec::with_capacity(listed.sessions.len());
-    let mut unrenderable = 0;
-
+    let listing = Listing::of(listed);
     // One instant for the whole answer. A row that read the clock for itself
     // would let two facts observed at the same moment print two different
     // ages, which is a listing disagreeing with itself — and the command line
     // renders the same answer from the same projection (grill Q2).
     let now = SystemTime::now();
-    for session in listed.sessions {
-        match serde_json::from_value::<SessionListItem>(session) {
-            Ok(item) => rows.push(Row::of(&item, now)),
-            Err(_) => unrenderable += 1,
-        }
+    Listed {
+        rows: listing
+            .items
+            .iter()
+            .map(|item| Row::of(item, now))
+            .collect(),
+        unrenderable: listing.unreadable,
     }
-
-    Listed { rows, unrenderable }
 }
 
 impl SessionList {
@@ -1047,16 +1046,6 @@ fn draw_row(frame: &mut Frame, row: &Row, selected: bool, geometry: Geometry) {
     for beneath in lines {
         frame.line(Emphasis::Secondary, &format!("    {beneath}"));
     }
-}
-
-/// Enough of an id to read, with the whole thing still the identity.
-///
-/// The same rule the CLI prints under, so the two surfaces name a session the
-/// same way and `corral attach` takes what either of them showed.
-pub fn short_id(session_id: &str) -> &str {
-    session_id
-        .split_once('-')
-        .map_or(session_id, |(head, _)| head)
 }
 
 #[cfg(test)]
