@@ -187,9 +187,16 @@ impl SessionTerminal {
         outbound.send(frame);
     }
 
+    /// Input for the session, in the frames the daemon accepts.
+    fn input(&mut self, bytes: &[u8]) {
+        if let Some(outbound) = &self.outbound {
+            outbound.input(self.replica.epoch(), bytes);
+        }
+    }
+
     /// The accepted terminal representation of Ctrl-C, as input.
     pub fn interrupt(&mut self) {
-        self.send(FrameKind::Input, input::INTERRUPT.to_vec());
+        self.input(input::INTERRUPT);
     }
 
     fn schedule_notify(&mut self, cx: &mut Context<Self>) {
@@ -253,7 +260,7 @@ impl SessionTerminal {
             platform: keystroke.modifiers.platform,
         };
         if let Some(bytes) = input::encode(&press, self.replica.modes()) {
-            self.send(FrameKind::Input, bytes);
+            self.input(&bytes);
             cx.stop_propagation();
         }
     }
@@ -263,7 +270,7 @@ impl SessionTerminal {
             return;
         };
         let bytes = input::paste(&text, self.replica.modes());
-        self.send(FrameKind::Input, bytes);
+        self.input(&bytes);
     }
 
     fn take_focus(&mut self, _: &ClickEvent, window: &mut Window, _cx: &mut Context<Self>) {

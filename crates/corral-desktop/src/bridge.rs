@@ -23,7 +23,9 @@ use corral_client::{
 };
 use corral_protocol::capability;
 use corral_protocol::method::{AttentionSummaryResult, SessionNewResult};
-use corral_protocol::terminal::TerminalFrame;
+use corral_protocol::terminal::{
+    Epoch, FrameKind, MAX_CLIENT_FRAME_BYTES, Sequence, TerminalFrame,
+};
 use futures::channel::{mpsc as foreground, oneshot};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc as background;
@@ -140,6 +142,31 @@ impl Outbound {
     pub fn send(&self, frame: TerminalFrame) -> bool {
         self.0.send(frame).is_ok()
     }
+
+    /// Queue input for the daemon, in frames it accepts. `false` once the
+    /// channel is gone.
+    pub fn input(&self, epoch: Epoch, bytes: &[u8]) -> bool {
+        input_frames(epoch, bytes)
+            .into_iter()
+            .all(|frame| self.send(frame))
+    }
+}
+
+/// Input as the frames a client may send. Input is one byte stream the daemon
+/// writes in frame order, so a paste past the client ceiling crosses as
+/// several frames rather than as the one oversize frame the daemon ends the
+/// channel over (`MAX_CLIENT_FRAME_BYTES`); where a chunk boundary falls is
+/// immaterial to a PTY.
+fn input_frames(epoch: Epoch, bytes: &[u8]) -> Vec<TerminalFrame> {
+    bytes
+        .chunks(MAX_CLIENT_FRAME_BYTES)
+        .map(|chunk| TerminalFrame {
+            kind: FrameKind::Input,
+            epoch,
+            sequence: Sequence(0),
+            payload: chunk.to_vec(),
+        })
+        .collect()
 }
 
 enum Request {
@@ -553,3 +580,7 @@ async fn write_channel(
     }
     let _ = to_daemon.shutdown().await;
 }
+
+#[cfg(test)]
+#[path = "bridge_tests.rs"]
+mod tests;
