@@ -13,12 +13,29 @@ use corral_protocol::method::AttentionSummaryResult;
 
 use crate::bridge::{Capabilities, Polled, Unanswered};
 
+/// The body's word before the daemon has answered at all.
+pub const ASKING: &str = "Asking corrald…";
+
 /// One row: a session the daemon reported, and what this surface may say.
+///
+/// Beside the presentation, three of the daemon's own words are kept as it
+/// said them — origin, execution state, and when the attention state was
+/// entered — for the surfaces that count or age rows rather than read them:
+/// the Quit gate's counts and the tray's projection (`quit`, `tray`). They
+/// are facts, never a presentation, and nothing here interprets them.
 #[derive(Clone, Debug)]
 pub struct Row {
     pub session_id: String,
     pub title: String,
     pub presentation: SessionPresentation,
+    /// `managed`, `discovered`, `history`, or a word this build has none for;
+    /// absent when the daemon does not reliably know.
+    pub origin: Option<String>,
+    /// `running`, `exited`, `unknown`, or a word this build has none for.
+    pub execution_state: String,
+    /// When the daemon's attention state was entered, on its clock, when it
+    /// made a claim.
+    pub attention_since_unix_ms: Option<i64>,
 }
 
 /// Everything the list holds between polls.
@@ -56,6 +73,12 @@ impl SessionList {
                         session_id: item.session_id.clone(),
                         title: item.title.clone(),
                         presentation: present_at(item, now),
+                        origin: item.origin.clone(),
+                        execution_state: item.execution_state.clone(),
+                        attention_since_unix_ms: item
+                            .attention
+                            .as_ref()
+                            .map(|facts| facts.since_unix_ms),
                     })
                     .collect();
                 let previous_index = self.selected_index();
@@ -108,6 +131,18 @@ impl SessionList {
     #[must_use]
     pub fn capabilities(&self) -> Capabilities {
         self.capabilities
+    }
+
+    /// The daemon's counts from the last answer, current or not.
+    #[must_use]
+    pub fn summary(&self) -> Option<&AttentionSummaryResult> {
+        self.summary.as_ref()
+    }
+
+    /// Why the last poll produced no answer, while that is so.
+    #[must_use]
+    pub fn unanswered(&self) -> Option<&Unanswered> {
+        self.unanswered.as_ref()
     }
 
     /// Whether the rows are the daemon's current answer. Nothing is offered
@@ -192,7 +227,7 @@ impl SessionList {
         Some(if self.answered_at.is_some() {
             "No sessions."
         } else {
-            "Asking corrald…"
+            ASKING
         })
     }
 }
