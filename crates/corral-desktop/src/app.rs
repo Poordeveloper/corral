@@ -1,30 +1,31 @@
 //! The main window: every session on the left, the chosen one on the right.
 //!
 //! See every session, know what needs you, take control. The list is what the
-//! daemon last said, polled every second; the pane shows the selected
-//! session's facts, the actions its state and the daemon's capabilities
-//! allow, and — once opened — its terminal. Nothing here decides what a
-//! session is; that is `corral_client::presentation`'s, rendered.
+//! daemon last said, as the process's `Watch` polls it every second; the pane
+//! shows the selected session's facts, the actions its state and the
+//! daemon's capabilities allow, and — once opened — its terminal. Nothing
+//! here decides what a session is; that is `corral_client::presentation`'s,
+//! rendered. Nothing here outlives the window: what must, the `Watch` owns.
 
-use std::rc::Rc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use corral_client::launch::{Continued, Shown, working_directory};
 use corral_client::sessions::short_id;
 use gpui::prelude::*;
 use gpui::{
     AnyView, AnyWindowHandle, App, Bounds, ClickEvent, Context, ElementId, Entity, FocusHandle,
-    KeyBinding, Render, SharedString, StyleRefinement, Subscription, Task, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, actions, div, point, px, size,
+    KeyBinding, Menu, MenuItem, Render, SharedString, StyleRefinement, Subscription,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, point, px, size,
 };
 
 use crate::actions::{NewSessionForm, Offered, Provider};
-use crate::bridge::{Bridge, Polled, Reply, Unanswered};
+use crate::bridge::BRIDGE_STOPPED;
 use crate::disclosure::{self, Disclosure};
-use crate::sessions::{Row, SessionList};
+use crate::sessions::Row;
 use crate::terminal::{Host, SessionTerminal};
 use crate::text_field::TextField;
 use crate::theme;
+use crate::watch::Watch;
 
 actions!(
     corral_desktop,
@@ -59,11 +60,6 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// How often the list asks the daemon what it holds. A client refresh policy
-/// and not a wire contract: a push channel is a protocol addition and not
-/// PR9's (round 1, #3).
-const POLL: Duration = Duration::from_secs(1);
-
 const LIST_WIDTH: f32 = 340.;
 
 enum Overlay {
@@ -80,8 +76,8 @@ struct Opened {
 }
 
 pub struct MainWindow {
-    bridge: Rc<Bridge>,
-    list: SessionList,
+    /// The process this window presents: its list, its bridge, its presence.
+    watch: Entity<Watch>,
     list_focus: FocusHandle,
     opened: Option<Opened>,
     /// What the last action produced, shown until the next one.
@@ -93,20 +89,18 @@ pub struct MainWindow {
     arguments: Entity<TextField>,
     /// An action is in flight; nothing else is offered until it lands.
     busy: bool,
-    /// One poll in flight at a time (round 1, #3).
-    polling: bool,
-    main_window: AnyWindowHandle,
-    _poll: Task<()>,
+    _watch: Subscription,
     _window_closed: Subscription,
 }
 
-/// Open the Desktop's window.
-pub fn open_main_window(bridge: Rc<Bridge>, cx: &mut App) {
+/// Open the main window over the process's Watch. `Watch::ensure_main_window`
+/// is its one caller, so there is one at a time.
+pub fn open_main_window(watch: Entity<Watch>, cx: &mut App) -> Result<AnyWindowHandle, String> {
     let bounds = Bounds {
         origin: point(px(80.), px(80.)),
         size: size(px(1180.), px(760.)),
     };
-    let opened = cx.open_window(
+    cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
                 title: Some("Corral".into()),
@@ -117,40 +111,33 @@ pub fn open_main_window(bridge: Rc<Bridge>, cx: &mut App) {
             ..WindowOptions::default()
         },
         |window, cx| {
-            let handle = window.window_handle();
-            let view = cx.new(|cx| MainWindow::new(bridge, handle, cx));
+            let view = cx.new(|cx| MainWindow::new(watch, cx));
             let focus = view.read(cx).list_focus.clone();
             window.focus(&focus);
             window.activate_window();
             view
         },
-    );
-    if let Err(error) = opened {
-        eprintln!("corral-desktop: the window did not open: {error}");
-        cx.quit();
-    }
+    )
+    .map(AnyWindowHandle::from)
+    .map_err(|error| error.to_string())
+}
+
+/// The application menu and the global Quit: ⌘Q and "Quit Corral" run the
+/// Watch's one gate with or without a window (tray grill Q8).
+pub fn bind_quit(watch: Entity<Watch>, cx: &mut App) {
+    cx.set_menus(vec![Menu {
+        name: "Corral".into(),
+        items: vec![MenuItem::action("Quit Corral", Quit)],
+    }]);
+    cx.on_action(move |_: &Quit, cx| {
+        watch.update(cx, |watch, cx| watch.request_quit(cx));
+    });
 }
 
 impl MainWindow {
-    fn new(bridge: Rc<Bridge>, main_window: AnyWindowHandle, cx: &mut Context<Self>) -> Self {
-        let poll = cx.spawn(async move |this, cx| {
-            loop {
-                match this.update(cx, |this, _| this.begin_poll()) {
-                    Ok(Some(reply)) => {
-                        let polled = answer(reply.await);
-                        if this
-                            .update(cx, |this, cx| this.finish_poll(polled, cx))
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(_) => return,
-                }
-                cx.background_executor().timer(POLL).await;
-            }
-        });
+    fn new(watch: Entity<Watch>, cx: &mut Context<Self>) -> Self {
+        // Every generation the Watch takes is a repaint.
+        let observed = cx.observe(&watch, |_, _, cx| cx.notify());
         let weak = cx.entity().downgrade();
         let window_closed = cx.on_window_closed(move |cx| {
             let _ = weak.update(cx, |this, cx| this.window_closed(cx));
@@ -159,8 +146,7 @@ impl MainWindow {
         let arguments = cx.new(|cx| TextField::new(String::new(), "provider arguments", cx));
 
         Self {
-            bridge,
-            list: SessionList::default(),
+            watch,
             list_focus: cx.focus_handle(),
             opened: None,
             notice: None,
@@ -170,52 +156,23 @@ impl MainWindow {
             directory,
             arguments,
             busy: false,
-            polling: false,
-            main_window,
-            _poll: poll,
+            _watch: observed,
             _window_closed: window_closed,
         }
-    }
-
-    fn begin_poll(&mut self) -> Option<Reply<Result<Polled, Unanswered>>> {
-        if self.polling {
-            return None;
-        }
-        self.polling = true;
-        Some(self.bridge.poll())
-    }
-
-    fn finish_poll(&mut self, polled: Result<Polled, Unanswered>, cx: &mut Context<Self>) {
-        self.polling = false;
-        self.list.take(polled, SystemTime::now());
-        cx.notify();
     }
 
     /// Ask now rather than at the next tick: after something the person did,
     /// the list they are looking at should be current (round 1, #3).
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let Some(reply) = self.begin_poll() else {
-            return;
-        };
-        cx.spawn(async move |this, cx| {
-            let polled = answer(reply.await);
-            let _ = this.update(cx, |this, cx| this.finish_poll(polled, cx));
-        })
-        .detach();
+        self.watch.update(cx, |watch, cx| watch.refresh(cx));
     }
 
+    /// The terminal's own window closed: the pane shows it again. This
+    /// window's own closing is the Watch's rule, not this view's.
     fn window_closed(&mut self, cx: &mut Context<Self>) {
-        let open = cx.windows();
-        if !open.contains(&self.main_window) {
-            // Closing the last window is quitting: the Desktop's clients
-            // disconnect, and corrald's exit stays its own idle lifecycle's
-            // (round 2, Q7).
-            cx.quit();
-            return;
-        }
         if let Some(opened) = &mut self.opened
             && let Some(standalone) = opened.standalone
-            && !open.contains(&standalone)
+            && !cx.windows().contains(&standalone)
         {
             opened.standalone = None;
             opened
@@ -225,9 +182,10 @@ impl MainWindow {
         }
     }
 
-    fn offered(&self) -> Offered {
-        if self.list.is_current() {
-            Offered::by(self.list.capabilities())
+    fn offered(&self, cx: &App) -> Offered {
+        let list = self.watch.read(cx).list();
+        if list.is_current() {
+            Offered::by(list.capabilities())
         } else {
             Offered::default()
         }
@@ -242,29 +200,28 @@ impl MainWindow {
     // ----- actions -----
 
     fn move_up(&mut self, _: &MoveUp, _window: &mut Window, cx: &mut Context<Self>) {
-        self.list.move_selection(-1);
+        self.watch
+            .update(cx, |watch, cx| watch.move_selection(-1, cx));
         self.notice = None;
         cx.notify();
     }
 
     fn move_down(&mut self, _: &MoveDown, _window: &mut Window, cx: &mut Context<Self>) {
-        self.list.move_selection(1);
+        self.watch
+            .update(cx, |watch, cx| watch.move_selection(1, cx));
         self.notice = None;
         cx.notify();
     }
 
     fn select(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        self.list.select(session_id);
+        self.watch
+            .update(cx, |watch, cx| watch.select(session_id, cx));
         self.notice = None;
         cx.notify();
     }
 
-    fn quit(&mut self, _: &Quit, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.quit();
-    }
-
     fn open_selected(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(row) = self.list.selected() else {
+        let Some(row) = self.watch.read(cx).list().selected().cloned() else {
             return;
         };
         // Refused before the request rather than after it: the row already
@@ -281,7 +238,7 @@ impl MainWindow {
     /// Attach, and show the terminal. One attachment at a time in PR9: the
     /// one open before is detached, wherever it was shown.
     fn open(&mut self, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy || !self.list.is_current() {
+        if self.busy || !self.watch.read(cx).list().is_current() {
             return;
         }
         if self.opened_for(&session_id).is_some() {
@@ -292,7 +249,7 @@ impl MainWindow {
         self.busy = true;
         self.notice = None;
         cx.notify();
-        let reply = self.bridge.attach(session_id.clone());
+        let reply = self.watch.read(cx).bridge().attach(session_id.clone());
         cx.spawn_in(window, async move |this, cx| {
             let attached = reply
                 .await
@@ -401,7 +358,7 @@ impl MainWindow {
     }
 
     fn new_session(&mut self, _: &NewSession, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.offered().new_session {
+        if !self.offered(cx).new_session {
             return;
         }
         let form = NewSessionForm::here(self.provider);
@@ -440,7 +397,11 @@ impl MainWindow {
         };
         self.busy = true;
         cx.notify();
-        let reply = self.bridge.start_session(launch.requested, launch.site);
+        let reply = self
+            .watch
+            .read(cx)
+            .bridge()
+            .start_session(launch.requested, launch.site);
         cx.spawn_in(window, async move |this, cx| {
             let started = reply
                 .await
@@ -482,7 +443,7 @@ impl MainWindow {
     }
 
     fn continue_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(row) = self.list.selected() else {
+        let Some(row) = self.watch.read(cx).list().selected().cloned() else {
             return;
         };
         if let Some(refusal) = row.presentation.refuses_continue() {
@@ -503,7 +464,7 @@ impl MainWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.busy || !self.offered().continue_in_corral {
+        if self.busy || !self.offered(cx).continue_in_corral {
             return;
         }
         self.busy = true;
@@ -511,9 +472,11 @@ impl MainWindow {
         cx.notify();
         // This process's own working directory: client policy, the same the
         // CLI and TUI apply, and the directory the disclosure names.
-        let reply = self
-            .bridge
-            .continue_session(session_id.clone(), shown, working_directory());
+        let reply = self.watch.read(cx).bridge().continue_session(
+            session_id.clone(),
+            shown,
+            working_directory(),
+        );
         cx.spawn_in(window, async move |this, cx| {
             let continued = reply
                 .await
@@ -542,7 +505,7 @@ impl MainWindow {
     }
 
     fn acknowledge_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(row) = self.list.selected() else {
+        let Some(row) = self.watch.read(cx).list().selected().cloned() else {
             return;
         };
         let Some(item) = row.presentation.acknowledgeable() else {
@@ -550,12 +513,14 @@ impl MainWindow {
             cx.notify();
             return;
         };
-        if self.busy || !self.offered().acknowledge {
+        if self.busy || !self.offered(cx).acknowledge {
             return;
         }
         self.busy = true;
         let reply = self
-            .bridge
+            .watch
+            .read(cx)
+            .bridge()
             .acknowledge(row.session_id.clone(), item.to_owned());
         cx.spawn(async move |this, cx| {
             let acknowledged = reply
@@ -577,19 +542,21 @@ impl MainWindow {
     // ----- rendering -----
 
     fn render_list(&self, now: SystemTime, cx: &mut Context<Self>) -> impl IntoElement {
-        let offered = self.offered();
-        let selected = self.list.selected().map(|row| row.session_id.clone());
+        let offered = self.offered(cx);
+        let watch = self.watch.read(cx);
+        let list = watch.list();
+        let selected = list.selected().map(|row| row.session_id.clone());
         let mut rows = div()
             .id("rows")
             .flex_1()
             .overflow_y_scroll()
             .flex()
             .flex_col();
-        for row in self.list.rows() {
+        for row in list.rows() {
             let is_selected = selected.as_deref() == Some(row.session_id.as_str());
             rows = rows.child(render_row(row, is_selected, cx));
         }
-        if self.list.unreadable() > 0 {
+        if list.unreadable() > 0 {
             rows = rows.child(
                 div()
                     .px_3()
@@ -597,11 +564,11 @@ impl MainWindow {
                     .text_color(theme::muted())
                     .child(format!(
                         "{} more this build cannot render yet.",
-                        self.list.unreadable()
+                        list.unreadable()
                     )),
             );
         }
-        if let Some(line) = self.list.empty_line() {
+        if let Some(line) = list.empty_line() {
             rows = rows.child(div().px_3().py_2().text_color(theme::muted()).child(line));
         }
 
@@ -619,14 +586,11 @@ impl MainWindow {
             .bg(theme::panel_bg())
             .border_r_1()
             .border_color(theme::border())
-            .child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_size(px(15.))
-                    .child(self.list.heading()),
-            )
-            .when_some(self.list.banner(now), |this, banner| {
+            .child(div().px_3().py_2().text_size(px(15.)).child(list.heading()))
+            .when_some(watch.presence().banner(), |this, banner| {
+                this.child(div().px_3().py_2().text_color(theme::muted()).child(banner))
+            })
+            .when_some(list.banner(now), |this, banner| {
                 this.child(
                     div()
                         .px_3()
@@ -672,14 +636,15 @@ impl MainWindow {
             .p_3()
             .gap_2()
             .overflow_hidden();
-        let Some(row) = self.list.selected() else {
+        let list = self.watch.read(cx).list();
+        let Some(row) = list.selected() else {
             return pane.child(div().text_color(theme::muted()).child("Select a session."));
         };
-        let offered = self.offered();
+        let offered = self.offered(cx);
         let opened = self.opened_for(&row.session_id);
         let attached = opened.is_some_and(|opened| opened.entity.read(cx).is_attached());
         let standalone = opened.is_some_and(|opened| opened.standalone.is_some());
-        let current = self.list.is_current() && !self.busy;
+        let current = list.is_current() && !self.busy;
 
         let mut actions = div().flex().flex_row().flex_wrap().gap_2();
         if current && opened.is_none() && row.presentation.refuses_open().is_none() {
@@ -907,7 +872,6 @@ impl Render for MainWindow {
 
         div()
             .key_context("MainWindow")
-            .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::new_session))
             .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(Self::confirm))
@@ -937,15 +901,7 @@ impl Render for StandaloneHost {
     }
 }
 
-const BRIDGE_STOPPED: &str = "the bridge to corrald stopped";
-
-fn answer(
-    reply: Result<Result<Polled, Unanswered>, futures::channel::oneshot::Canceled>,
-) -> Result<Polled, Unanswered> {
-    reply.unwrap_or_else(|_| Err(Unanswered::Silent(BRIDGE_STOPPED.to_owned())))
-}
-
-fn render_row(row: &Row, selected: bool, cx: &mut Context<MainWindow>) -> impl IntoElement {
+fn render_row(row: &Row, selected: bool, cx: &Context<MainWindow>) -> impl IntoElement {
     let session_id = row.session_id.clone();
     let mut lines = div().flex().flex_col();
     lines = lines.child(div().child(format!("{}  {}", short_id(&row.session_id), row.title)));

@@ -10,12 +10,14 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use corral_client::launch::{LaunchSite, Requested};
 use corral_client::{ClientActivationPolicy, EndpointSelection};
 use corral_desktop::bridge::{Attached, Bridge, Unanswered};
+use corral_desktop::quit::{self, Continuing, Gate};
 use corral_desktop::replica::{Geometry, Replica};
+use corral_desktop::sessions::SessionList;
 use corral_e2e::TestAccount;
 use corral_protocol::terminal::{FrameKind, Sequence, TerminalFrame};
 use futures::StreamExt;
@@ -189,6 +191,35 @@ async fn the_hello_reaches_the_list_and_a_channel_opens_with_the_prefix() {
 /// A daemon that goes away is reported as silent, never as anything else,
 /// and one that comes back answers again without the Desktop restarting.
 /// Through an explicit endpoint nothing is ever started by this client.
+/// The Quit gate counts what the daemon says it started (tray grill Q11): a
+/// session launched through it is `managed` and `running` in its own words,
+/// so one is R = 1 and Quit warns.
+#[tokio::test]
+async fn a_session_the_daemon_started_counts_as_continuing() {
+    let account = TestAccount::new("desktop-quit-gate");
+    let _daemon = account.start_daemon();
+    let bridge = bridge_for(&account);
+
+    let session_id = start_shell(&bridge, &account, "sleep 30").await;
+    let polled = answered(bridge.poll()).await.expect("a poll");
+    let mut list = SessionList::default();
+    list.take(Ok(polled), SystemTime::now());
+
+    assert!(list.is_current());
+    assert!(list.rows().iter().any(|row| row.session_id == session_id));
+    assert_eq!(
+        quit::continuing(list.rows()),
+        Continuing {
+            running: 1,
+            unverified: 0
+        }
+    );
+    let Gate::Warn(warning) = quit::gate(&list) else {
+        panic!("a running session Corral started warns");
+    };
+    assert_eq!(warning.message, "1 session will continue running.");
+}
+
 #[tokio::test]
 async fn a_lost_daemon_is_reported_and_a_restarted_one_answers_again() {
     let account = TestAccount::new("desktop-lost");
