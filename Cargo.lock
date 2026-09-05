@@ -178,8 +178,10 @@ version = "0.0.0"
 dependencies = [
  "corral-protocol",
  "corral-rendezvous",
+ "insta",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -225,7 +227,6 @@ dependencies = [
  "rustix",
  "serde_json",
  "tokio",
- "uuid",
 ]
 
 [[package]]

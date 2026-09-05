@@ -12,9 +12,17 @@ corral-protocol = { workspace = true }
 corral-rendezvous = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+# A command id for every mutation a surface sends: minted where the request is
+# composed, so a retry from any surface carries the same protection.
+uuid = { workspace = true }
 
 [features]
 test-support = ["corral-rendezvous/test-support"]
+
+[dev-dependencies]
+# Snapshot coverage for the words every surface shows (workflow §6); the
+# presentation snapshots moved here with the module.
+insta = { workspace = true }
 
 
 [lints]

@@ -139,7 +139,7 @@ fn typed(line: &[u8]) -> Option<Chosen> {
 #[test]
 fn a_command_typed_after_the_separator_becomes_the_program_and_its_arguments() {
     match typed(b"-- /bin/sh -c  sleep") {
-        Some(Chosen::New(crate::launch::Requested::Command(argv))) => {
+        Some(Chosen::New(corral_client::launch::Requested::Command(argv))) => {
             assert_eq!(argv, ["/bin/sh", "-c", "sleep"]);
         }
         other => panic!("{}", other.map_or("nothing", |_| "something else")),
@@ -166,7 +166,7 @@ fn a_pasted_command_does_not_start_until_enter() {
 
     // And the person's own Enter runs exactly what they pasted.
     match list.act(Key::Enter) {
-        Some(Chosen::New(crate::launch::Requested::Command(argv))) => {
+        Some(Chosen::New(corral_client::launch::Requested::Command(argv))) => {
             assert_eq!(argv, ["/bin/sh", "-c", "sleep"]);
         }
         other => panic!("{}", other.map_or("nothing", |_| "something else")),
@@ -196,7 +196,7 @@ fn a_paste_on_the_list_performs_nothing() {
 #[test]
 fn an_agent_typed_at_the_prompt_becomes_a_provider_request() {
     match typed(b"claude") {
-        Some(Chosen::New(crate::launch::Requested::Provider { name, args })) => {
+        Some(Chosen::New(corral_client::launch::Requested::Provider { name, args })) => {
             assert_eq!(name, "claude");
             assert!(args.is_empty());
         }
@@ -210,7 +210,7 @@ fn an_agent_typed_at_the_prompt_becomes_a_provider_request() {
 fn an_agents_own_arguments_pass_through() {
     for line in [&b"claude --model opus"[..], &b"claude -- --model opus"[..]] {
         match typed(line) {
-            Some(Chosen::New(crate::launch::Requested::Provider { name, args })) => {
+            Some(Chosen::New(corral_client::launch::Requested::Provider { name, args })) => {
                 assert_eq!(name, "claude");
                 assert_eq!(args, ["--model", "opus"]);
             }
@@ -229,7 +229,7 @@ fn an_agents_own_arguments_pass_through() {
 #[test]
 fn an_unrecognised_first_word_is_still_an_agent_request() {
     match typed(b"bash") {
-        Some(Chosen::New(crate::launch::Requested::Provider { name, .. })) => {
+        Some(Chosen::New(corral_client::launch::Requested::Provider { name, .. })) => {
             assert_eq!(name, "bash");
         }
         other => panic!("{}", other.map_or("nothing", |_| "something else")),

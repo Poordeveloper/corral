@@ -1,5 +1,5 @@
 ---
-source: crates/corral-tui/src/presentation_tests.rs
+source: crates/corral-client/src/presentation_tests.rs
 expression: rendered(&item)
 ---
 Running · Status unknown

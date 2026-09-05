@@ -1,8 +1,12 @@
 //! What a surface is entitled to say about a session, decided once.
 //!
-//! Both terminal surfaces render from here — the list and `corral list` —
-//! because one of them contradicting the other about the same session would
-//! be worse than either being wrong alone (grill Q2).
+//! Every surface renders from here — the list, `corral list`, the Desktop —
+//! because one of them contradicting another about the same session would be
+//! worse than either being wrong alone (PR4 grill Q2). It lives in the crate
+//! every surface already depends on for exactly that reason, and it stops at
+//! the vocabulary: it interprets daemon facts into the words `PRODUCT.md` §4
+//! and §8 allow, and owns no layout, no widget, and no inference of its own
+//! (PR9 plan, D1).
 //!
 //! Nothing here derives state. Attention is the daemon's to compute and PR8's
 //! to carry (`AGENTS.md` §Runtime truth); this projects what the daemon

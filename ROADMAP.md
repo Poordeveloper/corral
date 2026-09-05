@@ -68,7 +68,7 @@ PR8  daemon-side Attention Engine; versioned screen-detection manifests
 PR9  GPUI Desktop — the first graphical session/attention/control surface
      (entity-per-terminal; custom Element; embedded/standalone modes;
      pinned gpui rev). May begin once PR5 lands; see the Desktop bar
-     below
+     below. Plan: docs/plans/2026-09-05-pr9-desktop.md
 ```
 
 PR7 carries two release gates at once — discovery coverage and safe
