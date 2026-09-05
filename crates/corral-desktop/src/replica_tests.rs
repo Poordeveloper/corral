@@ -302,3 +302,22 @@ fn geometry_round_trips_through_the_four_wire_bytes() {
     assert_eq!(Geometry::decode(&[1, 2, 3, 4]), Some(geometry));
     assert_eq!(Geometry::decode(&[1, 2, 3]), None);
 }
+
+/// ADR 0017 D3: a checkpoint is omitted when the connection already holds
+/// it, so a screen rebuilt later on the same connection keeps the palette
+/// this connection last received. `None` means unchanged, not default.
+#[test]
+fn a_rebuilt_screen_keeps_the_palette_the_connection_already_received() {
+    let mut replica = Replica::new(PROMISED_BOTH);
+    replica.apply(&geometry(0, 0, 4, 20));
+    replica.apply(&palette(0, 0, "\x1b]4;1;#112233\x07"));
+    replica.apply(&snapshot(0, 0, "red"));
+
+    // Another viewer resized: a new epoch's prefix, without a `Palette`
+    // because this connection already holds the checkpoint.
+    replica.apply(&geometry(1, 0, 4, 30));
+    assert_eq!(replica.apply(&snapshot(1, 0, "still red")), redraw());
+
+    let entry = replica.window().expect("a screen").palette[1];
+    assert_eq!((entry.r, entry.g, entry.b), (0x11, 0x22, 0x33));
+}
