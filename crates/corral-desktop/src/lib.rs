@@ -12,9 +12,12 @@
 //! Everything that can be proved without a window lives in plain modules:
 //! `replica` (the client half of ADR 0003 and ADR 0017), `input` (what a
 //! keystroke means under the replica's modes), `bridge` (the tokio thread
-//! the UI never waits on), `sessions` (the list model) and `actions` (what
-//! the person may ask for, and of which daemon). The views — `app`,
-//! `terminal`, `terminal_element`, `text_field`, `disclosure` — render them.
+//! the UI never waits on), `sessions` (the list model), `actions` (what
+//! the person may ask for, and of which daemon), `tray` (what the status
+//! item shows) and `quit` (what Quit says). `watch` is the process beyond
+//! its windows: the poll, the tray's presence, the Quit gate. The views —
+//! `app`, `terminal`, `terminal_element`, `text_field`, `disclosure` —
+//! render them.
 
 pub mod actions;
 pub mod app;
@@ -29,3 +32,4 @@ pub mod terminal_element;
 pub mod text_field;
 pub mod theme;
 pub mod tray;
+pub mod watch;

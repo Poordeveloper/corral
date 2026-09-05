@@ -48,6 +48,9 @@ pub const LAUNCH: Duration = Duration::from_secs(30);
 /// A question's answer, arriving once. Cancelled if the bridge is gone.
 pub type Reply<T> = oneshot::Receiver<T>;
 
+/// What a question reports when the thread behind its [`Reply`] is gone.
+pub const BRIDGE_STOPPED: &str = "the bridge to corrald stopped";
+
 /// How much of the daemon's output may wait for the window before the socket
 /// stops draining.
 ///

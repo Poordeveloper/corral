@@ -43,6 +43,9 @@ corral-e2e = { workspace = true }
 serde_json = { workspace = true }
 # The bridge's tests await its replies and time them out.
 tokio = { workspace = true }
+# `#[gpui::test]`: a deterministic App on a test platform, for the Watch's
+# window lifecycle and its Quit prompt.
+gpui = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true
