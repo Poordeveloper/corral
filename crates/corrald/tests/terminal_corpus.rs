@@ -86,9 +86,9 @@ fn every_corpus_case_is_consumed_without_panicking() {
 #[test]
 fn every_corpus_case_is_serialized_or_refused_by_name() {
     for (name, bytes) in corpus() {
-        let terminal = consume_all(&bytes, 997);
+        let mut terminal = consume_all(&bytes, 997);
 
-        match encode(&terminal) {
+        match encode(&mut terminal) {
             Ok(snapshot) => assert!(
                 !snapshot.payload().is_empty(),
                 "{name} produced an empty snapshot"
@@ -126,14 +126,14 @@ fn a_parser_panic_poisons_a_screen_instead_of_taking_the_daemon() {
         .map(|(_, bytes)| bytes)
         .unwrap_or_else(|| panic!("{name} is missing from the corpus"));
 
-    let terminal = consume_all(&bytes, 997);
+    let mut terminal = consume_all(&bytes, 997);
 
     assert!(
         terminal.poisoned().is_some(),
         "{name} no longer panics the parser; if upstream fixed it, this test \
          and the containment it guards should be revisited together"
     );
-    let refusal = encode(&terminal).expect_err("a poisoned screen is refused");
+    let refusal = encode(&mut terminal).expect_err("a poisoned screen is refused");
     assert!(
         refusal.to_string().contains("can no longer be read"),
         "{refusal}"
@@ -158,7 +158,7 @@ fn a_poisoned_screen_stays_poisoned() {
 
     assert!(reply.is_empty(), "a poisoned screen answered a query");
     assert!(terminal.poisoned().is_some());
-    assert!(encode(&terminal).is_err());
+    assert!(encode(&mut terminal).is_err());
 }
 
 /// Reflow touches every retained row, and it is a second entrance into the
@@ -182,8 +182,8 @@ fn every_corpus_case_survives_a_reflow() {
 fn a_corpus_case_survives_being_split_anywhere() {
     for (_name, bytes) in corpus() {
         for split in [1_usize, 2, 3, 7, 13] {
-            let terminal = consume_all(&bytes, split);
-            let _ = encode(&terminal);
+            let mut terminal = consume_all(&bytes, split);
+            let _ = encode(&mut terminal);
         }
     }
 }

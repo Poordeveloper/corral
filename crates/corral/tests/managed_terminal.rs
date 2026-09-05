@@ -65,6 +65,22 @@ struct Channel {
     reader: BufReader<UnixStream>,
 }
 
+/// The snapshot a channel opens with, behind the prefix ADR 0017 puts before
+/// it: the geometry (kind 7) first, then a palette checkpoint (kind 8) when
+/// the connection needs one, then the screen (kind 1).
+fn read_snapshot(channel: &mut Channel) -> Option<Vec<u8>> {
+    let (kind, _) = read_frame(channel)?;
+    assert_eq!(kind, 7, "a channel opens with the snapshot's geometry");
+    loop {
+        let (kind, payload) = read_frame(channel)?;
+        match kind {
+            8 => continue,
+            1 => return Some(payload),
+            other => panic!("kind {other} inside the snapshot prefix"),
+        }
+    }
+}
+
 /// Read one terminal frame, waiting up to the settle budget for it.
 fn read_frame(channel: &mut Channel) -> Option<(u8, Vec<u8>)> {
     read_frame_within(channel, SETTLE)
@@ -241,8 +257,7 @@ fn attaching_delivers_the_screen_the_daemon_holds() {
             .to_owned();
 
         let mut channel = open_channel(&account, &token);
-        if let Some((kind, payload)) = read_frame(&mut channel) {
-            assert_eq!(kind, 1, "the first frame on a channel is a snapshot");
+        if let Some(payload) = read_snapshot(&mut channel) {
             seen = String::from_utf8_lossy(&payload).contains("CORRAL-E2E-MARKER");
         }
     }
@@ -364,8 +379,7 @@ fn output_after_attaching_arrives_as_a_delta_without_being_asked_for() {
         .to_owned();
 
     let mut channel = open_channel(&account, &token);
-    let (kind, _) = read_frame(&mut channel).expect("a snapshot");
-    assert_eq!(kind, 1, "the first frame on a channel is a snapshot");
+    read_snapshot(&mut channel).expect("a snapshot");
 
     let payload = b"go\n";
     let mut frame = Vec::new();

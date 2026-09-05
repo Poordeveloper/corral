@@ -200,7 +200,15 @@ async fn bootstrap(
             // over, whether or not it can start one, and a client that must
             // decide whether to show a state at all asks here rather than
             // discovering `method_not_found` in front of a person.
-            let mut capabilities = BTreeSet::from([capability::ATTENTION.to_owned()]);
+            let mut capabilities = BTreeSet::from([
+                capability::ATTENTION.to_owned(),
+                // The terminal channel's snapshot prefix (ADR 0017): every
+                // snapshot is preceded by its geometry, and by a palette
+                // checkpoint when the connection needs one. Unconditional
+                // and daemon-only: the frames are skippable by any client.
+                capability::TERMINAL_GEOMETRY.to_owned(),
+                capability::TERMINAL_PALETTE.to_owned(),
+            ]);
             if state.hook_endpoint_was_bound() {
                 capabilities.insert(capability::MANAGED_SESSIONS.to_owned());
                 // Under the same condition, not a second one: continuing a

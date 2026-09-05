@@ -259,6 +259,9 @@ pub fn apply(frame: &TerminalFrame, out: &mut impl Write) -> std::io::Result<()>
         // Kinds only a client sends, and kinds this build does not know. Both
         // are skipped: the length prefix already said how much to drop.
         FrameKind::Input | FrameKind::Resize | FrameKind::ResyncRequest => Ok(()),
+        // The host terminal has a size and a palette of its own; a snapshot
+        // prefix is for a client that keeps a replica (ADR 0017 D5).
+        FrameKind::Geometry | FrameKind::Palette => Ok(()),
         // The skippability rule has one owner, in the protocol crate, so a
         // receiver added later cannot quietly decide it differently.
         other if other.is_skippable() => Ok(()),

@@ -68,6 +68,12 @@ pub mod capability {
     /// `attention.acknowledge`: the daemon derives the five-state main
     /// status and clients render it (ADR 0015).
     pub const ATTENTION: &str = "attention.v1";
+    /// Every snapshot on a terminal channel is preceded by a `Geometry` frame
+    /// (ADR 0017 D1). Advertised by the daemon; a client advertises nothing.
+    pub const TERMINAL_GEOMETRY: &str = "terminal.geometry.v1";
+    /// A `Palette` checkpoint precedes a snapshot whenever the effective
+    /// palette differs from what the connection last received (ADR 0017 D3).
+    pub const TERMINAL_PALETTE: &str = "terminal.palette.v1";
 }
 
 /// What a connection is for.

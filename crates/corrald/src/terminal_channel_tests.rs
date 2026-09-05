@@ -183,6 +183,14 @@ mod under_load {
         errors: Vec<String>,
         replica: AuthoritativeTerminal,
         eof: bool,
+        /// The geometry the last `Geometry` frame announced, with its stamp;
+        /// the next snapshot is built at that size (ADR 0017 D1).
+        geometry: Option<(PtyGeometry, (Epoch, Sequence))>,
+        /// The palette checkpoint the last `Palette` frame carried, with its
+        /// stamp, applied to the replica before the snapshot (ADR 0017 D3).
+        palette: Option<(Vec<u8>, (Epoch, Sequence))>,
+        /// The kinds seen, in order, for prefix assertions.
+        kinds: Vec<(FrameKind, (Epoch, Sequence))>,
     }
 
     impl Served {
@@ -232,15 +240,25 @@ mod under_load {
                 errors: Vec::new(),
                 replica: AuthoritativeTerminal::new(GEOMETRY),
                 eof: false,
+                geometry: None,
+                palette: None,
+                kinds: Vec::new(),
             }
         }
 
         /// The daemon's own screen, read through a fresh replica of its
         /// snapshot: the same bytes any newly attached client would build from.
         fn authoritative_cells(&self) -> Vec<qwertty_term_vt::snapshot::SnapshotRow> {
+            self.authoritative_cells_at(GEOMETRY)
+        }
+
+        fn authoritative_cells_at(
+            &self,
+            geometry: PtyGeometry,
+        ) -> Vec<qwertty_term_vt::snapshot::SnapshotRow> {
             let attachment = self.handle.attach().expect("the session answers");
             let snapshot = attachment.snapshot.expect("the screen encodes");
-            let mut fresh = AuthoritativeTerminal::new(GEOMETRY);
+            let mut fresh = AuthoritativeTerminal::new(geometry);
             let _ = fresh.consume(b"\x1b[H\x1b[2J");
             let _ = fresh.consume(snapshot.payload());
             fresh
@@ -281,11 +299,34 @@ mod under_load {
 
         fn account(&mut self, frame: &TerminalFrame) {
             let here = (frame.epoch, frame.sequence);
+            self.kinds.push((frame.kind, here));
             match frame.kind {
+                FrameKind::Geometry => {
+                    let rows = u16::from_be_bytes([frame.payload[0], frame.payload[1]]);
+                    let cols = u16::from_be_bytes([frame.payload[2], frame.payload[3]]);
+                    self.geometry = Some((PtyGeometry::expect_valid(rows, cols), here));
+                }
+                FrameKind::Palette => {
+                    self.palette = Some((frame.payload.clone(), here));
+                }
                 FrameKind::Snapshot => {
                     self.snapshots += 1;
-                    self.replica = AuthoritativeTerminal::new(GEOMETRY);
+                    let (geometry, stamp) = self
+                        .geometry
+                        .expect("a snapshot is preceded by its geometry");
+                    assert_eq!(
+                        stamp, here,
+                        "the geometry and its snapshot are one state point"
+                    );
+                    self.replica = AuthoritativeTerminal::new(geometry);
                     let _ = self.replica.consume(b"\x1b[H\x1b[2J");
+                    if let Some((checkpoint, stamp)) = self.palette.take() {
+                        assert_eq!(
+                            stamp, here,
+                            "the palette and its snapshot are one state point"
+                        );
+                        let _ = self.replica.consume(&checkpoint);
+                    }
                     let _ = self.replica.consume(&frame.payload);
                     // The first delta after a snapshot carries the snapshot's
                     // own sequence (the spike's client note).
@@ -589,5 +630,106 @@ mod under_load {
             client.eof
         );
         assert!(client.errors.is_empty(), "{:?}", client.errors);
+    }
+
+    /// ADR 0017 D1/D4: a snapshot is preceded by its geometry, both at one
+    /// state point; a resync repeats the prefix; a session that never touched
+    /// its palette sends no checkpoint.
+    #[tokio::test]
+    async fn a_snapshot_is_preceded_by_its_geometry_and_a_resync_repeats_it() {
+        let served = served("prefix", "printf 'ready'; sleep 60");
+        let mut client = served.open().await;
+        assert!(client.read_until("ready", Duration::from_secs(5)).await);
+
+        client.send(FrameKind::ResyncRequest, Vec::new()).await;
+        assert!(client.read_for(Duration::from_millis(500)).await >= 2);
+
+        let kinds: Vec<FrameKind> = client.kinds.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(client.snapshots, 2, "the resync yielded a snapshot");
+        assert!(
+            !kinds.contains(&FrameKind::Palette),
+            "an untouched palette sent a checkpoint"
+        );
+        let snapshots: Vec<usize> = kinds
+            .iter()
+            .enumerate()
+            .filter(|(_, kind)| **kind == FrameKind::Snapshot)
+            .map(|(i, _)| i)
+            .collect();
+        for at in snapshots {
+            assert_eq!(
+                kinds[at - 1],
+                FrameKind::Geometry,
+                "a snapshot without its geometry at {at}"
+            );
+            assert_eq!(
+                client.kinds[at - 1].1,
+                client.kinds[at].1,
+                "prefix and snapshot stamped apart"
+            );
+        }
+        assert_eq!(client.geometry.map(|(g, _)| g), Some(GEOMETRY));
+    }
+
+    /// ADR 0017 D1: a viewer that did not ask for the resize learns the new
+    /// size from the prefix, not from a guess.
+    #[tokio::test]
+    async fn the_other_viewer_learns_a_resize_from_the_geometry_frame() {
+        let served = served("other-viewer", "printf 'ready'; sleep 60");
+        let mut bystander = served.open().await;
+        let mut resizer = served.open().await;
+        assert!(bystander.read_until("ready", Duration::from_secs(5)).await);
+        assert!(resizer.read_until("ready", Duration::from_secs(5)).await);
+
+        resizer
+            .send(
+                FrameKind::Resize,
+                super::encode_geometry(PtyGeometry::expect_valid(30, 100)),
+            )
+            .await;
+        assert!(bystander.read_for(Duration::from_millis(700)).await >= 2);
+
+        assert_eq!(
+            bystander.snapshots, 2,
+            "the bystander was not resynced by the epoch change"
+        );
+        assert_eq!(
+            bystander.geometry.map(|(g, _)| g),
+            Some(PtyGeometry::expect_valid(30, 100)),
+            "the bystander's replica is not at the authoritative size"
+        );
+        let cells = bystander.visible_cells();
+        assert_eq!(cells.len(), 30);
+        assert_eq!(cells[0].cells.len(), 100);
+        assert_eq!(
+            cells,
+            served.authoritative_cells_at(PtyGeometry::expect_valid(30, 100))
+        );
+    }
+
+    /// ADR 0017 D3: a palette the session changed reaches a viewer that
+    /// attaches afterwards, as a checkpoint before its snapshot.
+    #[tokio::test]
+    async fn a_changed_palette_reaches_a_later_viewer_as_a_checkpoint() {
+        let served = served(
+            "palette",
+            "printf '\\033]4;1;rgb:12/34/56\\007\\033[31mred\\033[0m ready'; sleep 60",
+        );
+        // Let the child print before attaching, so the change is history to
+        // this viewer, not a delta it saw.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let mut client = served.open().await;
+        assert!(client.read_until("ready", Duration::from_secs(5)).await);
+
+        let kinds: Vec<FrameKind> = client.kinds.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(
+            &kinds[..3],
+            &[FrameKind::Geometry, FrameKind::Palette, FrameKind::Snapshot],
+            "the prefix was not geometry, palette, snapshot: {kinds:?}"
+        );
+        let daemon = served.handle.attach().expect("answers").palette;
+        let replica = crate::runtime::PaletteCheckpoint::of(client.replica.terminal().unwrap());
+        assert_eq!(replica, daemon, "the replica's palette is not the daemon's");
+        assert_ne!(replica, crate::runtime::PaletteCheckpoint::BASELINE);
     }
 }

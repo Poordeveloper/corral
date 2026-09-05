@@ -65,6 +65,14 @@ pub enum FrameKind {
     ResyncRequest,
     /// The daemon cannot serve this channel any further.
     ChannelError,
+    /// The authoritative geometry of the snapshot that follows it: rows then
+    /// columns, big-endian, the bytes a `Resize` already uses. Sent by the
+    /// daemon before every snapshot on a connection (ADR 0017 D1).
+    Geometry,
+    /// A checkpoint of the effective palette at the snapshot point that
+    /// follows it, as the OSC sequences a replica applies; sent only when it
+    /// differs from what this connection last received (ADR 0017 D3).
+    Palette,
     /// A kind this build does not know.
     ///
     /// Carried rather than rejected: a peer that learns a new frame kind must
@@ -96,6 +104,8 @@ impl FrameKind {
             Self::Resize => 4,
             Self::ResyncRequest => 5,
             Self::ChannelError => 6,
+            Self::Geometry => 7,
+            Self::Palette => 8,
             Self::Unknown(raw) => raw.as_byte(),
         }
     }
@@ -108,6 +118,8 @@ impl FrameKind {
             4 => Self::Resize,
             5 => Self::ResyncRequest,
             6 => Self::ChannelError,
+            7 => Self::Geometry,
+            8 => Self::Palette,
             other => Self::Unknown(UnassignedKind(other)),
         }
     }

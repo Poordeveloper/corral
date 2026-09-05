@@ -13,9 +13,9 @@ fn terminal_with(lines: usize) -> AuthoritativeTerminal {
 
 #[test]
 fn a_snapshot_of_a_fresh_terminal_carries_no_history_and_says_so() {
-    let terminal = AuthoritativeTerminal::new(GEOMETRY);
+    let mut terminal = AuthoritativeTerminal::new(GEOMETRY);
 
-    let snapshot = encode(&terminal).expect("a fresh screen encodes");
+    let snapshot = encode(&mut terminal).expect("a fresh screen encodes");
 
     assert_eq!(snapshot.included_scrollback_rows(), 0);
     assert!(!snapshot.history_truncated_before());
@@ -25,9 +25,9 @@ fn a_snapshot_of_a_fresh_terminal_carries_no_history_and_says_so() {
 /// carries all of it and truthfully reports nothing was left out.
 #[test]
 fn a_snapshot_carries_the_history_it_has_when_it_fits() {
-    let terminal = terminal_with(100);
+    let mut terminal = terminal_with(100);
 
-    let snapshot = encode(&terminal).expect("the screen encodes");
+    let snapshot = encode(&mut terminal).expect("the screen encodes");
 
     assert!(
         snapshot.included_scrollback_rows() > 0,
@@ -42,9 +42,9 @@ fn a_snapshot_carries_the_history_it_has_when_it_fits() {
 /// carries (ADR 0003 D6, D7).
 #[test]
 fn history_beyond_the_row_target_is_omitted_and_declared() {
-    let terminal = terminal_with(SNAPSHOT_SCROLLBACK_ROWS + 500);
+    let mut terminal = terminal_with(SNAPSHOT_SCROLLBACK_ROWS + 500);
 
-    let snapshot = encode(&terminal).expect("the screen encodes");
+    let snapshot = encode(&mut terminal).expect("the screen encodes");
 
     assert_eq!(
         snapshot.included_scrollback_rows(),
@@ -64,7 +64,7 @@ fn the_title_the_serializer_omits_is_emitted_by_corral() {
     let mut terminal = AuthoritativeTerminal::new(GEOMETRY);
     let _ = terminal.consume(b"\x1b]2;deploying\x07working\r\n");
 
-    let snapshot = encode(&terminal).expect("the screen encodes");
+    let snapshot = encode(&mut terminal).expect("the screen encodes");
 
     let payload = snapshot.payload();
     assert!(
@@ -80,9 +80,9 @@ fn the_title_the_serializer_omits_is_emitted_by_corral() {
 /// (ADR 0003 D4).
 #[test]
 fn a_snapshot_does_not_carry_the_palette() {
-    let terminal = terminal_with(10);
+    let mut terminal = terminal_with(10);
 
-    let snapshot = encode(&terminal).expect("the screen encodes");
+    let snapshot = encode(&mut terminal).expect("the screen encodes");
 
     assert!(
         !snapshot
@@ -117,7 +117,7 @@ fn an_approved_large_geometry_extreme_stays_far_below_the_ceiling() {
         let _ = terminal.consume(b"\r\n");
     }
 
-    let snapshot = encode(&terminal).expect("a legal extreme still encodes");
+    let snapshot = encode(&mut terminal).expect("a legal extreme still encodes");
 
     // Measured at 1,578,123 bytes when this landed — a tenth of the ceiling,
     // and half what the ADR's sizing rationale estimated. The assertion is
@@ -141,12 +141,12 @@ fn an_approved_large_geometry_extreme_stays_far_below_the_ceiling() {
 /// spend seconds and hundreds of megabytes to exercise the same branch.
 #[test]
 fn a_viewport_past_the_ceiling_is_refused_rather_than_truncated() {
-    let terminal = terminal_with(50);
-    let viewport_only = encode_within(&terminal, SnapshotBudget::of(0, usize::MAX))
+    let mut terminal = terminal_with(50);
+    let viewport_only = encode_within(&mut terminal, SnapshotBudget::of(0, usize::MAX))
         .expect("the viewport alone encodes");
     let impossible = SnapshotBudget::of(0, viewport_only.encoded_bytes() - 1);
 
-    let error = encode_within(&terminal, impossible).expect_err("the viewport cannot fit");
+    let error = encode_within(&mut terminal, impossible).expect_err("the viewport cannot fit");
 
     assert!(matches!(
         error,
@@ -162,17 +162,17 @@ fn a_viewport_past_the_ceiling_is_refused_rather_than_truncated() {
 /// whole — the degradation order ADR 0003 D8 fixes.
 #[test]
 fn the_oldest_scrollback_is_sacrificed_before_the_viewport() {
-    let terminal = terminal_with(500);
-    let generous = encode(&terminal).expect("the screen encodes");
+    let mut terminal = terminal_with(500);
+    let generous = encode(&mut terminal).expect("the screen encodes");
     assert!(generous.included_scrollback_rows() > 0);
 
-    let viewport_only = encode_within(&terminal, SnapshotBudget::of(0, usize::MAX))
+    let viewport_only = encode_within(&mut terminal, SnapshotBudget::of(0, usize::MAX))
         .expect("the viewport alone encodes");
     // A budget that cannot hold the full history but comfortably holds the
     // viewport: trimming must land between the two, never refuse.
     let tight = SnapshotBudget::of(viewport_only.encoded_bytes() + 64, usize::MAX);
 
-    let trimmed = encode_within(&terminal, tight).expect("trimming succeeds");
+    let trimmed = encode_within(&mut terminal, tight).expect("trimming succeeds");
 
     assert!(
         trimmed.included_scrollback_rows() < generous.included_scrollback_rows(),
@@ -197,7 +197,7 @@ fn a_ceiling_refusal_names_the_ceiling_that_applied() {
     let _ = terminal.consume(b"a screen with something on it\r\n");
     let tiny = SnapshotBudget::of(1, 8);
 
-    let refusal = encode_within(&terminal, tiny).expect_err("a viewport past the ceiling");
+    let refusal = encode_within(&mut terminal, tiny).expect_err("a viewport past the ceiling");
 
     assert!(
         refusal.to_string().contains("8-byte ceiling"),

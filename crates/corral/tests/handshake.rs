@@ -134,7 +134,15 @@ fn the_daemon_advertises_the_contracts_it_serves() {
 
     assert_eq!(
         response["outcome"]["result"]["capabilities"],
-        json!(["attention.v1", "history-sessions.v1", "managed-sessions"]),
+        json!([
+            "attention.v1",
+            "history-sessions.v1",
+            "managed-sessions",
+            // The terminal snapshot prefix (ADR 0017): announced whenever
+            // the daemon serves at all, since the frames are skippable.
+            "terminal.geometry.v1",
+            "terminal.palette.v1",
+        ]),
     );
 }
 
