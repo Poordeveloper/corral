@@ -101,6 +101,53 @@ fn a_stream_survives_an_unknown_kind_between_known_ones() {
     assert_eq!(payloads, vec![b"before".to_vec(), b"after".to_vec()]);
 }
 
+/// The two kinds ADR 0017 assigns, decoded by the build that predates them:
+/// a `Geometry` (7) with its four-byte payload and a `Palette` (8) carrying
+/// OSC text are unknown, skippable, consumed exactly, and leave the snapshot
+/// after them readable. Run on the pre-ADR decoder as the acceptance check
+/// its grill required (docs/decisions/2026-09-05-adr-0017-grill.md Q5).
+#[test]
+fn the_geometry_and_palette_kinds_are_skipped_by_a_decoder_that_predates_them() {
+    let geometry = frame(FrameKind::from_byte(7), &[0, 30, 0, 100])
+        .encode()
+        .expect("encode");
+    let palette = frame(
+        FrameKind::from_byte(8),
+        b"\x1b]4;1;rgb:12/34/56\x07\x1b]10;rgb:ff/ff/ff\x07",
+    )
+    .encode()
+    .expect("encode");
+    let snapshot = frame(FrameKind::Snapshot, b"a screen")
+        .encode()
+        .expect("encode");
+    let mut stream = Vec::new();
+    stream.extend_from_slice(&geometry);
+    stream.extend_from_slice(&palette);
+    stream.extend_from_slice(&snapshot);
+
+    let mut offset = 0;
+    let mut seen = Vec::new();
+    while let Some((decoded, consumed)) =
+        TerminalFrame::decode_from_daemon(&stream[offset..]).expect("decode")
+    {
+        seen.push((
+            decoded.kind.as_byte(),
+            decoded.kind.is_skippable(),
+            consumed,
+        ));
+        offset += consumed;
+    }
+    assert_eq!(
+        seen,
+        vec![
+            (7, true, geometry.len()),
+            (8, true, palette.len()),
+            (FrameKind::Snapshot.as_byte(), false, snapshot.len()),
+        ]
+    );
+    assert_eq!(offset, stream.len(), "the stream stayed frame-synchronised");
+}
+
 /// Every byte is either an assigned kind that round-trips, or an unknown one
 /// that stays unknown. Nothing in between: a kind that re-encoded as a
 /// different one would be a frame that lies about itself.

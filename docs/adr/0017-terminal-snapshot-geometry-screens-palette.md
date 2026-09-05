@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 read_when:
   - building or changing a client that keeps its own terminal replica (Desktop, Mobile, Web)
   - changing what a terminal snapshot carries, or the frames around it
@@ -7,12 +7,16 @@ read_when:
   - a viewer that did not ask for a resize receives a new epoch
 ---
 
-> Proposed 2026-09-05, commissioned by `docs/decisions/2026-09-04-pr9-spike-grill.md`
-> Q7. Three protocol-completeness requirements the PR9 replica spike
-> exposed (`docs/references/2026-09-04-pr9-gpui-integration-spike.md`,
-> findings S3, S4, S5). Extends ADR 0003; changes none of its decisions.
-> Compatibility-facing Class C: nothing below merges before acceptance.
-> Until then the daemon and the TUI behave as ADR 0003 alone describes.
+> Accepted 2026-09-05. Proposed the same day, commissioned by
+> `docs/decisions/2026-09-04-pr9-spike-grill.md` Q7; ruled and corrected
+> in `docs/decisions/2026-09-05-adr-0017-grill.md` (Q2's budget order and
+> Q3's send condition are the founder's, not the proposal's), and accepted
+> once that record's Q5 check passed on the pre-ADR decoder. Three
+> protocol-completeness requirements the PR9 replica spike exposed
+> (`docs/references/2026-09-04-pr9-gpui-integration-spike.md`, findings
+> S3, S4, S5). Extends ADR 0003; changes none of its decisions. The
+> implementation is a standalone high-consequence Class B PR that precedes
+> PR9 planning.
 
 # ADR 0017 — Terminal snapshot geometry, dual-screen state, and palette transport
 
@@ -60,6 +64,13 @@ epoch and sequence of the snapshot it precedes. The daemon sends it
 resync, reflow — so a replica is always built at the size the snapshot was
 minted for, whoever caused the epoch.
 
+**Snapshot anchor.** `Geometry(E, N)`, `Palette(E, N)` when present, and
+`Snapshot(E, N)` describe one recoverable state checkpoint: the terminal's
+state at epoch `E`, position `N`. That is what "the same stamp" means.
+Physical frame ordering on the transport is untouched — the stamp is the
+snapshot's state position, not a transport frame number — and nothing here
+weakens the existing sequencing invariant of the channel.
+
 Not a field inside the snapshot payload: the payload is opaque ANSI a
 client writes straight to its replica, and an old client would write four
 bytes of binary into its terminal. Not a reuse of `Resize`: that kind means
@@ -73,10 +84,17 @@ skipped. Behaviour unchanged.
 
 **New client, old daemon.** No `Geometry` arrives before the snapshot. The
 client must not infer geometry from a frame's absence: the daemon's hello
-advertises `terminal.geometry.v1`, and a client that does not see it keeps
-today's rule — its replica takes the size it last asked for. A client that
-sees the capability and then a `Snapshot` without a preceding `Geometry` in
-the same epoch treats the stream as desynchronised and requests a resync.
+advertises `terminal.geometry.v1`, and a client that does not see it may
+fall back to today's rule — its replica takes the size it last asked for —
+as legacy behaviour only, never presented as daemon-confirmed geometry;
+with several viewers on an old daemon that assumption can already be
+stale. A client that sees the capability and then a `Snapshot` without the
+`Geometry` of that snapshot point treats the stream as desynchronised and
+protocol-incomplete: it does not install the snapshot as authoritative, and
+requests a resync.
+
+Invariant: every geometry-capable snapshot tells a fresh replica what size
+of terminal state it is reconstructing.
 
 ## D2 — A snapshot carries both screens when the alternate is active
 
@@ -86,39 +104,69 @@ screen's contents, then the extras ADR 0003 D3 lists. A replica that later
 sees `?1049l` in a delta restores the primary screen the daemon has.
 
 ADR 0003 D3's list gains one item: *the primary screen preserved behind an
-active alternate, and which screen is active*. D7's budgets apply to the
-two screens together: the primary screen counts against the row target,
-history behind it is omitted before the primary screen is, and the primary
-screen is omitted — recorded as `history_truncated_before`-style fact, not
-silently — before the alternate is, because the alternate is what the
-person is looking at.
+active alternate, and which screen is active*.
+
+**What may degrade and what may not.** While the alternate screen is
+active, both current viewports — the complete primary viewport and the
+complete alternate viewport — and the active-screen identity are required
+state of a successful snapshot; histories are optional. D7's budget
+therefore degrades in this order: the oldest history behind the primary
+screen first, then any other optional history under the accepted policy,
+and the two viewports are retained. If the two viewports together cannot
+fit under the hard ceiling, the snapshot fails with a typed error — the
+existing `ViewportExceedsCeiling` shape, extended to say which screens —
+the daemon stays healthy, and no partial dual-screen snapshot is called
+successful. A snapshot that knowingly omitted the screen the next `?1049l`
+will expose would be claiming a recoverability it does not have.
 
 No capability, no new frame: the payload is still ANSI every client already
 replays. An old client attached to a new daemon simply has a correct
 primary screen for the first time.
 
-**Mechanism note, not a decision.** qwertty-term-vt 0.4.0 formats the
-*active* screen (`Terminal::format_content`); its per-screen entry point is
-private. The implementation either lands a one-line upstream exposure or
-formats the primary screen through the same path with the screen set
-switched for the duration of the mint on the screen thread that owns it.
-Either is contained in `runtime/snapshot.rs`; neither changes this
-decision.
+**Mechanism.** qwertty-term-vt 0.4.0 formats the *active* screen
+(`Terminal::format_content`); its per-screen entry point is private. The
+primary screen is formatted on the screen thread that owns the emulator
+as an implementation-local, formatting-only operation. It must not emit a
+delta, advance the epoch or the state sequence, fire a resize or
+screen-change callback, change the externally visible active screen, leave
+cursor or mode state different after the mint than before, or be visible
+to any subscriber; a guard restores the prior state so an early error or
+panic cannot leave the wrong screen active. The regression compares the
+authoritative terminal's state before and after a mint on every dimension
+qwertty and Corral own. If the public screen switch cannot meet that, the
+implementation uses a bounded local adapter exposing the formatter rather
+than a semantically mutating switch. An upstream exposure remains a
+desirable follow-up and never a correctness dependency.
 
 ## D3 — The palette rides on its own frame, only when it is not the default
 
-A new frame kind, `Palette` (number 8), daemon → client, payload the ANSI
-the formatter's `palette` extra already produces (OSC 4 per changed entry
-and OSC 10/11 for the dynamic foreground and background), stamped like
-`Geometry`. Sent **before a `Snapshot`**, after `Geometry`, **only when the
-screen's palette differs from the built-in default**; and again whenever a
-later snapshot's palette differs from what this connection was last sent.
-A connection therefore carries the palette at most once per change, and
-most sessions — which never touch it — carry nothing, which is what D4 of
-ADR 0003 wanted when it measured 5 531 bytes against a five-byte screen.
+A new frame kind, `Palette` (number 8), daemon → client, stamped like
+`Geometry`. It is a **checkpoint of the effective palette** at the snapshot
+point: the ANSI the formatter's `palette` extra produces (OSC 4 per entry,
+OSC 10/11 for the dynamic foreground and background), and an explicit
+reset form (OSC 104/110/111, or the default entries spelled out) when the
+effective palette is the default and a reset is what the receiver needs.
+
+**When it is sent.** Every connection begins at a defined baseline: the
+default palette. For each snapshot bundle the daemon compares the current
+effective palette — semantic state, not formatter bytes — with the
+checkpoint this connection is known to have received, and sends `Palette`
+before the `Snapshot` when they differ: default → custom, custom A →
+custom B, and custom → default, for which the reset form exists. It may be
+omitted when the connection's checkpoint already equals the current
+palette — including the common case of a session that never touched it,
+which is what ADR 0003 D4 wanted when it measured 5 531 bytes against a
+five-byte screen. "Send only when the palette is not the default" was
+proposed and rejected: a connection that once received a custom palette,
+then lost the reset delta and resynced, would keep stale colours.
 
 Palette changes between snapshots need no frame: they are bytes in the
-deltas, and a replica applies them as the daemon did.
+deltas, and a replica applies them as the daemon did. The frame exists so
+that an attach or resync checkpoint is self-consistent even when earlier
+deltas cannot be trusted.
+
+Invariant: a successful resync never depends on the client having received
+an earlier palette delta.
 
 **Old client.** `Unknown(8)`, skipped; the host terminal keeps its own
 palette, as today. **New client, old daemon.** No frame; the hello lacks
@@ -126,22 +174,45 @@ palette, as today. **New client, old daemon.** No frame; the hello lacks
 
 ## D4 — Order, epochs, and resync
 
-Within one epoch, geometry is constant and `Geometry` precedes the first
-`Snapshot` of that epoch on each connection; a resync inside an epoch
-repeats it (cheap, and it lets a client rebuild from the snapshot alone).
-The sequence on a connection is therefore always
-`[Geometry] [Palette]? Snapshot Delta*`, with `Geometry` and `Palette`
-stamped identically to the `Snapshot` they precede. A client that receives
-`Geometry` or `Palette` for an epoch it has left discards them, as it
-discards such a snapshot. A `ResyncRequest` is answered by the full
-prefix, never by a bare `Snapshot`.
+On a geometry-capable connection the sequence is always
+`Geometry [Palette if required] Snapshot Delta*`, every prefix member
+stamped with the snapshot's epoch and state point. A resync yields the
+complete prefix even inside the same epoch: resync means the receiver's
+replica assumptions are no longer trusted, and recovery facts are not
+optimised away because the daemon's epoch did not change. A
+`ResyncRequest` is never answered by a bare `Snapshot`.
+
+Stale epoch: `Geometry` or `Palette` for an epoch the receiver has left is
+discarded under the same rule as such a snapshot, and a prefix member from
+one epoch is never combined with a snapshot from another. Missing prefix:
+a `Snapshot` without the `Geometry` its capability promised is a desync
+(D1); a bundle whose palette checkpoint the connection's state requires but
+which is internally inconsistent is not installed as a synchronised
+replica.
+
+Invariant: resync is a complete state checkpoint, not another copy of
+screen bytes.
 
 ## D5 — Compatibility contract
 
 - Kinds 7 and 8 are assigned here and are never reused, renumbered, or
-  given another meaning; the future-input fixtures gain both, and a fixture
-  that decodes them on a build that does not know them asserts
-  `Unknown(7)`/`Unknown(8)` and skippability.
+  given another meaning, though `STORAGE_EPOCH` is still `dev`: the
+  permanence is self-imposed and deliberate.
+- **Acceptance rested on a check against the decoder that predates this
+  ADR**, not on fixtures added to the new one: on `main` at `38c75f8`, a
+  kind-7 frame with a geometry payload and a kind-8 frame with OSC text
+  decode as `Unknown(7)`/`Unknown(8)`, skippable, consumed exactly, with
+  the following `Snapshot` still decoding and the stream frame-synchronised
+  (`corral-protocol` `the_geometry_and_palette_kinds_are_skipped_by_a_decoder_that_predates_them`);
+  the TUI's `apply` writes nothing for either and still applies the snapshot
+  after them, and its loop does not disconnect on an unknown kind
+  (`corral-tui` `geometry_and_palette_frames_write_nothing_and_the_snapshot_after_them_still_applies`).
+  Both tests remain as the record. Daemon-side capabilities are therefore
+  sufficient.
+- Additivity: the legacy `Snapshot` is minted with `palette: false`, so no
+  old client relies on palette state in the snapshot; `Palette` (8) is
+  purely additive, and `Geometry` (7) carries nothing an old client had.
+  Nothing an old client relies on leaves the legacy payload.
 - Capabilities `terminal.geometry.v1` and `terminal.palette.v1` in the
   daemon's hello name the daemon's behaviour; a client advertises nothing
   and needs nothing — the frames are skippable.
@@ -164,16 +235,26 @@ prefix, never by a bare `Snapshot`.
   sees on every exit, and a client-side heuristic on a mode sequence is a
   second interpretation of the stream the wire exists to avoid.
 
-## Tests the acceptance needs
+## Tests the implementation must carry
 
-- Protocol: encode/decode of kinds 7 and 8; unknown-kind fixtures on the
-  pre-ADR decoder; capability names present in the hello.
-- Fidelity (`snapshot_fidelity_tests.rs`): the alternate-screen scenarios
-  extend past `?1049l` and assert the primary screen; a palette scenario
-  asserts palette entries through the `Palette` frame; a resize-from-the-
-  other-viewer scenario builds the replica from `Geometry` alone.
-- Channel: two viewers, one resizes, the other receives `Geometry` then
-  `Snapshot` with matching stamps and rebuilds at the new size.
+- Geometry: every capability-enabled snapshot is preceded by `Geometry`;
+  its geometry equals the authoritative terminal's; a resync repeats it;
+  stale-epoch `Geometry` is ignored; a missing `Geometry` under the
+  advertised capability forces a desync.
+- Dual screen: primary content established, alternate entered, snapshot
+  taken while the alternate is active, a fresh replica installed, and the
+  later alternate exit reveals the exact preserved primary viewport;
+  trimming primary history does not damage the primary viewport; minting
+  has zero observable mutation of active screen, cursor, or mode state.
+- Palette: default → default may omit `Palette`; default → custom sends a
+  checkpoint; custom A → custom B sends one; custom → default sends the
+  explicit reset; a lost palette delta followed by a resync still rebuilds
+  the effective palette; stale-epoch `Palette` is ignored.
+- Compatibility: the pre-ADR decoder skips 7 and 8 (the two tests above);
+  the TUI stays functional ignoring both.
+- Prefix: `Geometry → Palette → Snapshot`; `Geometry → Snapshot` when no
+  palette is required; all prefix members at one snapshot point; a resync
+  never emits a bare `Snapshot`.
 
 ## Evidence this stands on
 
