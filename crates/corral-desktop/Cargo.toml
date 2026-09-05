@@ -1,0 +1,38 @@
+[package]
+name = "corral-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "corral-desktop"
+path = "src/main.rs"
+
+[dependencies]
+corral-client = { workspace = true }
+corral-protocol = { workspace = true }
+futures = { workspace = true }
+gpui = { workspace = true }
+# The replica is the engine corrald renders with, so whatever the daemon's
+# screen can express this one reproduces cell for cell (spike scenario 1,
+# 2026-09-04-pr9-spike-grill.md Q3).
+qwertty-term-vt = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+# The isolation contract the bridge's tests inherit: a private account and a
+# staged, validated test-support daemon (PR9 plan, round 2 Q12).
+corral-e2e = { workspace = true }
+# Rows in the shapes a daemon sends, for the list's tests.
+serde_json = { workspace = true }
+# The bridge's tests await its replies and time them out.
+tokio = { workspace = true }
+
+[lints]
+workspace = true

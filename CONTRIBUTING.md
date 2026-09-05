@@ -55,6 +55,21 @@ Changes to `AGENTS.md`, `docs/GOVERNANCE.md`, or
 `docs/ENGINEERING_WORKFLOW.md` are issue-first and require explicit
 maintainer acceptance.
 
+## Building
+
+A Rust toolchain (see `rust-toolchain.toml`) and `cargo-deny` for the
+dependency gate. The Desktop (`corral-desktop`, GPUI) adds two platform
+build-time requirements:
+
+- **macOS** — the Metal toolchain, which GPUI compiles its shaders with.
+  A machine without it fails the build with `cannot execute tool 'metal'`;
+  install it once with `xcodebuild -downloadComponent MetalToolchain`.
+- **Linux** — the X11/Wayland and font development libraries GPUI links
+  against: `libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+  libx11-xcb-dev libfontconfig1-dev`. CI installs these as environment
+  setup. Linux is a compile-and-test target for the Desktop, not a
+  validated one: no display, render, or input path is exercised there.
+
 ## Verification
 
 ```bash

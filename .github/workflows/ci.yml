@@ -40,6 +40,14 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-
 
+      # gpui's Linux backends link against these at build time. Environment
+      # setup only: the gate itself stays ./scripts/verify (PR9 plan, D4).
+      - name: Desktop build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig1-dev
+
       - name: Install cargo-deny
         run: |
           cargo deny --version 2>/dev/null | grep -qF "cargo-deny $CARGO_DENY_VERSION" \

@@ -30,7 +30,7 @@ pub mod presentation;
 pub mod sessions;
 mod spawn;
 
-pub use activation::activate;
+pub use activation::{activate, activate_at};
 pub use connection::{Connection, TerminalChannel};
 pub use endpoint::{ENDPOINT_OVERRIDE, EndpointSelection};
 pub use error::{
