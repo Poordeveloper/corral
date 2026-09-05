@@ -2,10 +2,14 @@
 //!
 //! One `Watch` per process, installed before its first window (tray grill
 //! Q14): the bridge to corrald, the 1 Hz poll and the list it fills, the
-//! tray's presence, and the one Quit gate every exit path runs (Q8). A
-//! window presents this and holds nothing the process needs. Closing a
-//! window stops presentation; quitting Corral stops watchfulness; neither
-//! terminates managed work.
+//! tray's presence, and the one Quit gate every exit Corral offers runs
+//! (Q8): ⌘Q, the app menu, and closing the main window when no status item
+//! keeps the process. The platform's own termination — Dock Quit, logout,
+//! shutdown — is the recorded exception: gpui 0.2.2 routes
+//! `applicationShouldTerminate` nowhere and only reports `will_terminate`,
+//! after the decision (plan D4). A window presents this and holds nothing
+//! the process needs. Closing a window stops presentation; quitting Corral
+//! stops watchfulness; neither terminates managed work.
 
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
@@ -75,7 +79,8 @@ pub struct Watch {
     main_window: Option<AnyWindowHandle>,
     /// One poll in flight at a time (round 1, #3).
     polling: bool,
-    /// A Quit confirmation is up; a request meanwhile waits for its answer.
+    /// A Quit is being decided — its question is out, or its confirmation is
+    /// up; a request meanwhile waits for that answer.
     quit_pending: bool,
     /// The platform has been asked to quit; nothing is asked or opened after.
     quitting: bool,
@@ -216,22 +221,48 @@ impl Watch {
 
     /// The one Quit gate (grill Q8, Q11): quit, or warn once per attempt when
     /// sessions Corral started continue or cannot be verified.
+    ///
+    /// Decided from the answer to a question asked now, never from the last
+    /// generation: that one may predate a session Corral just started, or a
+    /// daemon that has since gone. The bridge answers in order and within a
+    /// budget, so the answer is fresh and bounded.
     pub fn request_quit(&mut self, cx: &mut Context<Self>) {
         if self.quitting || self.quit_pending {
             return;
         }
-        let warning = match quit::gate(&self.list) {
-            Gate::Quit => {
-                self.quit(cx);
-                return;
-            }
-            Gate::Warn(warning) => warning,
-        };
         self.quit_pending = true;
-        // After the current update: a request from inside the main window
-        // (⌘Q pressed in it) cannot enter that window for a prompt.
-        let this = cx.entity();
-        cx.defer(move |cx| Self::confirm_quit(&this, warning, cx));
+        let reply = self.bridge.poll();
+        cx.spawn(async move |this, cx| {
+            let polled = answer(reply.await);
+            let _ = this.update(cx, |this, cx| this.decide_quit(polled, cx));
+        })
+        .detach();
+    }
+
+    fn decide_quit(&mut self, polled: Result<Polled, Unanswered>, cx: &mut Context<Self>) {
+        self.list.take(polled, SystemTime::now());
+        cx.notify();
+        match quit::gate(&self.list) {
+            Gate::Quit => self.quit(cx),
+            Gate::Warn(warning) => {
+                // After this update: the window opened for the prompt reads
+                // the Watch on its first paint.
+                let this = cx.entity();
+                cx.defer(move |cx| Self::confirm_quit(&this, warning, cx));
+            }
+        }
+    }
+
+    /// Whether the main window may close now. With a status item it simply
+    /// closes; without one, closing it is quitting, so the close runs the
+    /// gate and the window stays until the gate has answered — a Quit ends
+    /// the process, window and all, and a Cancel keeps both.
+    pub fn main_window_closing(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.quitting || self.presence.keeps_process() {
+            return true;
+        }
+        self.request_quit(cx);
+        false
     }
 
     fn confirm_quit(watch: &Entity<Self>, warning: Warning, cx: &mut App) {
@@ -273,9 +304,10 @@ impl Watch {
         }
         self.main_window = None;
         // Without a status item the main window was the only way to reach
-        // the process, so closing it is quitting (PR9 round 2 Q7, which the
-        // tray supersedes only once established: grill Q1, Q8). corrald's
-        // exit stays its own idle lifecycle's.
+        // the process (PR9 round 2 Q7, which the tray supersedes only once
+        // established: grill Q1, Q8). The gate ran when the close was
+        // requested; a window that went without asking — nothing here removes
+        // one — must not leave a process no surface can reach.
         if !self.presence.keeps_process() {
             self.quit(cx);
         }
