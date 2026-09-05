@@ -43,6 +43,7 @@ async fn next_frame(attached: &mut Attached) -> TerminalFrame {
         .await
         .expect("a frame in time")
         .expect("the channel is open")
+        .frame
 }
 
 /// Frames up to and including the next snapshot.

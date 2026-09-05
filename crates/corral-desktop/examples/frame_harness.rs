@@ -113,10 +113,10 @@ impl Harness {
         let _keep = attached.outbound;
         cx.spawn(async move |this, cx| {
             let _keep = _keep;
-            while let Some(frame) = inbound.next().await {
+            while let Some(delivery) = inbound.next().await {
                 let arrived = Instant::now();
                 if this
-                    .update(cx, |this, cx| this.receive(&frame, arrived, cx))
+                    .update(cx, |this, cx| this.receive(&delivery.frame, arrived, cx))
                     .is_err()
                 {
                     return;

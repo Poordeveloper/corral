@@ -119,6 +119,11 @@ pub struct Replica {
     screen: Result<Screen, Absence>,
     held_geometry: Option<Held<Geometry>>,
     held_palette: Option<Held<Vec<u8>>>,
+    /// The checkpoint this connection last received: the daemon omits
+    /// `Palette` when the effective palette still equals it (ADR 0017 D3), so
+    /// every screen rebuilt on this connection starts from it, never from the
+    /// default. `None` is the baseline a connection begins at.
+    known_palette: Option<Vec<u8>>,
     /// Whether this episode's one automatic resync has been spent.
     recovery_spent: bool,
 }
@@ -156,6 +161,7 @@ impl Replica {
             }),
             held_geometry: None,
             held_palette: None,
+            known_palette: None,
             recovery_spent: false,
         }
     }
@@ -259,6 +265,10 @@ impl Replica {
         if !self.promised.palette || self.stale(frame.epoch) {
             return Applied::default();
         }
+        // Known from the moment it arrives, as the daemon counts it from the
+        // moment it is written: the two sides' bookkeeping must agree even
+        // when the bundle it came in is not installed.
+        self.known_palette = Some(frame.payload.clone());
         self.held_palette = Some(Held {
             epoch: frame.epoch,
             sequence: frame.sequence,
@@ -279,7 +289,7 @@ impl Replica {
                 Some(held) if held.describes(frame) => held.value,
                 _ => {
                     self.held_palette = None;
-                    return self.recover();
+                    return self.recover(Absence::AwaitingSnapshot);
                 }
             }
         } else {
@@ -293,13 +303,15 @@ impl Replica {
                 }
             }
         };
-        let palette = match self.held_palette.take() {
-            Some(held) if held.describes(frame) => Some(held.value),
-            // A checkpoint stamped for another state point is an internally
-            // inconsistent bundle, not installed (ADR 0017 D4).
-            Some(_) => return self.recover(),
-            None => None,
-        };
+        // A checkpoint stamped for another state point is an internally
+        // inconsistent bundle, not installed (ADR 0017 D4).
+        if self
+            .held_palette
+            .take()
+            .is_some_and(|held| !held.describes(frame))
+        {
+            return self.recover(Absence::AwaitingSnapshot);
+        }
 
         let terminal = Terminal::new(Options {
             cols: geometry.cols,
@@ -308,7 +320,7 @@ impl Replica {
         });
         let mut stream = Stream::new(TerminalHandler::new(terminal));
         let fed = catch_unwind(AssertUnwindSafe(|| {
-            if let Some(palette) = &palette {
+            if let Some(palette) = &self.known_palette {
                 feed(&mut stream, palette);
             }
             feed(&mut stream, &frame.payload);
@@ -348,7 +360,7 @@ impl Replica {
             // Older is stale. Newer means this epoch's prefix never arrived:
             // the stream is desynchronised.
             if frame.epoch.0 > installed.0 {
-                return self.recover();
+                return self.recover(Absence::AwaitingSnapshot);
             }
             return Applied::default();
         }
@@ -369,25 +381,33 @@ impl Replica {
     /// The parser failed: the replica is destroyed, never the process, and
     /// one automatic recovery is attempted per episode (spike grill Q3).
     fn poisoned(&mut self) -> Applied {
-        self.screen = Err(Absence::Unavailable);
-        let mut applied = self.recover();
-        applied.redraw = true;
-        applied
+        self.recover(Absence::Unavailable)
     }
 
-    /// Ask for a fresh screen once per episode. A second failure in the same
-    /// episode stops automatic retry: what is on display is not trusted and
-    /// is not shown as if it were.
-    fn recover(&mut self) -> Applied {
+    /// Ask for a fresh screen once per episode, and show `absence` until it
+    /// arrives: what this replica holds is no longer trusted, so it is not
+    /// left on display as if it were. A second failure in the same episode
+    /// stops automatic retry.
+    fn recover(&mut self, absence: Absence) -> Applied {
+        let shown = if self.recovery_spent {
+            Absence::Unavailable
+        } else {
+            absence
+        };
+        let redraw = match &self.screen {
+            Ok(_) => true,
+            Err(current) => *current != shown,
+        };
+        self.screen = Err(shown);
         if self.recovery_spent {
-            self.screen = Err(Absence::Unavailable);
             return Applied {
-                redraw: true,
+                redraw,
                 ..Applied::default()
             };
         }
         self.recovery_spent = true;
         Applied {
+            redraw,
             resync: true,
             ..Applied::default()
         }
