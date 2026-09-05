@@ -35,6 +35,8 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+# The isolation contract: a private account and staged, validated binaries.
+corral-e2e = { workspace = true }
 corral-protocol = { workspace = true }
 # Writing to a running daemon's registry the way another process would. Going
 # through SQLite is what makes the daemon see the change: a byte-level rewrite

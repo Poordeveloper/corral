@@ -21,13 +21,26 @@ const RETRY_INTERVAL: Duration = Duration::from_millis(25);
 /// readiness, so a listener that never completes a hello is a failure with a
 /// name, not a connection.
 pub async fn activate(policy: &ClientActivationPolicy) -> Result<Connection, ActivationError> {
+    activate_at(&EndpointSelection::from_environment()?, policy).await
+}
+
+/// The same, at a selection the caller resolved once and holds.
+///
+/// For a surface that outlives many activations — a Desktop reconnecting
+/// after a daemon restart — and for a test that drives a private daemon
+/// through an explicit endpoint. The selection is still one of the two the
+/// environment can name; a surface never composes its own (ADR 0001).
+pub async fn activate_at(
+    selection: &EndpointSelection,
+    policy: &ClientActivationPolicy,
+) -> Result<Connection, ActivationError> {
     let deadline = Instant::now() + policy.activation_deadline;
 
-    match EndpointSelection::from_environment()? {
-        EndpointSelection::Explicit(endpoint) => connect_explicit(&endpoint, deadline).await,
+    match selection {
+        EndpointSelection::Explicit(endpoint) => connect_explicit(endpoint, deadline).await,
         EndpointSelection::Canonical(paths) => {
             paths.ensure_run_dir()?;
-            activate_canonical(&paths, policy, deadline).await
+            activate_canonical(paths, policy, deadline).await
         }
     }
 }

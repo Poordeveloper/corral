@@ -13,6 +13,10 @@
 //! source stages afresh (and is refused if it is not a test-support build).
 //! It lives under the target directory, which is where a `cargo clean`
 //! reaches.
+//!
+//! What is staged is what `./scripts/verify` built: a plain `cargo test -p
+//! <surface>` finds a missing or production daemon here and fails before
+//! anything is spawned, naming the build it needs.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -79,13 +83,35 @@ impl std::fmt::Display for NotStaged {
 pub fn staged() -> &'static Staged {
     static STAGE: OnceLock<Staged> = OnceLock::new();
     STAGE.get_or_init(|| {
-        let source = Path::new(super::CARGO_CORRAL_BINARY)
-            .parent()
-            .expect("the corral binary has a directory")
-            .to_path_buf();
+        let source = cargo_output_dir().unwrap_or_else(|refusal| panic!("{refusal}"));
         let into = staging_root(&source).join(fingerprint(&source));
         stage(&source, &into).unwrap_or_else(|refusal| panic!("{refusal}"))
     })
+}
+
+/// Where cargo put the workspace binaries this test process belongs to: the
+/// profile directory above the `deps/` every test executable lives in.
+///
+/// Resolved from the executable rather than from a `CARGO_BIN_EXE_*` variable,
+/// which cargo sets only for the package's own binaries — and the daemon is
+/// never that for a surface's tests. A process that is not a cargo test
+/// executable is refused rather than guessed about.
+fn cargo_output_dir() -> Result<PathBuf, NotStaged> {
+    let exe = std::env::current_exe().map_err(|error| NotStaged::Unreadable {
+        path: PathBuf::from("<current executable>"),
+        detail: error.to_string(),
+    })?;
+    let deps = exe
+        .parent()
+        .filter(|deps| deps.file_name().is_some_and(|name| name == "deps"));
+    deps.and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| NotStaged::Unreadable {
+            path: exe.clone(),
+            detail: "not a cargo test executable under a deps/ directory, so the workspace \
+                     binaries cannot be located"
+                .to_owned(),
+        })
 }
 
 /// Copy `corral` and `corrald` out of `from` into `into`, refusing either that

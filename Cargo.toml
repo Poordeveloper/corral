@@ -9,6 +9,8 @@ members = [
     "crates/corral-tui",
     "crates/corrald",
     "crates/corral",
+    "crates/corral-desktop",
+    "crates/corral-e2e",
 ]
 # Vendored third-party code is built, never governed: a path dependency inside
 # the repository would otherwise become an implicit member and inherit Corral's
@@ -32,6 +34,7 @@ repository = "https://github.com/Poordeveloper/corral"
 [workspace.dependencies]
 corral-client = { path = "crates/corral-client" }
 corral-core = { path = "crates/corral-core" }
+corral-e2e = { path = "crates/corral-e2e" }
 corral-protocol = { path = "crates/corral-protocol" }
 corral-rendezvous = { path = "crates/corral-rendezvous" }
 corral-state = { path = "crates/corral-state" }
@@ -67,6 +70,17 @@ qwertty-term-vt = "0.4.0"
 # adds no supply chain; taken directly because a token needs a stated 128 bits,
 # and a v4 UUID spends six of them on version and variant bits.
 getrandom = "0.4"
+# The Desktop's UI toolkit, pinned exactly. gpui publishes to crates.io from
+# Zed's tree without a compatibility promise between releases, and its
+# dependency tree is what deny.toml audited (2026-09-04-pr9-spike-grill.md
+# Q2, Q4): a bump is a deliberate change that re-runs that audit.
+gpui = "=0.2.2"
+# The bridge between the tokio thread that talks to corrald and gpui's
+# foreground executor: a channel both sides can drive. Already in the tree
+# under gpui, so this adds no supply chain; tokio's own channels would need
+# tokio-stream to be awaited as streams, which is one more crate for the same
+# thing.
+futures = { version = "0.3", default-features = false, features = ["std", "async-await", "executor"] }
 # The registry store. `bundled` compiles SQLite from source so every platform
 # runs the same engine and version, rather than whatever the host happens to
 # ship.
