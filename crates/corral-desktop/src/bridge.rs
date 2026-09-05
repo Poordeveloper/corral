@@ -207,7 +207,7 @@ fn input_frames(epoch: Epoch, bytes: &[u8]) -> Vec<TerminalFrame> {
         .collect()
 }
 
-enum Request {
+pub(crate) enum Request {
     Poll(oneshot::Sender<Result<Polled, Unanswered>>),
     Attach {
         session_id: String,
@@ -257,6 +257,14 @@ impl Bridge {
             eprintln!("corral-desktop: the bridge thread did not start: {error}");
         }
         Self { requests }
+    }
+
+    /// A bridge whose far end is the test: every question arrives on the
+    /// receiver as the request it is, answered when and how the test decides.
+    #[cfg(test)]
+    pub(crate) fn scripted() -> (Self, background::UnboundedReceiver<Request>) {
+        let (requests, received) = background::unbounded_channel();
+        (Self { requests }, received)
     }
 
     pub fn poll(&self) -> Reply<Result<Polled, Unanswered>> {

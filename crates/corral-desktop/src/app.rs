@@ -111,6 +111,10 @@ pub fn open_main_window(watch: Entity<Watch>, cx: &mut App) -> Result<AnyWindowH
             ..WindowOptions::default()
         },
         |window, cx| {
+            let closing = watch.clone();
+            window.on_window_should_close(cx, move |_, cx| {
+                closing.update(cx, |watch, cx| watch.main_window_closing(cx))
+            });
             let view = cx.new(|cx| MainWindow::new(watch, cx));
             let focus = view.read(cx).list_focus.clone();
             window.focus(&focus);
@@ -123,7 +127,9 @@ pub fn open_main_window(watch: Entity<Watch>, cx: &mut App) -> Result<AnyWindowH
 }
 
 /// The application menu and the global Quit: ⌘Q and "Quit Corral" run the
-/// Watch's one gate with or without a window (tray grill Q8).
+/// Watch's one gate with or without a window (tray grill Q8). The Dock's
+/// Quit and logout do not pass here: gpui 0.2.2 gives the platform's
+/// termination no hook before it is decided (plan D4, known gap).
 pub fn bind_quit(watch: Entity<Watch>, cx: &mut App) {
     cx.set_menus(vec![Menu {
         name: "Corral".into(),
