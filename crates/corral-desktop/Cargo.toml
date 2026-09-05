@@ -25,6 +25,16 @@ gpui = { workspace = true }
 qwertty-term-vt = { workspace = true }
 tokio = { workspace = true }
 
+# Design 0 probe only: adopted as the tray mechanism when the probe passes
+# (docs/decisions/2026-09-05-tray-grill.md Q3), target-scoped so Linux
+# graphs never acquire GTK (Q2).
+[target.'cfg(target_os = "macos")'.dependencies]
+# Default features off: both crates' defaults are their Linux GTK3 and libxdo
+# paths, which would enter the lockfile (and cargo-deny's advisory sweep of
+# it) without ever building for a Corral target.
+tray-icon = { version = "0.24.2", default-features = false }
+muda = { version = "0.19.3", default-features = false }
+
 [dev-dependencies]
 # The isolation contract the bridge's tests inherit: a private account and a
 # staged, validated test-support daemon (PR9 plan, round 2 Q12).
