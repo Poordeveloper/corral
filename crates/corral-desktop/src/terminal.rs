@@ -76,9 +76,11 @@ impl SessionTerminal {
         } = attached;
         let mut inbound = inbound;
         cx.spawn(async move |this, cx| {
-            while let Some(frame) = inbound.next().await {
+            // The room a delivery takes returns when it drops, after the
+            // frame has been applied.
+            while let Some(delivery) = inbound.next().await {
                 if this
-                    .update(cx, |this, cx| this.receive(&frame, cx))
+                    .update(cx, |this, cx| this.receive(&delivery.frame, cx))
                     .is_err()
                 {
                     return;

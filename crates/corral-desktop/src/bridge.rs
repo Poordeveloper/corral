@@ -12,6 +12,7 @@
 
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use corral_client::launch::{
@@ -30,6 +31,7 @@ use futures::SinkExt;
 use futures::channel::{mpsc as foreground, oneshot};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc as background;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::replica::{Geometry, Promised};
 
@@ -46,7 +48,7 @@ pub const LAUNCH: Duration = Duration::from_secs(30);
 /// A question's answer, arriving once. Cancelled if the bridge is gone.
 pub type Reply<T> = oneshot::Receiver<T>;
 
-/// How many of the daemon's frames may wait for the window before the socket
+/// How much of the daemon's output may wait for the window before the socket
 /// stops draining.
 ///
 /// The window's room is the only bound on this side: reading past it turned
@@ -54,11 +56,20 @@ pub type Reply<T> = oneshot::Receiver<T>;
 /// review of #51, finding 1). Once the socket stops draining, that budget is
 /// what supersedes the backlog with a fresh prefix; a window that takes
 /// nothing for the daemon's 2 s no-progress deadline loses the channel, as
-/// any client does. By count because that is what the channel offers: at the
-/// ~1 KiB a PTY read delivers (`SUBSCRIBER_QUEUE_FRAMES`' measurement) this
-/// is about a megabyte of ordinary output, far past a frame's worth of UI
-/// latency.
-const INBOUND_FRAMES: usize = 1024;
+/// any client does.
+///
+/// In bytes, because a frame is anything from a one-byte delta to a 16 MiB
+/// snapshot, and a count of frames bounds nothing. The daemon's own number
+/// (`SUBSCRIBER_QUEUE_BYTES`), for the same reason on its side of the
+/// socket. A frame larger than the whole budget is admitted alone, so what
+/// waits is never more than this budget or one frame past it, plus the one
+/// frame the reader is still assembling.
+const INBOUND_QUEUE_BYTES: u32 = 4 * 1024 * 1024;
+
+/// How many frames may wait, whatever their size: a backstop under the byte
+/// budget so a stream of one-byte deltas cannot queue four million of them.
+/// Any frame of 256 bytes or more runs out of bytes first.
+const INBOUND_QUEUE_FRAMES: usize = (INBOUND_QUEUE_BYTES / 256) as usize;
 
 /// What the daemon's hello said it serves, as the actions read it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -142,9 +153,18 @@ pub struct Attached {
     /// the snapshot brings its own; this is what the daemon has now.
     pub geometry: Geometry,
     pub promised: Promised,
-    /// Every frame the daemon sends, in order. Ends when the channel does.
-    pub inbound: foreground::Receiver<TerminalFrame>,
+    /// Every frame the daemon sends, in order, each with the room it takes.
+    /// Ends when the channel does.
+    pub inbound: foreground::Receiver<Delivery>,
     pub outbound: Outbound,
+}
+
+/// One frame on its way to the window, carrying the accounting for its own
+/// size: only the window knows when it is done with a frame, and dropping
+/// this is what returns the room (`INBOUND_QUEUE_BYTES`).
+pub struct Delivery {
+    pub frame: TerminalFrame,
+    _room: OwnedSemaphorePermit,
 }
 
 /// The Desktop's half of one terminal channel.
@@ -521,10 +541,11 @@ impl Daemon {
             }
         };
 
-        let (inbound, frames) = foreground::channel(INBOUND_FRAMES);
+        let (inbound, frames) = foreground::channel(INBOUND_QUEUE_FRAMES);
+        let room = Arc::new(Semaphore::new(INBOUND_QUEUE_BYTES as usize));
         let (outbound, queued) = background::unbounded_channel();
         let (from_daemon, to_daemon) = channel.stream.into_split();
-        tokio::spawn(read_channel(from_daemon, channel.leftover, inbound));
+        tokio::spawn(read_channel(from_daemon, channel.leftover, inbound, room));
         tokio::spawn(write_channel(to_daemon, queued));
 
         Ok(Attached {
@@ -540,7 +561,7 @@ impl Daemon {
 }
 
 /// Read the daemon's frames for as long as the channel lasts and the window
-/// has room for them (`INBOUND_FRAMES`).
+/// has room for them (`INBOUND_QUEUE_BYTES`, `INBOUND_QUEUE_FRAMES`).
 ///
 /// Off the UI thread, so a frame's worth of UI latency never stalls the
 /// socket; not past the window's room, so a stalled window is the daemon's
@@ -549,7 +570,8 @@ impl Daemon {
 async fn read_channel(
     mut from_daemon: OwnedReadHalf,
     leftover: Vec<u8>,
-    mut inbound: foreground::Sender<TerminalFrame>,
+    mut inbound: foreground::Sender<Delivery>,
+    room: Arc<Semaphore>,
 ) {
     use tokio::io::AsyncReadExt;
 
@@ -561,7 +583,15 @@ async fn read_channel(
             match TerminalFrame::decode_from_daemon(&pending) {
                 Ok(Some((frame, consumed))) => {
                     pending.drain(..consumed);
-                    if inbound.send(frame).await.is_err() {
+                    // A frame past the whole budget charges all of it, and so
+                    // waits for the queue to empty and is admitted alone.
+                    let charge = u32::try_from(frame.payload.len())
+                        .map_or(INBOUND_QUEUE_BYTES, |len| len.min(INBOUND_QUEUE_BYTES));
+                    let Ok(room) = room.clone().acquire_many_owned(charge).await else {
+                        return;
+                    };
+                    let delivery = Delivery { frame, _room: room };
+                    if inbound.send(delivery).await.is_err() {
                         return;
                     }
                 }
