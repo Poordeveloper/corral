@@ -289,7 +289,7 @@ impl Replica {
                 Some(held) if held.describes(frame) => held.value,
                 _ => {
                     self.held_palette = None;
-                    return self.recover();
+                    return self.recover(Absence::AwaitingSnapshot);
                 }
             }
         } else {
@@ -310,7 +310,7 @@ impl Replica {
             .take()
             .is_some_and(|held| !held.describes(frame))
         {
-            return self.recover();
+            return self.recover(Absence::AwaitingSnapshot);
         }
 
         let terminal = Terminal::new(Options {
@@ -360,7 +360,7 @@ impl Replica {
             // Older is stale. Newer means this epoch's prefix never arrived:
             // the stream is desynchronised.
             if frame.epoch.0 > installed.0 {
-                return self.recover();
+                return self.recover(Absence::AwaitingSnapshot);
             }
             return Applied::default();
         }
@@ -381,25 +381,33 @@ impl Replica {
     /// The parser failed: the replica is destroyed, never the process, and
     /// one automatic recovery is attempted per episode (spike grill Q3).
     fn poisoned(&mut self) -> Applied {
-        self.screen = Err(Absence::Unavailable);
-        let mut applied = self.recover();
-        applied.redraw = true;
-        applied
+        self.recover(Absence::Unavailable)
     }
 
-    /// Ask for a fresh screen once per episode. A second failure in the same
-    /// episode stops automatic retry: what is on display is not trusted and
-    /// is not shown as if it were.
-    fn recover(&mut self) -> Applied {
+    /// Ask for a fresh screen once per episode, and show `absence` until it
+    /// arrives: what this replica holds is no longer trusted, so it is not
+    /// left on display as if it were. A second failure in the same episode
+    /// stops automatic retry.
+    fn recover(&mut self, absence: Absence) -> Applied {
+        let shown = if self.recovery_spent {
+            Absence::Unavailable
+        } else {
+            absence
+        };
+        let redraw = match &self.screen {
+            Ok(_) => true,
+            Err(current) => *current != shown,
+        };
+        self.screen = Err(shown);
         if self.recovery_spent {
-            self.screen = Err(Absence::Unavailable);
             return Applied {
-                redraw: true,
+                redraw,
                 ..Applied::default()
             };
         }
         self.recovery_spent = true;
         Applied {
+            redraw,
             resync: true,
             ..Applied::default()
         }

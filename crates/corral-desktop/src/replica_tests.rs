@@ -57,6 +57,16 @@ fn redraw() -> Applied {
     }
 }
 
+/// A resync asked for while a screen was on display: the screen goes, so
+/// the display changes too.
+fn resync_hiding() -> Applied {
+    Applied {
+        redraw: true,
+        resync: true,
+        ..Applied::default()
+    }
+}
+
 /// The first row of the screen, trimmed.
 fn first_row(replica: &Replica) -> String {
     let window = replica.window().expect("a screen");
@@ -162,7 +172,7 @@ fn deltas_apply_to_the_installed_epoch_and_a_newer_one_is_a_missed_prefix() {
     // Older: stale, nothing. Newer: this epoch's prefix never arrived.
     assert_eq!(replica.apply(&delta(1, 9, "old")), Applied::default());
     assert_eq!(first_row(&replica), "abc");
-    assert_eq!(replica.apply(&delta(3, 0, "new")), resync());
+    assert_eq!(replica.apply(&delta(3, 0, "new")), resync_hiding());
 }
 
 /// Round 1, #4: one automatic resync per failure episode, re-armed only by
@@ -177,7 +187,10 @@ fn a_daemon_produced_epoch_re_arms_recovery_and_a_requested_one_does_not() {
     // The daemon reshapes on its own: a new episode.
     replica.apply(&geometry(1, 0, 4, 20));
     assert_eq!(replica.apply(&snapshot(1, 0, "fresh")), redraw());
-    assert_eq!(replica.apply(&snapshot(1, 3, "bare again")), resync());
+    assert_eq!(
+        replica.apply(&snapshot(1, 3, "bare again")),
+        resync_hiding()
+    );
 
     // Spent again. This client asks for a reshape; the epoch that answers it
     // is its own doing and re-arms nothing.
@@ -320,4 +333,23 @@ fn a_rebuilt_screen_keeps_the_palette_the_connection_already_received() {
 
     let entry = replica.window().expect("a screen").palette[1];
     assert_eq!((entry.r, entry.g, entry.b), (0x11, 0x22, 0x33));
+}
+
+/// A desync means the installed screen belongs to an epoch the daemon has
+/// left. It is not shown as current while the fresh one is on its way.
+#[test]
+fn a_desync_hides_the_screen_it_no_longer_trusts_until_the_fresh_one_arrives() {
+    let mut replica = Replica::new(PROMISED_GEOMETRY);
+    replica.apply(&geometry(2, 0, 4, 20));
+    replica.apply(&snapshot(2, 0, "ab"));
+
+    let applied = replica.apply(&delta(3, 0, "new"));
+    assert!(applied.resync);
+    assert!(applied.redraw);
+    assert_eq!(replica.window().err(), Some(Absence::AwaitingSnapshot));
+
+    // The fresh screen, when it comes, is the one on display.
+    replica.apply(&geometry(3, 0, 4, 20));
+    assert_eq!(replica.apply(&snapshot(3, 0, "new")), redraw());
+    assert_eq!(first_row(&replica), "new");
 }
