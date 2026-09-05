@@ -26,6 +26,7 @@ use corral_protocol::method::{AttentionSummaryResult, SessionNewResult};
 use corral_protocol::terminal::{
     Epoch, FrameKind, MAX_CLIENT_FRAME_BYTES, Sequence, TerminalFrame,
 };
+use futures::SinkExt;
 use futures::channel::{mpsc as foreground, oneshot};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc as background;
@@ -44,6 +45,20 @@ pub const LAUNCH: Duration = Duration::from_secs(30);
 
 /// A question's answer, arriving once. Cancelled if the bridge is gone.
 pub type Reply<T> = oneshot::Receiver<T>;
+
+/// How many of the daemon's frames may wait for the window before the socket
+/// stops draining.
+///
+/// The window's room is the only bound on this side: reading past it turned
+/// corrald's per-viewer budget into unbounded Desktop memory (post-merge
+/// review of #51, finding 1). Once the socket stops draining, that budget is
+/// what supersedes the backlog with a fresh prefix; a window that takes
+/// nothing for the daemon's 2 s no-progress deadline loses the channel, as
+/// any client does. By count because that is what the channel offers: at the
+/// ~1 KiB a PTY read delivers (`SUBSCRIBER_QUEUE_FRAMES`' measurement) this
+/// is about a megabyte of ordinary output, far past a frame's worth of UI
+/// latency.
+const INBOUND_FRAMES: usize = 1024;
 
 /// What the daemon's hello said it serves, as the actions read it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -128,7 +143,7 @@ pub struct Attached {
     pub geometry: Geometry,
     pub promised: Promised,
     /// Every frame the daemon sends, in order. Ends when the channel does.
-    pub inbound: foreground::UnboundedReceiver<TerminalFrame>,
+    pub inbound: foreground::Receiver<TerminalFrame>,
     pub outbound: Outbound,
 }
 
@@ -506,7 +521,7 @@ impl Daemon {
             }
         };
 
-        let (inbound, frames) = foreground::unbounded();
+        let (inbound, frames) = foreground::channel(INBOUND_FRAMES);
         let (outbound, queued) = background::unbounded_channel();
         let (from_daemon, to_daemon) = channel.stream.into_split();
         tokio::spawn(read_channel(from_daemon, channel.leftover, inbound));
@@ -524,15 +539,17 @@ impl Daemon {
     }
 }
 
-/// Read the daemon's frames for as long as the channel lasts.
+/// Read the daemon's frames for as long as the channel lasts and the window
+/// has room for them (`INBOUND_FRAMES`).
 ///
-/// Always reading: the daemon drops a viewer that makes no progress for two
-/// seconds, and this task's only job is to make progress, whatever the window
-/// is doing. The frames queue on the foreground's side.
+/// Off the UI thread, so a frame's worth of UI latency never stalls the
+/// socket; not past the window's room, so a stalled window is the daemon's
+/// slow viewer — superseded, then dropped — rather than this process's
+/// memory.
 async fn read_channel(
     mut from_daemon: OwnedReadHalf,
     leftover: Vec<u8>,
-    inbound: foreground::UnboundedSender<TerminalFrame>,
+    mut inbound: foreground::Sender<TerminalFrame>,
 ) {
     use tokio::io::AsyncReadExt;
 
@@ -544,7 +561,7 @@ async fn read_channel(
             match TerminalFrame::decode_from_daemon(&pending) {
                 Ok(Some((frame, consumed))) => {
                     pending.drain(..consumed);
-                    if inbound.unbounded_send(frame).is_err() {
+                    if inbound.send(frame).await.is_err() {
                         return;
                     }
                 }
