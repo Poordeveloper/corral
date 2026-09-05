@@ -9,8 +9,11 @@
 
 ## 1. Current phase
 
-**M0 — foundation. PR1 landed.** Nothing beyond the PR0–PR9 sequence
-below is in scope; nothing in M2 or later is solved inside an M1 task.
+**M0 — foundation. The PR0–PR9 sequence has landed** (PR9, the GPUI
+Desktop, merged 2026-09-05). Nothing beyond that sequence was in scope;
+nothing in M2 or later is solved inside an M1 task. What remains before the
+M1 release is the completion work §3 names — tray, packaging, and the
+one-command install — plus the release gate in §5.
 
 ## 2. What M1 must prove
 
