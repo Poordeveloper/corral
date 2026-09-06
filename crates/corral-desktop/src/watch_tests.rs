@@ -80,9 +80,10 @@ fn one_running() -> Result<Polled, Unanswered> {
     })])
 }
 
-/// A current answer with one session needing you, unacknowledged: a row the
-/// tray lists.
-fn one_needs_you() -> Result<Polled, Unanswered> {
+/// A current answer with one session `needs-1` in the given attention state,
+/// its item unacknowledged, and the daemon's counts to match.
+fn attended(state: &str) -> Result<Polled, Unanswered> {
+    let needs_you = u32::from(state == "needs_you");
     Ok(Polled {
         listing: Listing::of(SessionListResult {
             sessions: vec![json!({
@@ -90,7 +91,7 @@ fn one_needs_you() -> Result<Polled, Unanswered> {
                 "title": "fix the test",
                 "execution_state": "running",
                 "attention": {
-                    "state": "needs_you",
+                    "state": state,
                     "since_unix_ms": 0,
                     "items": [{
                         "attention_item_id": "item-1",
@@ -103,8 +104,8 @@ fn one_needs_you() -> Result<Polled, Unanswered> {
         }),
         summary: AttentionSummaryResult {
             needs_you: AttentionCount {
-                total: 1,
-                unacknowledged: 1,
+                total: needs_you,
+                unacknowledged: needs_you,
             },
             ready: AttentionCount {
                 total: 0,
@@ -113,6 +114,16 @@ fn one_needs_you() -> Result<Polled, Unanswered> {
         },
         capabilities: Capabilities::default(),
     })
+}
+
+/// One session needing you: a row the tray lists.
+fn one_needs_you() -> Result<Polled, Unanswered> {
+    attended("needs_you")
+}
+
+/// The same session, working: still the window's row, never the tray's.
+fn one_working() -> Result<Polled, Unanswered> {
+    attended("working")
 }
 
 fn unanswered() -> Result<Polled, Unanswered> {
@@ -291,6 +302,49 @@ fn a_row_click_opens_the_session_it_named_and_a_stale_one_converges(cx: &mut Tes
         questions.try_recv().is_err(),
         "nothing was asked for a session not listed"
     );
+    drop(attach);
+}
+
+/// A row from an older menu names a session that has since left Needs You /
+/// Ready. It is still the window's row and no longer the tray's, so the click
+/// brings the window forward on the current list and opens nothing: the row
+/// no longer describes the session. Back in Needs You, the same click opens
+/// it — the guard is the state, never the identity.
+#[gpui::test]
+fn a_stale_row_for_a_session_that_left_needs_you_opens_nothing(cx: &mut TestAppContext) {
+    let (presence, shown) = established();
+    let (watch, mut questions) = watch(presence, cx);
+    answer_polls(&mut questions, one_needs_you, cx);
+    assert!(shown.last().lists("needs-1"));
+
+    cx.executor().advance_clock(POLL);
+    answer_polls(&mut questions, one_working, cx);
+    assert!(!shown.last().lists("needs-1"));
+    assert!(watch.read_with(cx, |watch, _| {
+        watch
+            .list()
+            .rows()
+            .iter()
+            .any(|row| row.session_id == "needs-1")
+    }));
+
+    cx.update(|cx| Watch::act(&watch, TrayAction::OpenSession("needs-1".to_owned()), cx));
+    cx.run_until_parked();
+    assert_eq!(cx.windows().len(), 1);
+    assert!(watch.read_with(cx, |watch, _| watch.list().selected().is_none()));
+    assert!(
+        questions.try_recv().is_err(),
+        "nothing was asked for a row the tray no longer lists"
+    );
+
+    cx.executor().advance_clock(POLL);
+    answer_polls(&mut questions, one_needs_you, cx);
+    cx.update(|cx| Watch::act(&watch, TrayAction::OpenSession("needs-1".to_owned()), cx));
+    cx.run_until_parked();
+    let attach = questions
+        .try_recv()
+        .expect("back in Needs You, the click opens it");
+    assert!(matches!(&attach, Request::Attach { session_id, .. } if session_id == "needs-1"));
     drop(attach);
 }
 

@@ -152,6 +152,41 @@ fn only_needs_you_and_ready_reach_the_tray() {
     assert_eq!(current.ready.rows.len(), 1);
     assert_eq!(current.ready.rows[0].session_id, "r");
     assert_eq!(current.ready.rows[0].state, MainState::Ready);
+    assert!(projection.lists("n"));
+    assert!(projection.lists("r"));
+    assert!(!projection.lists("w"));
+    assert!(!projection.lists("u"));
+    assert!(!projection.lists("x"));
+}
+
+/// At most two generations stay alive: the current one, and the one on
+/// screen — the generation current when the item was last clicked open. A
+/// generation nobody opened goes at the next publish; the open one stays
+/// through any number of publishes, until the menu is opened again on a
+/// newer generation.
+#[test]
+fn only_the_current_generation_and_the_open_one_stay_alive() {
+    let mut generations = Generations::new();
+    let opener = generations.opener();
+
+    assert_eq!(*generations.publish("g1"), "g1");
+    generations.publish("g2");
+    assert_eq!(generations.alive(), vec![&"g2"]);
+
+    opener.opened();
+    generations.publish("g3");
+    generations.publish("g4");
+    assert_eq!(generations.alive(), vec![&"g4", &"g2"]);
+
+    opener.opened();
+    generations.publish("g5");
+    assert_eq!(generations.alive(), vec![&"g5", &"g4"]);
+
+    opener.opened();
+    generations.publish("g6");
+    assert_eq!(generations.alive(), vec![&"g6", &"g5"]);
+    generations.publish("g7");
+    assert_eq!(generations.alive(), vec![&"g7", &"g5"]);
 }
 
 /// A second of clock changes nothing; a minute changes the age, and only

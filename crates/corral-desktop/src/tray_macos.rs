@@ -10,14 +10,17 @@
 
 use futures::channel::mpsc::unbounded;
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-use super::{Clicks, MenuLine, StatusItem, TrayProjection};
+use super::{Clicks, Generations, MenuLine, StatusItem, TrayProjection};
 
 /// The status item, for the life of the process. Dropping it removes the
-/// item; the menu it shows is replaced whole on every changed projection.
+/// item; the menu it shows is replaced whole on every changed projection,
+/// and the generation the person may still have open stays alive until the
+/// menu is next opened (`Generations`).
 pub struct Tray {
     icon: TrayIcon,
+    generations: Generations<Menu>,
 }
 
 impl Tray {
@@ -37,7 +40,20 @@ impl Tray {
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             let _ = clicks.unbounded_send(event.id.0);
         }));
-        Ok((Self { icon }, receiver))
+        let generations = Generations::new();
+        let opener = generations.opener();
+        TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+            // The press that opens the menu. tray-icon sends it before it
+            // shows the menu, so the generation recorded is the one shown.
+            if let TrayIconEvent::Click {
+                button_state: MouseButtonState::Down,
+                ..
+            } = event
+            {
+                opener.opened();
+            }
+        }));
+        Ok((Self { icon, generations }, receiver))
     }
 }
 
@@ -55,8 +71,11 @@ impl StatusItem for Tray {
             .map_err(|error| error.to_string())?;
         }
         // One generation: a menu whose ids carry their actions, swapped in
-        // whole, and the badge with it (grill Q10).
-        self.icon.set_menu(Some(Box::new(menu)));
+        // whole, and the badge with it (grill Q10). tray-icon drops the box
+        // it is handed on the next swap; the clone shares the menu, and
+        // `Generations` decides when the menu itself goes.
+        let shown = self.generations.publish(menu).clone();
+        self.icon.set_menu(Some(Box::new(shown)));
         self.icon.set_title(projection.badge_text());
         Ok(())
     }

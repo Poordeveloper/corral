@@ -11,6 +11,8 @@
 //! a second of clock never changes the value, so the 1 s poll does not
 //! become a per-second rebuild of native menu objects.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use corral_client::presentation::MainState;
@@ -206,6 +208,23 @@ impl TrayProjection {
         }
     }
 
+    /// Whether the tray lists this session now: what a click from an older
+    /// menu resolves against (grill Q10). A session that left Needs You /
+    /// Ready since that menu was built is no longer the row the person saw,
+    /// and is not opened from it.
+    #[must_use]
+    pub fn lists(&self, session_id: &str) -> bool {
+        match self {
+            Self::Unreachable { .. } => false,
+            Self::Current(current) => current
+                .needs_you
+                .rows
+                .iter()
+                .chain(&current.ready.rows)
+                .any(|row| row.session_id == session_id),
+        }
+    }
+
     /// The menu, top to bottom: the header, the groups that have rows, then
     /// the ways into Corral. Decided here, as words, so the native menu is
     /// built mechanically and what it says is under test. While the daemon
@@ -280,6 +299,105 @@ pub trait StatusItem {
 /// spelled them. Read on gpui's foreground by `TrayAction::from_menu_id`:
 /// the handler itself touches nothing of gpui (grill Q3).
 pub type Clicks = UnboundedReceiver<String>;
+
+/// The menu generations kept alive where a native item reaches into the
+/// Rust menu it was built from. `muda` 0.19.3's macOS items hold a raw
+/// pointer to their `MenuChild`; a menu the person still has open — menu
+/// tracking keeps it on screen through every swap beneath it — fires that
+/// pointer on a click, so dropping a generation that may be open is a
+/// use-after-free (muda #328, fixed upstream after 0.19.3 and unreleased).
+///
+/// Two generations may be alive: the one the status item shows, and the
+/// one that was current when the item was last clicked open — the one on
+/// screen, if any is. Nothing older can be open or in flight, so nothing
+/// older is kept: the bound is two whatever the churn. Exits with a `muda`
+/// release whose items own their reference.
+pub struct Generations<M> {
+    /// The current generation's serial, read by the opening click.
+    serial: Arc<AtomicU64>,
+    /// The serial that was current at the last opening click.
+    opened: Arc<AtomicU64>,
+    current: Option<(u64, M)>,
+    /// The generation on screen while it is not the current one.
+    open: Option<(u64, M)>,
+}
+
+impl<M> Default for Generations<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M> Generations<M> {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            serial: Arc::new(AtomicU64::new(0)),
+            opened: Arc::new(AtomicU64::new(0)),
+            current: None,
+            open: None,
+        }
+    }
+
+    /// The handle for the click that opens the menu, on whichever thread the
+    /// platform delivers it: it records which generation opened.
+    #[must_use]
+    pub fn opener(&self) -> Opener {
+        Opener {
+            serial: self.serial.clone(),
+            opened: self.opened.clone(),
+        }
+    }
+
+    /// Make `menu` the current generation and hand it back to show. What
+    /// was current stays only if it is the generation on screen; what was
+    /// on screen goes once a newer generation has been opened.
+    pub fn publish(&mut self, menu: M) -> &M {
+        let opened = self.opened.load(Ordering::SeqCst);
+        if let Some((serial, previous)) = self.current.take()
+            && serial == opened
+        {
+            self.open = Some((serial, previous));
+        }
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|(serial, _)| *serial != opened)
+        {
+            self.open = None;
+        }
+        let serial = self.serial.load(Ordering::SeqCst) + 1;
+        self.serial.store(serial, Ordering::SeqCst);
+        &self.current.insert((serial, menu)).1
+    }
+
+    /// Every generation still alive, the current one first.
+    #[must_use]
+    pub fn alive(&self) -> Vec<&M> {
+        self.current
+            .iter()
+            .chain(&self.open)
+            .map(|(_, menu)| menu)
+            .collect()
+    }
+}
+
+/// See [`Generations::opener`]. The click and the publish both run on the
+/// platform's main thread; the atomics only let the handle cross into the
+/// handler the platform requires to be `Send`.
+#[derive(Clone)]
+pub struct Opener {
+    serial: Arc<AtomicU64>,
+    opened: Arc<AtomicU64>,
+}
+
+impl Opener {
+    /// The menu is being opened on the current generation.
+    pub fn opened(&self) {
+        self.opened
+            .store(self.serial.load(Ordering::SeqCst), Ordering::SeqCst);
+    }
+}
 
 fn elapsed_since(unix_ms: i64, now: SystemTime) -> Duration {
     let at = if unix_ms < 0 {

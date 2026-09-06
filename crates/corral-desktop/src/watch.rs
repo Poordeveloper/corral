@@ -206,19 +206,17 @@ impl Watch {
     }
 
     /// A row click resolves the session it named against current truth
-    /// (grill Q10). Listed: selected, then the window's own Open path with
-    /// its refusals. Gone since the menu was built: the window, showing the
-    /// list as it is now, and nothing else — never another session.
+    /// (grill Q10). Still listed by the tray — Needs You or Ready now:
+    /// selected, then the window's own Open path with its refusals. Gone
+    /// from the tray since the menu was built, from the list or only from
+    /// those states: the window, showing the list as it is now, and nothing
+    /// else — never another session, never a session the row no longer
+    /// describes.
     fn open_session(watch: &Entity<Self>, session_id: &str, cx: &mut App) {
         let Some(window) = Self::ensure_main_window(watch, cx) else {
             return;
         };
-        let listed = watch
-            .read(cx)
-            .list
-            .rows()
-            .iter()
-            .any(|row| row.session_id == session_id);
+        let listed = TrayProjection::of(watch.read(cx).list(), SystemTime::now()).lists(session_id);
         if !listed {
             return;
         }

@@ -34,6 +34,10 @@ tokio = { workspace = true }
 # paths, which would enter the lockfile (and cargo-deny's advisory sweep of
 # it) without ever building for a Corral target.
 tray-icon = { version = "0.24.2", default-features = false }
+# 0.19.3's macOS items hold a raw pointer into the Rust menu they were built
+# from (muda #328, fixed upstream after this release and unreleased):
+# `tray::Generations` keeps the generation on screen alive around it, and
+# goes with the release that carries the fix.
 muda = { version = "0.19.3", default-features = false }
 
 [dev-dependencies]
