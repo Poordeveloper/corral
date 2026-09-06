@@ -129,6 +129,27 @@ pub fn open_main_window(watch: Entity<Watch>, cx: &mut App) -> Result<AnyWindowH
     .map_err(|error| error.to_string())
 }
 
+/// The tray's Open on the row the Watch selected: this window's own path,
+/// with its refusals, so a menu-bar click opens nothing the list would not.
+pub fn open_selected_in(window: AnyWindowHandle, cx: &mut App) {
+    let Some(window) = window.downcast::<MainWindow>() else {
+        return;
+    };
+    let _ = window.update(cx, |this, window, cx| {
+        this.open_selected(&OpenSelected, window, cx);
+    });
+}
+
+/// The tray's New Session…: this window's own form, under its own offer.
+pub fn new_session_in(window: AnyWindowHandle, cx: &mut App) {
+    let Some(window) = window.downcast::<MainWindow>() else {
+        return;
+    };
+    let _ = window.update(cx, |this, window, cx| {
+        this.new_session(&NewSession, window, cx);
+    });
+}
+
 /// The application menu and the global Quit: ⌘Q and "Quit Corral" run the
 /// Watch's one gate with or without a window (tray grill Q8). The Dock's
 /// Quit and logout do not pass here: gpui 0.2.2 gives the platform's

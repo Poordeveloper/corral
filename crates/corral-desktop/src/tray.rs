@@ -11,11 +11,19 @@
 //! a second of clock never changes the value, so the 1 s poll does not
 //! become a per-second rebuild of native menu objects.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use corral_client::presentation::MainState;
+use futures::channel::mpsc::UnboundedReceiver;
 
+use crate::actions::Offered;
 use crate::sessions::{ASKING, SessionList};
+
+#[cfg(target_os = "macos")]
+#[path = "tray_macos.rs"]
+pub mod macos;
 
 /// Rows shown per group before the rest is counted (grill Q6).
 pub const ROWS_PER_GROUP: usize = 10;
@@ -43,6 +51,11 @@ pub struct Current {
     pub badge: Badge,
     pub needs_you: Group,
     pub ready: Group,
+    /// Whether New Session… is offered: the daemon's hello serves managed
+    /// sessions, as `actions::Offered` decides for the window. Absent, not
+    /// disabled, when it does not — and part of the value, so a hello that
+    /// changes what is offered rebuilds the menu.
+    pub new_session: bool,
 }
 
 /// Unacknowledged attention items across both classes: the daemon's
@@ -177,6 +190,7 @@ impl TrayProjection {
             badge: Badge(summary.needs_you.unacknowledged + summary.ready.unacknowledged),
             needs_you: Group::of("Needs You", summary.needs_you.total, needs_you),
             ready: Group::of("Ready", summary.ready.total, ready),
+            new_session: Offered::by(list.capabilities()).new_session,
         })
     }
 
@@ -199,6 +213,197 @@ impl TrayProjection {
             Self::Unreachable { .. } => None,
             Self::Current(current) => current.badge.text(),
         }
+    }
+
+    /// Whether the tray lists this session now: what a click from an older
+    /// menu resolves against (grill Q10). A session that left Needs You /
+    /// Ready since that menu was built is no longer the row the person saw,
+    /// and is not opened from it.
+    #[must_use]
+    pub fn lists(&self, session_id: &str) -> bool {
+        match self {
+            Self::Unreachable { .. } => false,
+            Self::Current(current) => current
+                .needs_you
+                .rows
+                .iter()
+                .chain(&current.ready.rows)
+                .any(|row| row.session_id == session_id),
+        }
+    }
+
+    /// The menu, top to bottom: the header, the groups that have rows, then
+    /// the ways into Corral. Decided here, as words, so the native menu is
+    /// built mechanically and what it says is under test. New Session… is
+    /// there only when the daemon offers it — the window's own rule — and
+    /// never while the daemon is unreachable; Open Corral is the route to
+    /// the reason.
+    #[must_use]
+    pub fn menu(&self) -> Vec<MenuLine> {
+        let mut lines = vec![MenuLine::Note(self.header())];
+        let mut new_session = false;
+        if let Self::Current(projection) = self {
+            new_session = projection.new_session;
+            for group in [&projection.needs_you, &projection.ready] {
+                if group.rows.is_empty() {
+                    continue;
+                }
+                lines.push(MenuLine::Separator);
+                lines.push(MenuLine::Note(group.label.to_owned()));
+                for row in &group.rows {
+                    lines.push(MenuLine::Item {
+                        action: TrayAction::OpenSession(row.session_id.clone()),
+                        text: row.text(),
+                    });
+                }
+                if let Some(text) = group.overflow_line() {
+                    lines.push(MenuLine::Item {
+                        action: TrayAction::More,
+                        text,
+                    });
+                }
+            }
+        }
+        lines.push(MenuLine::Separator);
+        lines.push(MenuLine::Item {
+            action: TrayAction::OpenCorral,
+            text: "Open Corral".to_owned(),
+        });
+        if new_session {
+            lines.push(MenuLine::Item {
+                action: TrayAction::NewSession,
+                text: "New Session…".to_owned(),
+            });
+        }
+        lines.push(MenuLine::Separator);
+        lines.push(MenuLine::Item {
+            action: TrayAction::Quit,
+            text: "Quit Corral".to_owned(),
+        });
+        lines
+    }
+}
+
+/// One line of the menu. A `Note` is words that do nothing — the header, a
+/// group's label; an `Item` carries its action in the id the platform hands
+/// back on a click.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MenuLine {
+    Note(String),
+    Separator,
+    Item { action: TrayAction, text: String },
+}
+
+/// The native status item, behind the one thing the Watch asks of it. The
+/// Watch decides when — only when the projection changed (grill Q10) — and
+/// the platform decides how; a test item merely remembers what it was shown.
+pub trait StatusItem {
+    /// Show this projection as one generation: menu and badge together,
+    /// never one and then the other.
+    fn show(&mut self, projection: &TrayProjection) -> Result<(), String>;
+}
+
+/// The menu ids the platform's handler forwarded, in click order and as it
+/// spelled them. Read on gpui's foreground by `TrayAction::from_menu_id`:
+/// the handler itself touches nothing of gpui (grill Q3).
+pub type Clicks = UnboundedReceiver<String>;
+
+/// The menu generations kept alive where a native item reaches into the
+/// Rust menu it was built from. `muda` 0.19.3's macOS items hold a raw
+/// pointer to their `MenuChild`; a menu the person still has open — menu
+/// tracking keeps it on screen through every swap beneath it — fires that
+/// pointer on a click, so dropping a generation that may be open is a
+/// use-after-free (muda #328, fixed upstream after 0.19.3 and unreleased).
+///
+/// Two generations may be alive: the one the status item shows, and the
+/// one that was current when the item was last clicked open — the one on
+/// screen, if any is. Nothing older can be open or in flight, so nothing
+/// older is kept: the bound is two whatever the churn. Exits with a `muda`
+/// release whose items own their reference.
+pub struct Generations<M> {
+    /// The current generation's serial, read by the opening click.
+    serial: Arc<AtomicU64>,
+    /// The serial that was current at the last opening click.
+    opened: Arc<AtomicU64>,
+    current: Option<(u64, M)>,
+    /// The generation on screen while it is not the current one.
+    open: Option<(u64, M)>,
+}
+
+impl<M> Default for Generations<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M> Generations<M> {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            serial: Arc::new(AtomicU64::new(0)),
+            opened: Arc::new(AtomicU64::new(0)),
+            current: None,
+            open: None,
+        }
+    }
+
+    /// The handle for the click that opens the menu, on whichever thread the
+    /// platform delivers it: it records which generation opened.
+    #[must_use]
+    pub fn opener(&self) -> Opener {
+        Opener {
+            serial: self.serial.clone(),
+            opened: self.opened.clone(),
+        }
+    }
+
+    /// Make `menu` the current generation and hand it back to show. What
+    /// was current stays only if it is the generation on screen; what was
+    /// on screen goes once a newer generation has been opened.
+    pub fn publish(&mut self, menu: M) -> &M {
+        let opened = self.opened.load(Ordering::SeqCst);
+        if let Some((serial, previous)) = self.current.take()
+            && serial == opened
+        {
+            self.open = Some((serial, previous));
+        }
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|(serial, _)| *serial != opened)
+        {
+            self.open = None;
+        }
+        let serial = self.serial.load(Ordering::SeqCst) + 1;
+        self.serial.store(serial, Ordering::SeqCst);
+        &self.current.insert((serial, menu)).1
+    }
+
+    /// Every generation still alive, the current one first.
+    #[must_use]
+    pub fn alive(&self) -> Vec<&M> {
+        self.current
+            .iter()
+            .chain(&self.open)
+            .map(|(_, menu)| menu)
+            .collect()
+    }
+}
+
+/// See [`Generations::opener`]. The click and the publish both run on the
+/// platform's main thread; the atomics only let the handle cross into the
+/// handler the platform requires to be `Send`.
+#[derive(Clone)]
+pub struct Opener {
+    serial: Arc<AtomicU64>,
+    opened: Arc<AtomicU64>,
+}
+
+impl Opener {
+    /// The menu is being opened on the current generation.
+    pub fn opened(&self) {
+        self.opened
+            .store(self.serial.load(Ordering::SeqCst), Ordering::SeqCst);
     }
 }
 

@@ -1,9 +1,12 @@
 # Tray probe — `tray-icon` + `muda` under gpui 0.2.2 (Design 0 of the tray plan)
 
-> Status: **self-driven cases recorded; human cases pending** (2026-09-05).
-> The probe is `crates/corral-desktop/examples/tray_probe.rs` on
-> `task/tray` (commit noted in the PR); it is deleted when the feature
-> lands. Protocol and pass criteria: `docs/decisions/2026-09-05-tray-grill.md`
+> Status: **self-driven cases recorded; mechanism sealed on them**
+> (2026-09-05). The human cases 2 and 4 were not run before the feature:
+> the founder chose to proceed, and those actions are performed on the
+> feature itself in the tray plan's human DoD walk (below). The probe was
+> `crates/corral-desktop/examples/tray_probe.rs`, carried by commit
+> `8f35ff9`, and is deleted with the feature landing (plan D0).
+> Protocol and pass criteria: `docs/decisions/2026-09-05-tray-grill.md`
 > Q4 and Q9. What it decides: whether the preferred mechanism composes with
 > gpui's own `NSApplication` and run loop well enough to carry the accepted
 > lifecycle. It does not reopen tray product semantics.
@@ -94,26 +97,33 @@ system, which a windowless process still holds. Recorded, not thresholded
 (Q9): one windowless debug process at ~82 MiB and ~1 % CPU is the number
 the reconciliation judges.
 
-## Cases 2 and 4 — human run (pending)
+## Cases 2 and 4 — human run (folded into the feature's DoD walk)
 
-To be performed in an unlocked Aqua session; each action must leave one
-line in the log:
+Not run on the probe. The same actions are performed on the Desktop itself,
+in an unlocked Aqua session, as the tray plan's human DoD walk. The feature
+logs no click, so the walk judges by what each action must visibly do, with
+the main window closed and a managed session running:
 
-- click the status item — `tray callback fired` and `tray event delivered
-  to gpui foreground`;
-- Open Corral — `menu callback fired: id=open` then
-  `open_window(Open Corral)`;
-- New Session… — `id=new`, a window, the placeholder line;
-- a session row, twice across a scenario boundary — `row click resolved
-  session …` naming the session, once in the current generation and once
-  converging when it is gone;
-- the Dock icon with no window — `on_reopen fired (Dock)` then a window;
-- Quit Corral — `id=quit`, `dropping the tray`, the item vanishes, `quit`.
+- click the status item — the menu opens: the header "Needs You N · Ready
+  M", the rows, Open Corral, New Session…, Quit Corral;
+- Open Corral — one main window comes forward;
+- New Session… — the window, with the new-session form open;
+- a session row, twice across a generation — the first click selects and
+  opens that session; after it has left Needs You / Ready, the second click
+  (from a menu opened before it left) brings the window forward on the
+  current list and opens nothing else;
+- the Dock icon with no window — one main window;
+- Quit Corral — the warning that the session will continue running; Cancel
+  keeps the item and the process; Quit removes the item and the process
+  (`pgrep -x corral-desktop` empty).
 
-Pass requires: no duplicate line per click (a duplicate handler would log
-twice), every callback line on `[main]` (the thread the record needs for
-the ownership model), no second status item at any point, and the process
-gone after Quit.
+Pass requires: one effect per click (a duplicate handler would open two
+windows or two forms), no second status item at any point, no click that
+reaches another session than the one it named, and the process gone after
+Quit. The probe's thread criterion (every callback on `[main]`) is not
+observable on the feature and is moot for it: the handler only forwards
+the clicked id, and the Watch acts on gpui's foreground whichever thread
+delivered it.
 
 ## Dependencies
 

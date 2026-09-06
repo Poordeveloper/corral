@@ -45,6 +45,12 @@ fn polled(sessions: Vec<Value>, needs_you: AttentionCount, ready: AttentionCount
     }
 }
 
+/// The same answer from a daemon whose hello serves managed sessions.
+fn managed(mut polled: Polled) -> Polled {
+    polled.capabilities.managed_sessions = true;
+    polled
+}
+
 fn at(seconds: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
 }
@@ -152,6 +158,41 @@ fn only_needs_you_and_ready_reach_the_tray() {
     assert_eq!(current.ready.rows.len(), 1);
     assert_eq!(current.ready.rows[0].session_id, "r");
     assert_eq!(current.ready.rows[0].state, MainState::Ready);
+    assert!(projection.lists("n"));
+    assert!(projection.lists("r"));
+    assert!(!projection.lists("w"));
+    assert!(!projection.lists("u"));
+    assert!(!projection.lists("x"));
+}
+
+/// At most two generations stay alive: the current one, and the one on
+/// screen — the generation current when the item was last clicked open. A
+/// generation nobody opened goes at the next publish; the open one stays
+/// through any number of publishes, until the menu is opened again on a
+/// newer generation.
+#[test]
+fn only_the_current_generation_and_the_open_one_stay_alive() {
+    let mut generations = Generations::new();
+    let opener = generations.opener();
+
+    assert_eq!(*generations.publish("g1"), "g1");
+    generations.publish("g2");
+    assert_eq!(generations.alive(), vec![&"g2"]);
+
+    opener.opened();
+    generations.publish("g3");
+    generations.publish("g4");
+    assert_eq!(generations.alive(), vec![&"g4", &"g2"]);
+
+    opener.opened();
+    generations.publish("g5");
+    assert_eq!(generations.alive(), vec![&"g5", &"g4"]);
+
+    opener.opened();
+    generations.publish("g6");
+    assert_eq!(generations.alive(), vec![&"g6", &"g5"]);
+    generations.publish("g7");
+    assert_eq!(generations.alive(), vec![&"g7", &"g5"]);
 }
 
 /// A second of clock changes nothing; a minute changes the age, and only
@@ -231,4 +272,114 @@ fn a_menu_id_carries_the_action_and_the_session_identity() {
     assert_eq!(TrayAction::from_menu_id("group:Needs You"), None);
     assert_eq!(TrayAction::from_menu_id("session:"), None);
     assert_eq!(TrayAction::from_menu_id("something-newer"), None);
+}
+
+fn item(action: TrayAction, text: &str) -> MenuLine {
+    MenuLine::Item {
+        action,
+        text: text.to_owned(),
+    }
+}
+
+/// The menu reads top to bottom: the header, each group that has rows under
+/// its label with its overflow line, then the ways into Corral.
+#[test]
+fn the_menu_lists_the_groups_then_the_ways_in() {
+    let mut sessions: Vec<Value> = (0..11)
+        .map(|n| attention(&format!("n-{n:02}"), "needs_you", 0, n == 0))
+        .collect();
+    sessions.push(attention("r-1", "ready", 0, false));
+    let mut list = SessionList::default();
+    list.take(
+        Ok(managed(polled(sessions, count(11, 10), count(1, 1)))),
+        at(1),
+    );
+
+    let lines = TrayProjection::of(&list, at(1)).menu();
+
+    assert_eq!(
+        lines[0],
+        MenuLine::Note("Needs You 11 · Ready 1".to_owned())
+    );
+    assert_eq!(lines[1], MenuLine::Separator);
+    assert_eq!(lines[2], MenuLine::Note("Needs You".to_owned()));
+    assert_eq!(
+        lines[3],
+        item(
+            TrayAction::OpenSession("n-00".to_owned()),
+            "title n-00 · Needs You · <1m"
+        )
+    );
+    assert_eq!(
+        lines[4],
+        item(
+            TrayAction::OpenSession("n-01".to_owned()),
+            "• title n-01 · Needs You · <1m"
+        )
+    );
+    assert_eq!(lines[13], item(TrayAction::More, "… 1 more in Corral"));
+    assert_eq!(lines[14], MenuLine::Separator);
+    assert_eq!(lines[15], MenuLine::Note("Ready".to_owned()));
+    assert_eq!(
+        lines[16],
+        item(
+            TrayAction::OpenSession("r-1".to_owned()),
+            "• title r-1 · Ready · <1m"
+        )
+    );
+    assert_eq!(
+        &lines[17..],
+        &[
+            MenuLine::Separator,
+            item(TrayAction::OpenCorral, "Open Corral"),
+            item(TrayAction::NewSession, "New Session…"),
+            MenuLine::Separator,
+            item(TrayAction::Quit, "Quit Corral"),
+        ]
+    );
+}
+
+/// With nothing to list there is no group at all; New Session… is there
+/// exactly when the daemon's hello serves managed sessions — absent, not
+/// disabled, otherwise, as in the window — and never while the daemon is
+/// unreachable.
+#[test]
+fn new_session_is_offered_only_by_a_reachable_daemon_that_serves_managed_sessions() {
+    let mut list = SessionList::default();
+    list.take(Ok(managed(polled(vec![], count(0, 0), count(0, 0)))), at(1));
+    assert_eq!(
+        TrayProjection::of(&list, at(1)).menu(),
+        vec![
+            MenuLine::Note("Needs You 0 · Ready 0".to_owned()),
+            MenuLine::Separator,
+            item(TrayAction::OpenCorral, "Open Corral"),
+            item(TrayAction::NewSession, "New Session…"),
+            MenuLine::Separator,
+            item(TrayAction::Quit, "Quit Corral"),
+        ]
+    );
+
+    list.take(Ok(polled(vec![], count(0, 0), count(0, 0))), at(2));
+    assert_eq!(
+        TrayProjection::of(&list, at(2)).menu(),
+        vec![
+            MenuLine::Note("Needs You 0 · Ready 0".to_owned()),
+            MenuLine::Separator,
+            item(TrayAction::OpenCorral, "Open Corral"),
+            MenuLine::Separator,
+            item(TrayAction::Quit, "Quit Corral"),
+        ]
+    );
+
+    list.take(Err(Unanswered::Silent("gone".to_owned())), at(2));
+    assert_eq!(
+        TrayProjection::of(&list, at(2)).menu(),
+        vec![
+            MenuLine::Note("corrald did not answer: gone".to_owned()),
+            MenuLine::Separator,
+            item(TrayAction::OpenCorral, "Open Corral"),
+            MenuLine::Separator,
+            item(TrayAction::Quit, "Quit Corral"),
+        ]
+    );
 }

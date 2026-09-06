@@ -204,6 +204,11 @@ behind.
   history, and never kills a runtime. Manual link is not in the normal M1
   UI — it is CLI/debug only and warns that the assertion may let Corral
   control the runtime. It is never a lightweight drag-to-merge gesture.
+- **No status item, no watchfulness claim.** Corral claims to be watching
+  only where a menu-bar status item exists, which is macOS. On Linux there
+  is no tray and closing the window quits. On macOS, if the item cannot be
+  established, the window says so for the run and closing it quits. A
+  process nothing can reach is never called watchful.
 - **List unit.** Normally one Session is one row. Truly divergent live
   branches expand to one row per independently actionable branch, with
   secondary relation text only when lineage is reliably known. No tree or

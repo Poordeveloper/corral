@@ -18,6 +18,7 @@ use corral_desktop::bridge::{Attached, Bridge, Unanswered};
 use corral_desktop::quit::{self, Continuing, Gate};
 use corral_desktop::replica::{Geometry, Replica};
 use corral_desktop::sessions::SessionList;
+use corral_desktop::tray::{MenuLine, TrayAction, TrayProjection};
 use corral_e2e::TestAccount;
 use corral_protocol::terminal::{FrameKind, Sequence, TerminalFrame};
 use futures::StreamExt;
@@ -218,6 +219,60 @@ async fn a_session_the_daemon_started_counts_as_continuing() {
         panic!("a running session Corral started warns");
     };
     assert_eq!(warning.message, "1 session will continue running.");
+}
+
+/// The tray's projection over a live generation says what the daemon's
+/// summary says and nothing more: a shell session Corral started is neither
+/// Needs You nor Ready in the daemon's words, so it reaches no group, the
+/// counts are the daemon's, and the menu offers the ways in.
+#[tokio::test]
+async fn a_projection_over_a_live_generation_agrees_with_the_daemons_summary() {
+    let account = TestAccount::new("desktop-tray-projection");
+    let _daemon = account.start_daemon();
+    let bridge = bridge_for(&account);
+
+    let session_id = start_shell(&bridge, &account, "sleep 30").await;
+    let polled = answered(bridge.poll()).await.expect("a poll");
+    let summary = polled.summary;
+    let mut list = SessionList::default();
+    list.take(Ok(polled), SystemTime::now());
+    assert!(list.rows().iter().any(|row| row.session_id == session_id));
+
+    let projection = TrayProjection::of(&list, SystemTime::now());
+    let TrayProjection::Current(current) = &projection else {
+        panic!("a current answer projects as current");
+    };
+    assert_eq!(current.needs_you.total, summary.needs_you.total);
+    assert_eq!(current.ready.total, summary.ready.total);
+    assert_eq!(
+        current.badge.0,
+        summary.needs_you.unacknowledged + summary.ready.unacknowledged
+    );
+    assert!(current.needs_you.rows.is_empty());
+    assert!(current.ready.rows.is_empty());
+    assert_eq!(
+        projection.header(),
+        format!(
+            "Needs You {} · Ready {}",
+            summary.needs_you.total, summary.ready.total
+        )
+    );
+    let offered: Vec<TrayAction> = projection
+        .menu()
+        .into_iter()
+        .filter_map(|line| match line {
+            MenuLine::Item { action, .. } => Some(action),
+            MenuLine::Note(_) | MenuLine::Separator => None,
+        })
+        .collect();
+    assert_eq!(
+        offered,
+        vec![
+            TrayAction::OpenCorral,
+            TrayAction::NewSession,
+            TrayAction::Quit
+        ]
+    );
 }
 
 #[tokio::test]
