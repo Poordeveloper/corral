@@ -525,7 +525,8 @@ fn an_unrecognized_attention_state_renders_no_claim() {
     assert_eq!(presented.state_line(), "Running · Status unknown");
 }
 
-/// The current item's id is what an acknowledgement will name.
+/// The current item's id is what an acknowledgement will name, and what a
+/// dispute names after it: acknowledging clears the badge, not the item.
 #[test]
 fn the_current_item_is_carried_for_acknowledgement() {
     let item = attended(
@@ -539,11 +540,15 @@ fn the_current_item_is_carried_for_acknowledgement() {
     );
     let presented = present_at(&item, SystemTime::UNIX_EPOCH);
     assert_eq!(presented.acknowledgeable(), Some("item-1"));
+    assert_eq!(presented.current_item(), Some("item-1"));
     let mut acknowledged = item.clone();
     acknowledged.attention.as_mut().expect("attention").items[0].acknowledged = true;
+    let presented = present_at(&acknowledged, SystemTime::UNIX_EPOCH);
+    assert_eq!(presented.acknowledgeable(), None);
     assert_eq!(
-        present_at(&acknowledged, SystemTime::UNIX_EPOCH).acknowledgeable(),
-        None
+        presented.current_item(),
+        Some("item-1"),
+        "an acknowledged item is still the current one"
     );
 }
 

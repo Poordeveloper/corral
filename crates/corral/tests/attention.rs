@@ -10,7 +10,10 @@
 
 mod support;
 
-use support::{TestAccount, run, stderr, stdout};
+use std::time::Duration;
+
+use support::provider::{Script, new_claude, permission_dialog, session_start};
+use support::{SETTLE, TestAccount, run, stderr, stdout, wait_until};
 
 #[test]
 fn nothing_needs_you_on_a_daemon_with_no_sessions() {
@@ -163,4 +166,53 @@ fn a_missed_item_is_recorded_without_an_item_and_counted_apart() {
     assert_eq!(columns[5], "0", "{today}");
     assert_eq!(columns[6], "1", "{today}");
     assert!(!today.contains("INCOMPLETE"), "{today}");
+}
+
+/// Acknowledging clears the badge, not the item: an acknowledged Needs You is
+/// still current and still the one that may be wrong, so a false-item
+/// dispute after `ack` names it and is recorded. The item is a real one — a
+/// sealed Claude 2.1.258 permission dialog drawn on the daemon's own PTY.
+#[test]
+fn a_false_item_dispute_still_names_the_item_after_it_was_acknowledged() {
+    const FIRST: &str = "33333333-3333-4333-8333-333333333333";
+    let account = TestAccount::new("dispute-after-ack")
+        .with_mock_provider("claude")
+        .with_versioned_claude("2.1.258")
+        .with_idle_grace(Duration::from_secs(30));
+    let script = Script::new(&account, "dispute-after-ack")
+        .holding()
+        .fires(&session_start(FIRST, "startup"))
+        .fires(&permission_dialog());
+    let daemon = account.start_daemon_with(&script.environment());
+    let session = new_claude(&account);
+
+    let listed = || stdout(&run(account.corral().arg("list")));
+    wait_until(SETTLE, || listed().contains("Needs You"));
+    assert!(listed().contains("Needs You"), "{}", listed());
+
+    let acked = run(account.corral().args(["ack", &session]));
+    assert!(acked.status.success(), "{}", stderr(&acked));
+    assert_eq!(stdout(&acked).trim(), "Acknowledged.");
+
+    let disputed = run(account.corral().args([
+        "attention",
+        "dispute",
+        &session,
+        "--note",
+        "nothing was asked",
+    ]));
+    assert!(disputed.status.success(), "{}", stderr(&disputed));
+    assert_eq!(stdout(&disputed).trim(), "Recorded.");
+    let report = stdout(&run(account.corral().args(["attention", "report"])));
+    let today = report
+        .lines()
+        .find(|line| line.starts_with("20"))
+        .unwrap_or_else(|| panic!("a day in: {report}"));
+    let columns: Vec<&str> = today.split_whitespace().collect();
+    // day, transitions, needs you (all), trusted, ready, false, missed
+    assert_eq!(columns[5], "1", "{today}");
+    assert_eq!(columns[6], "0", "{today}");
+    assert_eq!(columns[3], "1", "a sealed, attested Needs You: {today}");
+
+    drop(daemon);
 }

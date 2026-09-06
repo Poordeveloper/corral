@@ -84,6 +84,39 @@ impl Script {
     }
 }
 
+/// A line the stand-in writes to its own terminal instead of firing.
+pub fn draws(text: &str) -> Value {
+    json!({ "corral_mock_draw": text })
+}
+
+/// The permission dialog as Claude Code 2.1.258 draws it, in the shape the
+/// sealed `permission-dialog` rule recognizes: the option list under a
+/// question, the dialog's own last row, and no mode bar.
+pub fn permission_dialog() -> Value {
+    draws("\r\nAllow Bash(ls)?\r\n\r\n❯ 1. Yes\r\n  2. No\r\n\r\nEsc to cancel\r\n")
+}
+
+/// `corral new claude`, and the Session id it printed.
+///
+/// No terminal on standard input, so the attach loop reads EOF and returns;
+/// what is under test is everything before that.
+pub fn new_claude(account: &TestAccount) -> String {
+    let output = super::run(
+        account
+            .corral()
+            .arg("new")
+            .arg("claude")
+            .stdin(std::process::Stdio::null()),
+    );
+    let stderr = super::stderr(&output);
+    assert!(output.status.success(), "{stderr}");
+    stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("session "))
+        .unwrap_or_else(|| panic!("a session id in {stderr:?}"))
+        .to_owned()
+}
+
 /// A `SessionStart` payload, in the shape Claude Code writes it.
 pub fn session_start(session_id: &str, source: &str) -> Value {
     json!({

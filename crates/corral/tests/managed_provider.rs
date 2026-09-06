@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use support::provider::{
-    self, Script, agent_event_kind, external_id, launch_files, listed, provider_name,
+    self, Script, agent_event_kind, external_id, launch_files, listed, new_claude, provider_name,
     recorded_kinds, session_end, session_start, sessions,
 };
 use support::wire::{RawClient, error_code, refused_with};
@@ -42,27 +42,6 @@ fn account(name: &str) -> TestAccount {
 /// Start the daemon that will spawn the scripted provider.
 fn daemon_running(account: &TestAccount, script: &Script) -> DaemonProcess {
     account.start_daemon_with(&script.environment())
-}
-
-/// `corral new claude`, and the Session id it printed.
-///
-/// No terminal on standard input, so the attach loop reads EOF and returns;
-/// what is under test is everything before that.
-fn new_claude(account: &TestAccount) -> String {
-    let output = support::run(
-        account
-            .corral()
-            .arg("new")
-            .arg("claude")
-            .stdin(std::process::Stdio::null()),
-    );
-    let stderr = support::stderr(&output);
-    assert!(output.status.success(), "{stderr}");
-    stderr
-        .lines()
-        .find_map(|line| line.strip_prefix("session "))
-        .unwrap_or_else(|| panic!("a session id in {stderr:?}"))
-        .to_owned()
 }
 
 /// The Runs of the only Session the log holds, oldest first.

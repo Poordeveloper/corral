@@ -137,6 +137,9 @@ pub struct SessionPresentation {
     /// The current item's id when it is still unacknowledged: what an
     /// acknowledgement names (grill Q18).
     acknowledgeable: Option<String>,
+    /// The current item's id, acknowledged or not: what a dispute names.
+    /// Acknowledging does not end an item, so this outlives `acknowledgeable`.
+    current_item: Option<String>,
 }
 
 /// What a surface may say about one listed session.
@@ -213,6 +216,12 @@ pub fn present_at(item: &SessionListItem, now: SystemTime) -> SessionPresentatio
             .find(|item| !item.acknowledged)
             .map(|item| item.attention_item_id.clone())
     });
+    let current_item = attention.and_then(|facts| {
+        facts
+            .items
+            .first()
+            .map(|item| item.attention_item_id.clone())
+    });
 
     SessionPresentation {
         state,
@@ -259,6 +268,7 @@ pub fn present_at(item: &SessionListItem, now: SystemTime) -> SessionPresentatio
         },
         last_known,
         acknowledgeable,
+        current_item,
     }
 }
 
@@ -367,6 +377,13 @@ impl SessionPresentation {
     /// The unacknowledged current item, by the id an acknowledgement names.
     pub fn acknowledgeable(&self) -> Option<&str> {
         self.acknowledgeable.as_deref()
+    }
+
+    /// The current item whether or not it was acknowledged, by the id a
+    /// dispute names: an acknowledged Needs You is still the item that may
+    /// be wrong.
+    pub fn current_item(&self) -> Option<&str> {
+        self.current_item.as_deref()
     }
 
     /// The lines beneath the state, in the order every surface prints them.

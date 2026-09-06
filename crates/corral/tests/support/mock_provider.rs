@@ -25,6 +25,10 @@
 //! CORRAL_MOCK_PROVIDER_ARGV     a file the received argv is appended to
 //! CORRAL_MOCK_PROVIDER_HOLD     "1" to stay alive until its terminal closes
 //! ```
+//!
+//! An events line of the shape `{"corral_mock_draw": "<text>"}` is not fired:
+//! the text is written to the stand-in's own terminal, so a scenario can put
+//! a screen a sealed rule recognizes in front of the daemon's emulator.
 
 use std::io::{BufRead, Read, Write};
 use std::process::{Command, Stdio};
@@ -35,18 +39,19 @@ fn main() {
         record(&path, &argv.join(" "));
     }
 
-    match injection(&argv) {
-        Some(Injection::Settings(command)) => {
-            for payload in scripted_events() {
-                fire_through_a_shell(&command, &payload);
-            }
+    let injection = injection(&argv);
+    for payload in scripted_events() {
+        if let Some(text) = drawn(&payload) {
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout.write_all(text.as_bytes());
+            let _ = stdout.flush();
+            continue;
         }
-        Some(Injection::Notify(program)) => {
-            for payload in scripted_events() {
-                fire_with_the_payload_appended(&program, &payload);
-            }
+        match &injection {
+            Some(Injection::Settings(command)) => fire_through_a_shell(command, &payload),
+            Some(Injection::Notify(program)) => fire_with_the_payload_appended(program, &payload),
+            None => {}
         }
-        None => {}
     }
 
     // A run that holds keeps its Session in the daemon's list as `running`;
@@ -120,6 +125,12 @@ fn notify_program(argv: &[String]) -> Option<Vec<String>> {
     let array = assignment.strip_prefix("notify=")?;
     let program: Vec<String> = serde_json::from_str(array).ok()?;
     (!program.is_empty()).then_some(program)
+}
+
+/// The text a drawing line carries, or `None` for a payload to fire.
+fn drawn(payload: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    value.get("corral_mock_draw")?.as_str().map(str::to_owned)
 }
 
 fn scripted_events() -> Vec<String> {

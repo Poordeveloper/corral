@@ -249,11 +249,32 @@ async fn needs(connection: &mut Connection) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The session's current unacknowledged item, by the id this command saw.
-async fn current_item(
+/// The session's current unacknowledged item, by the id this command saw:
+/// what `ack` names.
+async fn current_unacknowledged_item(
     connection: &mut Connection,
     session: &str,
 ) -> Result<Option<String>, ExitCode> {
+    let presented = presented(connection, session).await?;
+    Ok(presented.and_then(|item| item.acknowledgeable().map(str::to_owned)))
+}
+
+/// The session's current item whether or not it was acknowledged: what a
+/// dispute names. Acknowledging clears the badge, not the item, and an
+/// acknowledged Needs You can still be the wrong one.
+async fn current_attention_item(
+    connection: &mut Connection,
+    session: &str,
+) -> Result<Option<String>, ExitCode> {
+    let presented = presented(connection, session).await?;
+    Ok(presented.and_then(|item| item.current_item().map(str::to_owned)))
+}
+
+/// One session as this client would present it now, from a fresh listing.
+async fn presented(
+    connection: &mut Connection,
+    session: &str,
+) -> Result<Option<corral_client::presentation::SessionPresentation>, ExitCode> {
     let listed = match connection.session_list().await {
         Ok(listed) => listed,
         Err(error) => return Err(report_request_failure(&error)),
@@ -263,11 +284,7 @@ async fn current_item(
         .iter()
         .filter_map(|value| serde_json::from_value::<SessionListItem>(value.clone()).ok())
         .find(|item| item.session_id == session)
-        .and_then(|item| {
-            corral_tui::present_at(&item, SystemTime::now())
-                .acknowledgeable()
-                .map(str::to_owned)
-        }))
+        .map(|item| corral_tui::present_at(&item, SystemTime::now())))
 }
 
 async fn acknowledge(connection: &mut Connection, session: &str) -> ExitCode {
@@ -275,7 +292,7 @@ async fn acknowledge(connection: &mut Connection, session: &str) -> ExitCode {
         Ok(resolved) => resolved,
         Err(code) => return code,
     };
-    let Some(item) = (match current_item(connection, &resolved).await {
+    let Some(item) = (match current_unacknowledged_item(connection, &resolved).await {
         Ok(item) => item,
         Err(code) => return code,
     }) else {
@@ -349,7 +366,7 @@ async fn attention(connection: &mut Connection, action: AttentionAction) -> Exit
                 }
                 (DisputeKindWire::MissedItem, None)
             } else {
-                let item = match current_item(connection, &resolved).await {
+                let item = match current_attention_item(connection, &resolved).await {
                     Ok(item) => item,
                     Err(code) => return code,
                 };
