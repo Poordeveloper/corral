@@ -76,9 +76,18 @@ impl StatusItem for Tray {
         // `Generations` decides when the menu itself goes.
         let shown = self.generations.publish(menu).clone();
         self.icon.set_menu(Some(Box::new(shown)));
-        self.icon.set_title(projection.badge_text());
+        self.icon.set_title(Some(title(projection)));
         Ok(())
     }
+}
+
+/// The status item's title: the badge, or the empty string — never `None`.
+/// tray-icon 0.24.2 writes the native title only when handed one (tray-icon
+/// #322), so a badge that has gone — resolved, or the daemon unreachable —
+/// must be written as nothing, or the last count stays on the menu bar as
+/// if current.
+fn title(projection: &TrayProjection) -> String {
+    projection.badge_text().unwrap_or_default()
 }
 
 /// The template glyph, built in code rather than shipped as an asset: a ring
@@ -98,4 +107,38 @@ fn glyph() -> Result<Icon, String> {
         }
     }
     Icon::from_rgba(rgba, SIDE, SIDE).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tray::{Badge, Current, Group};
+
+    fn with_badge(badge: u32) -> TrayProjection {
+        let group = |label| Group {
+            label,
+            total: 0,
+            rows: vec![],
+            overflow: 0,
+        };
+        TrayProjection::Current(Current {
+            badge: Badge(badge),
+            needs_you: group("Needs You"),
+            ready: group("Ready"),
+        })
+    }
+
+    /// A badge that has gone reaches the platform as an empty title: handed
+    /// `None`, tray-icon 0.24.2 would leave the last count in place.
+    #[test]
+    fn an_absent_badge_is_written_as_an_empty_title() {
+        assert_eq!(title(&with_badge(1)), "1");
+        assert_eq!(title(&with_badge(0)), "");
+        assert_eq!(
+            title(&TrayProjection::Unreachable {
+                line: "gone".to_owned()
+            }),
+            ""
+        );
+    }
 }

@@ -33,6 +33,9 @@ tokio = { workspace = true }
 # Default features off: both crates' defaults are their Linux GTK3 and libxdo
 # paths, which would enter the lockfile (and cargo-deny's advisory sweep of
 # it) without ever building for a Corral target.
+# 0.24.2 writes the native title only when handed one (tray-icon #322): the
+# macOS item writes an empty title for an absent badge, and stops with the
+# release that clears on `None`.
 tray-icon = { version = "0.24.2", default-features = false }
 # 0.19.3's macOS items hold a raw pointer into the Rust menu they were built
 # from (muda #328, fixed upstream after this release and unreleased):
