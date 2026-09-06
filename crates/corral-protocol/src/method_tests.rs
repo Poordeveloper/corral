@@ -606,12 +606,17 @@ fn the_attention_report_names_incomplete_days() {
             into_ready: 5,
             disputes: 1,
             incomplete: true,
+            trusted_needs_you: Some(2),
+            false_disputes: Some(1),
+            missed_disputes: Some(0),
         }],
     };
     let encoded = serde_json::to_value(&report).expect("encode");
     assert_eq!(encoded["days"][0]["incomplete"], json!(true));
+    assert_eq!(encoded["days"][0]["trusted_needs_you"], json!(2));
     let decoded: AttentionReportResult = serde_json::from_value(encoded).expect("decode");
     assert_eq!(decoded.days[0].into_needs_you, 3);
+    assert_eq!(decoded.days[0].missed_disputes, Some(0));
     let since: AttentionReportParams =
         serde_json::from_value(json!({"since": "2026-09-01"})).expect("decode");
     assert_eq!(since.since.as_deref(), Some("2026-09-01"));
@@ -630,13 +635,69 @@ fn a_dispute_names_an_item_when_it_can_and_learns_whether_it_was_stale() {
     let bare: AttentionDisputeParams =
         serde_json::from_value(json!({"session_id": "s"})).expect("decode");
     assert_eq!(bare.attention_item_id, None);
-    let result = AttentionDisputeResult { stale: true };
+    assert_eq!(bare.kind, None, "an older client sends no kind");
+    let result = AttentionDisputeResult {
+        stale: true,
+        kind: None,
+    };
     assert_eq!(
         serde_json::to_value(result).expect("encode"),
         json!({"stale": true})
     );
     assert_eq!(ATTENTION_REPORT, "attention.report");
     assert_eq!(ATTENTION_DISPUTE, "attention.dispute");
+}
+
+/// A dispute states its kind (completion grill Q3). A kind this build lacks
+/// decodes as itself so the daemon refuses it by name; an older daemon's
+/// answer carries no kind, and an older daemon's day facts carry none of
+/// the counts that need one — absent, never zero.
+#[test]
+fn a_dispute_kind_survives_the_wire_and_an_unknown_one_keeps_its_name() {
+    let missed: AttentionDisputeParams = serde_json::from_value(json!({
+        "session_id": "s",
+        "kind": "missed_item",
+        "note": "the permission prompt showed no row",
+        "a_field_from_later": 1
+    }))
+    .expect("decode past unknown fields");
+    assert_eq!(missed.kind, Some(DisputeKindWire::MissedItem));
+    assert_eq!(
+        missed.note.as_deref(),
+        Some("the permission prompt showed no row")
+    );
+    let later: AttentionDisputeParams =
+        serde_json::from_value(json!({"session_id": "s", "kind": "retracted"})).expect("decode");
+    assert_eq!(
+        later.kind,
+        Some(DisputeKindWire::Unrecognized("retracted".into()))
+    );
+    assert_eq!(
+        serde_json::to_value(AttentionDisputeParams {
+            session_id: "s".into(),
+            attention_item_id: Some("i".into()),
+            kind: Some(DisputeKindWire::FalseItem),
+            note: None,
+        })
+        .expect("encode"),
+        json!({"session_id": "s", "attention_item_id": "i", "kind": "false_item"})
+    );
+    let answer: AttentionDisputeResult =
+        serde_json::from_value(json!({"stale": false, "kind": "missed_item", "later": true}))
+            .expect("decode");
+    assert_eq!(answer.kind, Some(DisputeKindWire::MissedItem));
+    let older_day: AttentionDayFacts = serde_json::from_value(json!({
+        "date": "2026-09-06", "transitions": 4, "into_needs_you": 2, "into_ready": 1,
+        "disputes": 1, "incomplete": false, "from_later": "x"
+    }))
+    .expect("decode an older daemon's day");
+    assert_eq!(older_day.trusted_needs_you, None);
+    assert_eq!(older_day.false_disputes, None);
+    assert_eq!(older_day.missed_disputes, None);
+    assert_eq!(
+        crate::hello::capability::ATTENTION_DISPUTE_KINDS,
+        "attention.dispute-kinds.v1"
+    );
 }
 
 /// A history row says where it came from and when it was last active, and

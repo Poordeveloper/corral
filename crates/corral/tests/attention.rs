@@ -91,3 +91,76 @@ fn a_drawing_session_reads_working_and_an_ended_one_exited() {
     assert!(!report.contains("INCOMPLETE"), "{report}");
     let _ = session;
 }
+
+/// A false-item dispute binds one item. With none current there is nothing
+/// to bind it to, the command refuses before sending, and the journal holds
+/// no record of a statement nobody could make (completion grill Q15).
+#[test]
+fn disputing_a_session_without_an_item_refuses_and_records_nothing() {
+    let account = TestAccount::new("dispute-nothing");
+    let started = run(account
+        .corral()
+        .args(["new", "--", "sh", "-c", "sleep 30"])
+        .stdin(std::process::Stdio::null()));
+    let session = stderr(&started)
+        .lines()
+        .find_map(|line| line.strip_prefix("session "))
+        .map(str::trim)
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("no session id in: {}", stderr(&started)));
+
+    let output = run(account.corral().args(["attention", "dispute", &session]));
+
+    assert!(!output.status.success(), "{}", stdout(&output));
+    assert_eq!(
+        stderr(&output).trim(),
+        "No current attention item. If Corral failed to surface an item, use --missed."
+    );
+    let report = stdout(&run(account.corral().args(["attention", "report"])));
+    for day in report.lines().filter(|line| line.starts_with("20")) {
+        let columns: Vec<&str> = day.split_whitespace().collect();
+        // day, transitions, needs you (all), trusted, ready, false, missed
+        assert_eq!(columns[5], "0", "no dispute was recorded: {day}");
+        assert_eq!(columns[6], "0", "no dispute was recorded: {day}");
+    }
+}
+
+/// A missed item is its own statement: due, and not surfaced. It names no
+/// item, so a session with none current records it, and the report counts
+/// it apart from false items.
+#[test]
+fn a_missed_item_is_recorded_without_an_item_and_counted_apart() {
+    let account = TestAccount::new("dispute-missed");
+    let started = run(account
+        .corral()
+        .args(["new", "--", "sh", "-c", "sleep 30"])
+        .stdin(std::process::Stdio::null()));
+    let session = stderr(&started)
+        .lines()
+        .find_map(|line| line.strip_prefix("session "))
+        .map(str::trim)
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("no session id in: {}", stderr(&started)));
+
+    let output = run(account.corral().args([
+        "attention",
+        "dispute",
+        &session,
+        "--missed",
+        "--note",
+        "the approval prompt showed no row",
+    ]));
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output).trim(), "Recorded.");
+    let report = stdout(&run(account.corral().args(["attention", "report"])));
+    let today = report
+        .lines()
+        .find(|line| line.starts_with("20"))
+        .unwrap_or_else(|| panic!("a day in: {report}"));
+    let columns: Vec<&str> = today.split_whitespace().collect();
+    // day, transitions, needs you (all), trusted, ready, false, missed
+    assert_eq!(columns[5], "0", "{today}");
+    assert_eq!(columns[6], "1", "{today}");
+    assert!(!today.contains("INCOMPLETE"), "{today}");
+}

@@ -68,6 +68,11 @@ pub mod capability {
     /// `attention.acknowledge`: the daemon derives the five-state main
     /// status and clients render it (ADR 0015).
     pub const ATTENTION: &str = "attention.v1";
+    /// `attention.dispute` records a kind — `false_item` or `missed_item` —
+    /// and a note (completion grill Q3). A client asks before sending a
+    /// missed-item dispute: an older daemon would record it as the default
+    /// kind, a fact it never observed.
+    pub const ATTENTION_DISPUTE_KINDS: &str = "attention.dispute-kinds.v1";
     /// Every snapshot on a terminal channel is preceded by a `Geometry` frame
     /// (ADR 0017 D1). Advertised by the daemon; a client advertises nothing.
     pub const TERMINAL_GEOMETRY: &str = "terminal.geometry.v1";

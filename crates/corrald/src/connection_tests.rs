@@ -516,6 +516,68 @@ async fn a_dispute_is_journaled_and_reported() {
     );
     assert_eq!(stale["stale"], true);
 
+    // A false item is about one item: with none named there is nothing to
+    // bind it to, and nothing is recorded (completion grill Q15). A missed
+    // item names none by design, and a kind this daemon lacks is refused by
+    // its name rather than recorded as the default.
+    let (code, _) = error_code(
+        dispatch(
+            &request(
+                method::ATTENTION_DISPUTE,
+                Some(json!({"session_id": session.to_string()})),
+            ),
+            &registry.state,
+        )
+        .await,
+    );
+    assert_eq!(code, ErrorCode::InvalidParams);
+    let (code, _) = error_code(
+        dispatch(
+            &request(
+                method::ATTENTION_DISPUTE,
+                Some(json!({"session_id": session.to_string(), "kind": "retracted"})),
+            ),
+            &registry.state,
+        )
+        .await,
+    );
+    assert_eq!(code, ErrorCode::InvalidParams);
+    let (code, _) = error_code(
+        dispatch(
+            &request(
+                method::ATTENTION_DISPUTE,
+                Some(json!({
+                    "session_id": session.to_string(),
+                    "kind": "missed_item",
+                    "attention_item_id": item.to_string()
+                })),
+            ),
+            &registry.state,
+        )
+        .await,
+    );
+    assert_eq!(
+        code,
+        ErrorCode::InvalidParams,
+        "a missed item names no item"
+    );
+    let missed = result_value(
+        dispatch(
+            &request(
+                method::ATTENTION_DISPUTE,
+                Some(json!({
+                    "session_id": session.to_string(),
+                    "kind": "missed_item",
+                    "note": "a prompt with no row"
+                })),
+            ),
+            &registry.state,
+        )
+        .await,
+    );
+    assert_eq!(missed["stale"], false);
+    assert_eq!(missed["kind"], "missed_item");
+
     let report = result_value(
         dispatch(
             &request(method::ATTENTION_REPORT, Some(json!({}))),
@@ -524,8 +586,28 @@ async fn a_dispute_is_journaled_and_reported() {
         .await,
     );
     let today = &report["days"][0];
-    assert_eq!(today["disputes"], 2);
+    assert_eq!(today["disputes"], 3);
+    assert_eq!(today["false_disputes"], 2);
+    assert_eq!(today["missed_disputes"], 1);
+    // The ledger here was driven directly, so no transition reached the
+    // journal; the columns exist and count nothing, which is not absence.
+    assert_eq!(today["trusted_needs_you"], 0);
     assert_eq!(today["incomplete"], false);
+    let lines = std::fs::read_dir(&diagnostics)
+        .expect("diagnostics")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|e| e == "jsonl"))
+        .map(|entry| std::fs::read_to_string(entry.path()).expect("journal"))
+        .collect::<String>();
+    let missed_line = lines
+        .lines()
+        .find(|line| line.contains("missed_item"))
+        .expect("the missed item was journaled");
+    assert!(missed_line.contains(r#""item":null"#), "{missed_line}");
+    assert!(
+        missed_line.contains("a prompt with no row"),
+        "{missed_line}"
+    );
 }
 
 /// A discovered runtime a delivery has identified is a Session like any
@@ -616,7 +698,12 @@ async fn attention_verbs_refuse_a_runtime_that_cannot_be_consulted() {
             dispatch(
                 &request(
                     method::ATTENTION_DISPUTE,
-                    Some(serde_json::json!({ "session_id": session.to_string() })),
+                    // Named, so the refusal is the runtime's and not the
+                    // one a false item without an item earns.
+                    Some(serde_json::json!({
+                        "session_id": session.to_string(),
+                        "attention_item_id": corral_core::AttentionItemId::mint().to_string()
+                    })),
                 ),
                 &registry.state,
             )
@@ -696,8 +783,10 @@ async fn a_journal_that_lost_a_record_it_could_not_mark_refuses_to_report() {
         vec![crate::attention::Record::Dispute(
             crate::attention::DisputeRecord {
                 session: corral_core::CorralSessionId::mint(),
+                kind: crate::attention::DisputeKind::MissedItem,
                 item: None,
                 stale: false,
+                note: None,
             },
         )],
     );
@@ -733,8 +822,10 @@ async fn a_mark_that_could_not_be_written_lands_when_it_can_and_survives_a_resta
         vec![crate::attention::Record::Dispute(
             crate::attention::DisputeRecord {
                 session: corral_core::CorralSessionId::mint(),
+                kind: crate::attention::DisputeKind::MissedItem,
                 item: None,
                 stale: false,
+                note: None,
             },
         )]
     };
@@ -797,8 +888,10 @@ async fn a_record_the_journal_could_not_write_makes_its_day_report_incomplete() 
         vec![crate::attention::Record::Dispute(
             crate::attention::DisputeRecord {
                 session: corral_core::CorralSessionId::mint(),
+                kind: crate::attention::DisputeKind::MissedItem,
                 item: None,
                 stale: false,
+                note: None,
             },
         )]
     };
@@ -852,8 +945,10 @@ async fn a_record_lost_while_nothing_could_be_written_is_not_forgotten_by_a_rest
         vec![crate::attention::Record::Dispute(
             crate::attention::DisputeRecord {
                 session: corral_core::CorralSessionId::mint(),
+                kind: crate::attention::DisputeKind::MissedItem,
                 item: None,
                 stale: false,
+                note: None,
             },
         )]
     };

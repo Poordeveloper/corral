@@ -152,23 +152,25 @@ fn exhausting_the_day_budget_marks_the_day_incomplete_and_keeps_earlier_records(
 #[test]
 fn files_older_than_retention_are_pruned_at_open_and_at_rollover() {
     let dir = scratch();
-    std::fs::write(dir.join("attention-journal-2026-07-01.jsonl"), "{}\n").expect("old file");
-    std::fs::write(dir.join("attention-journal-2026-07-01.incomplete"), "").expect("old marker");
-    std::fs::write(dir.join("attention-journal-2026-08-20.jsonl"), "{}\n").expect("recent file");
+    std::fs::write(dir.join("attention-journal-2026-05-01.jsonl"), "{}\n").expect("old file");
+    std::fs::write(dir.join("attention-journal-2026-05-01.incomplete"), "").expect("old marker");
+    // Eighty-nine days before noon: inside the ninety-day retention that
+    // covers the 14-day window, the cohort's four weeks, and the review.
+    std::fs::write(dir.join("attention-journal-2026-06-05.jsonl"), "{}\n").expect("recent file");
     let mut journal = Journal::open(&dir, Budget::default(), noon()).expect("open");
-    assert!(!dir.join("attention-journal-2026-07-01.jsonl").exists());
-    assert!(!dir.join("attention-journal-2026-07-01.incomplete").exists());
-    assert!(dir.join("attention-journal-2026-08-20.jsonl").exists());
+    assert!(!dir.join("attention-journal-2026-05-01.jsonl").exists());
+    assert!(!dir.join("attention-journal-2026-05-01.incomplete").exists());
+    assert!(dir.join("attention-journal-2026-06-05.jsonl").exists());
 
-    // Thirty days later the August file is past retention; rolling to a new
-    // day is what prunes it, so a daemon alive for weeks still prunes.
+    // Two days later the June file is past retention; rolling to a new day
+    // is what prunes it, so a daemon alive for weeks still prunes.
     journal
         .append(
-            noon() + 30 * DAY,
+            noon() + 2 * DAY,
             transition(CorralSessionId::mint(), MainState::Ready),
         )
         .expect("append");
-    assert!(!dir.join("attention-journal-2026-08-20.jsonl").exists());
+    assert!(!dir.join("attention-journal-2026-06-05.jsonl").exists());
 }
 
 #[test]
@@ -181,8 +183,10 @@ fn a_dispute_names_the_item_it_is_about_and_whether_it_was_stale() {
             noon(),
             Record::Dispute(DisputeRecord {
                 session: CorralSessionId::mint(),
+                kind: DisputeKind::FalseItem,
                 item: Some(item),
                 stale: true,
+                note: Some("it was still thinking".to_owned()),
             }),
         )
         .expect("append");
@@ -190,8 +194,143 @@ fn a_dispute_names_the_item_it_is_about_and_whether_it_was_stale() {
         std::fs::read_to_string(dir.join("attention-journal-2026-09-02.jsonl")).expect("file");
     let value: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
     assert_eq!(value["kind"], "dispute");
+    assert_eq!(value["dispute_kind"], "false_item");
     assert_eq!(value["item"], item.to_string());
     assert_eq!(value["stale"], true);
+    assert_eq!(value["note"], "it was still thinking");
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "at_unix_ms",
+            "build",
+            "dispute_kind",
+            "item",
+            "kind",
+            "note",
+            "seq",
+            "session",
+            "stale"
+        ]
+    );
+}
+
+/// The gate counts trusted Needs You item activations (completion grill Q2,
+/// Q19): a new item, attested or deterministic, under a sealed semantic.
+/// Everything else landing in Needs You still counts under `into_needs_you`,
+/// and an assurance this build cannot name makes the day incomplete rather
+/// than untrusted.
+#[test]
+fn the_report_counts_trusted_activations_apart_from_every_needs_you() {
+    let dir = scratch();
+    let mut journal = Journal::open(&dir, Budget::default(), noon()).expect("open");
+    let session = CorralSessionId::mint();
+    let shaped = |assurance: Option<Assurance>, sealed: Option<bool>, born: bool| {
+        let Record::Transition(mut record) = transition(session, MainState::NeedsYou) else {
+            unreachable!()
+        };
+        record.assurance = assurance;
+        record.sealed = sealed;
+        record.born = born.then(AttentionItemId::mint);
+        Record::Transition(record)
+    };
+    let records = [
+        shaped(Some(Assurance::Attested), Some(true), true),
+        shaped(Some(Assurance::Deterministic), Some(true), true),
+        // The same item under a changed evidence source: no birth, no count.
+        shaped(Some(Assurance::Attested), Some(true), false),
+        shaped(Some(Assurance::Manual), Some(true), true),
+        shaped(Some(Assurance::Heuristic), Some(true), true),
+        shaped(Some(Assurance::Attested), Some(false), true),
+        shaped(Some(Assurance::Attested), None, true),
+        shaped(None, Some(true), true),
+    ];
+    let expected = records.len() as u64;
+    for (i, record) in records.into_iter().enumerate() {
+        journal
+            .append(noon() + Duration::from_secs(i as u64), record)
+            .expect("append");
+    }
+    journal
+        .append(
+            noon() + Duration::from_secs(20),
+            transition(session, MainState::Ready),
+        )
+        .expect("append");
+
+    let day = report(&dir).expect("report").days.remove(0);
+    assert!(!day.incomplete);
+    assert_eq!(day.into_needs_you, expected);
+    assert_eq!(day.trusted_needs_you, 2);
+    assert_eq!(day.into_ready, 1);
+
+    let path = dir.join("attention-journal-2026-09-02.jsonl");
+    let mut text = std::fs::read_to_string(&path).expect("file");
+    text.push_str(
+        r#"{"kind":"transition","to":"needs_you","born":"x","assurance":"vouched","sealed":true}"#,
+    );
+    text.push('\n');
+    std::fs::write(&path, text).expect("write");
+    let day = report(&dir).expect("report").days.remove(0);
+    assert!(day.incomplete, "an assurance this build cannot name");
+    assert_eq!(day.into_needs_you, expected + 1);
+    assert_eq!(day.trusted_needs_you, 2);
+}
+
+/// Disputes are split by kind; a line from before kinds existed is a false
+/// item, and a kind this build lacks leaves the split a floor (Q3).
+#[test]
+fn the_report_splits_disputes_by_kind_and_reads_an_old_line_as_a_false_item() {
+    let dir = scratch();
+    let mut journal = Journal::open(&dir, Budget::default(), noon()).expect("open");
+    let session = CorralSessionId::mint();
+    let dispute = |kind, item| {
+        Record::Dispute(DisputeRecord {
+            session,
+            kind,
+            item,
+            stale: false,
+            note: None,
+        })
+    };
+    journal
+        .append(
+            noon(),
+            dispute(DisputeKind::FalseItem, Some(AttentionItemId::mint())),
+        )
+        .expect("append");
+    journal
+        .append(noon(), dispute(DisputeKind::MissedItem, None))
+        .expect("append");
+    journal
+        .append(noon(), dispute(DisputeKind::MissedItem, None))
+        .expect("append");
+    let path = dir.join("attention-journal-2026-09-02.jsonl");
+    let mut text = std::fs::read_to_string(&path).expect("file");
+    text.push_str(r#"{"kind":"dispute","session":"s","item":null,"stale":false}"#);
+    text.push('\n');
+    std::fs::write(&path, text).expect("write");
+
+    let day = report(&dir).expect("report").days.remove(0);
+    assert!(!day.incomplete);
+    assert_eq!(day.disputes, 4);
+    assert_eq!(day.false_disputes, 2, "the old line is a false item");
+    assert_eq!(day.missed_disputes, 2);
+
+    let mut text = std::fs::read_to_string(&path).expect("file");
+    text.push_str(r#"{"kind":"dispute","session":"s","dispute_kind":"retracted","stale":false}"#);
+    text.push('\n');
+    std::fs::write(&path, text).expect("write");
+    let day = report(&dir).expect("report").days.remove(0);
+    assert!(day.incomplete, "a kind this build cannot name");
+    assert_eq!(day.disputes, 5);
+    assert_eq!(day.false_disputes + day.missed_disputes, 4);
 }
 
 /// The report reads what the engine never does, and says which days are

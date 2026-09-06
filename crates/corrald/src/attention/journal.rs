@@ -4,7 +4,7 @@
 //! One file per day under the diagnostics directory, a closed record shape
 //! with nowhere to put a screen or a payload, a per-day budget that ends in
 //! an explicit `.incomplete` marker rather than in silently dropped records,
-//! a thirty-day prune that runs at open and at every day rollover, so a
+//! a ninety-day prune that runs at open and at every day rollover, so a
 //! daemon alive for weeks prunes too, and a sentinel naming the day being
 //! written so a daemon that dies mid-day is not mistaken for one that had
 //! nothing to say.
@@ -39,7 +39,10 @@ impl Default for Budget {
     fn default() -> Self {
         Self {
             per_day_bytes: 16 * 1024 * 1024,
-            retention: Duration::from_secs(30 * 24 * 60 * 60),
+            // Ninety days: the 14-day attention window, the cohort's four
+            // weeks, and the reconciliation after them, without the journal
+            // becoming permanent product state (completion grill Q5).
+            retention: Duration::from_secs(90 * 24 * 60 * 60),
         }
     }
 }
@@ -72,13 +75,52 @@ pub struct TransitionRecord {
     pub notifiable: bool,
 }
 
-/// A person said the current item was wrong.
+/// A trusted Needs You item activation: the unit the release gate counts
+/// (completion grill Q2, Q19). Defined over the record's fields because the
+/// reader only ever has those.
+///
+/// A new item must have been born: the same blocker under a changed evidence
+/// source keeps its id and was frozen as one item. Manual assurance is a
+/// person's binding, not Corral's detection, so it never counts; sealing is
+/// what makes the semantic a measured one. `notifiable` is deliberately not
+/// consulted: an item found at a cold-start baseline is fidelity evidence
+/// even though delivery was rightly suppressed.
+fn trusted_activation(
+    to: MainState,
+    born: bool,
+    assurance: Option<Assurance>,
+    sealed: Option<bool>,
+) -> bool {
+    to == MainState::NeedsYou
+        && born
+        && matches!(
+            assurance,
+            Some(Assurance::Deterministic | Assurance::Attested)
+        )
+        && sealed == Some(true)
+}
+
+/// What a dispute states (completion grill Q3): the item it names was
+/// wrong, or an item should have appeared and Corral surfaced none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisputeKind {
+    FalseItem,
+    MissedItem,
+}
+
+/// A person said the current item was wrong, or that one was missing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisputeRecord {
     pub session: CorralSessionId,
+    pub kind: DisputeKind,
+    /// The item disputed. Always named for a false item; never for a missed
+    /// one, whose claim is exactly that no item exists to name.
     pub item: Option<AttentionItemId>,
     /// The item named was no longer current when the dispute arrived.
     pub stale: bool,
+    /// The person's own words, kept for the evidence review and read by
+    /// nothing else.
+    pub note: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -362,9 +404,43 @@ fn encode(record: &Record, now: SystemTime, seq: u64) -> Value {
             "at_unix_ms": at_unix_ms,
             "build": env!("CARGO_PKG_VERSION"),
             "session": d.session.to_string(),
+            "dispute_kind": dispute_kind(d.kind),
             "item": d.item.map(|id| id.to_string()),
             "stale": d.stale,
+            "note": d.note,
         }),
+    }
+}
+
+fn dispute_kind(kind: DisputeKind) -> &'static str {
+    match kind {
+        DisputeKind::FalseItem => "false_item",
+        DisputeKind::MissedItem => "missed_item",
+    }
+}
+
+/// The kind a spelling names. Absent means a false item: the only kind the
+/// journal held before kinds existed. `None` is a word this build lacks.
+fn dispute_kind_named(value: &Value) -> Option<DisputeKind> {
+    match value {
+        Value::Null => Some(DisputeKind::FalseItem),
+        Value::String(text) => match text.as_str() {
+            "false_item" => Some(DisputeKind::FalseItem),
+            "missed_item" => Some(DisputeKind::MissedItem),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The assurance a spelling names; `None` for one this build cannot place.
+fn assurance_named(text: &str) -> Option<Assurance> {
+    match text {
+        "deterministic" => Some(Assurance::Deterministic),
+        "attested" => Some(Assurance::Attested),
+        "manual" => Some(Assurance::Manual),
+        "heuristic" => Some(Assurance::Heuristic),
+        _ => None,
     }
 }
 
@@ -523,8 +599,12 @@ pub struct DayReport {
     pub date: String,
     pub transitions: u64,
     pub into_needs_you: u64,
+    /// The subset of `into_needs_you` that are trusted activations.
+    pub trusted_needs_you: u64,
     pub into_ready: u64,
     pub disputes: u64,
+    pub false_disputes: u64,
+    pub missed_disputes: u64,
     /// The day's budget was exhausted: its counts are a floor, never a
     /// count of a quiet day.
     pub incomplete: bool,
@@ -569,8 +649,11 @@ pub fn report(dir: &Path) -> std::io::Result<Report> {
             date: date.to_string(),
             transitions: 0,
             into_needs_you: 0,
+            trusted_needs_you: 0,
             into_ready: 0,
             disputes: 0,
+            false_disputes: 0,
+            missed_disputes: 0,
             incomplete: dir.join(file_name(date, INCOMPLETE_SUFFIX)).exists(),
         };
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
@@ -585,7 +668,29 @@ pub fn report(dir: &Path) -> std::io::Result<Report> {
                 Some("transition") => {
                     day.transitions += 1;
                     match value["to"].as_str().and_then(main_state_named) {
-                        Some(MainState::NeedsYou) => day.into_needs_you += 1,
+                        Some(MainState::NeedsYou) => {
+                            day.into_needs_you += 1;
+                            // An assurance this build cannot name is a
+                            // record it cannot judge trusted or not.
+                            let assurance = match value["assurance"].as_str() {
+                                None => None,
+                                Some(text) => match assurance_named(text) {
+                                    Some(assurance) => Some(assurance),
+                                    None => {
+                                        day.incomplete = true;
+                                        continue;
+                                    }
+                                },
+                            };
+                            if trusted_activation(
+                                MainState::NeedsYou,
+                                value["born"].is_string(),
+                                assurance,
+                                value["sealed"].as_bool(),
+                            ) {
+                                day.trusted_needs_you += 1;
+                            }
+                        }
                         Some(MainState::Ready) => day.into_ready += 1,
                         Some(MainState::Working | MainState::Unknown | MainState::Exited) => {}
                         // A state this build cannot place is a transition it
@@ -594,7 +699,16 @@ pub fn report(dir: &Path) -> std::io::Result<Report> {
                         None => day.incomplete = true,
                     }
                 }
-                Some("dispute") => day.disputes += 1,
+                Some("dispute") => {
+                    day.disputes += 1;
+                    match dispute_kind_named(&value["dispute_kind"]) {
+                        Some(DisputeKind::FalseItem) => day.false_disputes += 1,
+                        Some(DisputeKind::MissedItem) => day.missed_disputes += 1,
+                        // Counted as a dispute, unclassifiable by kind: the
+                        // split is a floor, and the day says so.
+                        None => day.incomplete = true,
+                    }
+                }
                 // Syntax this build can read and a record shape it cannot is
                 // the same thing to the day's evidence as a line that will not
                 // parse at all: countable, or incomplete.

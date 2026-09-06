@@ -581,6 +581,8 @@ terms: `PRODUCT.md` §8.
 | **AttentionItem** | a structured reason a Session needs the user, with source, freshness, and optional action |
 | **NeedsInputRequest** | a reserved answerable entity: a specific blocked interaction with provider/tool context and allowed actions |
 | **Acknowledge** | the user has seen an attention item; held by `corrald`, consistent across surfaces |
+| **Trusted Needs You item activation** | the unit the M1 release gate counts: a journal transition into Needs You that bore a new `AttentionItemId`, at Deterministic or Attested assurance, under a sealed semantic. Manual never counts; a replaced item with a new id does; the same item under a changed source does not. Defined in the journal, never derived by a client (completion grill Q2, Q19) |
+| **Dispute kind** | what a dispute states: `false_item` — the item it names was wrong, always named — or `missed_item` — an item was due and Corral surfaced none, never named. Journal observations for the evidence review; the review, not the journal, decides *avoidable* and *systematic* (completion grill Q3, Q15) |
 | **Observed / Managed** | launched outside Corral versus launched through Corral's runtime. Internal vocabulary |
 | **Node** | a machine running `corrald`. Scopes bindings; never part of Session identity |
 | **Canonical rendezvous** | the one filesystem location where an OS account's primary `corrald` is claimed and reached. Derived from the account home; no environment variable moves it |

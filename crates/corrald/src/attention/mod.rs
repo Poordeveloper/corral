@@ -14,7 +14,8 @@ mod tick;
 
 pub use engine::{Derived, Horizons, Observed, derive};
 pub use journal::{
-    Appended, Budget, DisputeRecord, Journal, Record, TransitionRecord, names_a_day, report,
+    Appended, Budget, DisputeKind, DisputeRecord, Journal, Record, TransitionRecord, names_a_day,
+    report,
 };
 pub use ledger::{Change, Ledger};
 pub use sealing::hook_fact_claim;
