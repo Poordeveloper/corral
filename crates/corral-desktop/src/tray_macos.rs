@@ -125,6 +125,7 @@ mod tests {
             badge: Badge(badge),
             needs_you: group("Needs You"),
             ready: group("Ready"),
+            new_session: false,
         })
     }
 

@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime};
 use corral_client::presentation::MainState;
 use futures::channel::mpsc::UnboundedReceiver;
 
+use crate::actions::Offered;
 use crate::sessions::{ASKING, SessionList};
 
 #[cfg(target_os = "macos")]
@@ -50,6 +51,11 @@ pub struct Current {
     pub badge: Badge,
     pub needs_you: Group,
     pub ready: Group,
+    /// Whether New Session… is offered: the daemon's hello serves managed
+    /// sessions, as `actions::Offered` decides for the window. Absent, not
+    /// disabled, when it does not — and part of the value, so a hello that
+    /// changes what is offered rebuilds the menu.
+    pub new_session: bool,
 }
 
 /// Unacknowledged attention items across both classes: the daemon's
@@ -184,6 +190,7 @@ impl TrayProjection {
             badge: Badge(summary.needs_you.unacknowledged + summary.ready.unacknowledged),
             needs_you: Group::of("Needs You", summary.needs_you.total, needs_you),
             ready: Group::of("Ready", summary.ready.total, ready),
+            new_session: Offered::by(list.capabilities()).new_session,
         })
     }
 
@@ -227,15 +234,16 @@ impl TrayProjection {
 
     /// The menu, top to bottom: the header, the groups that have rows, then
     /// the ways into Corral. Decided here, as words, so the native menu is
-    /// built mechanically and what it says is under test. While the daemon
-    /// is unreachable nothing that would ask it for a runtime is offered,
-    /// as in the window; Open Corral is the route to the reason.
+    /// built mechanically and what it says is under test. New Session… is
+    /// there only when the daemon offers it — the window's own rule — and
+    /// never while the daemon is unreachable; Open Corral is the route to
+    /// the reason.
     #[must_use]
     pub fn menu(&self) -> Vec<MenuLine> {
         let mut lines = vec![MenuLine::Note(self.header())];
-        let mut current = false;
+        let mut new_session = false;
         if let Self::Current(projection) = self {
-            current = true;
+            new_session = projection.new_session;
             for group in [&projection.needs_you, &projection.ready] {
                 if group.rows.is_empty() {
                     continue;
@@ -261,7 +269,7 @@ impl TrayProjection {
             action: TrayAction::OpenCorral,
             text: "Open Corral".to_owned(),
         });
-        if current {
+        if new_session {
             lines.push(MenuLine::Item {
                 action: TrayAction::NewSession,
                 text: "New Session…".to_owned(),

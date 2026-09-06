@@ -45,6 +45,12 @@ fn polled(sessions: Vec<Value>, needs_you: AttentionCount, ready: AttentionCount
     }
 }
 
+/// The same answer from a daemon whose hello serves managed sessions.
+fn managed(mut polled: Polled) -> Polled {
+    polled.capabilities.managed_sessions = true;
+    polled
+}
+
 fn at(seconds: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
 }
@@ -284,7 +290,10 @@ fn the_menu_lists_the_groups_then_the_ways_in() {
         .collect();
     sessions.push(attention("r-1", "ready", 0, false));
     let mut list = SessionList::default();
-    list.take(Ok(polled(sessions, count(11, 10), count(1, 1))), at(1));
+    list.take(
+        Ok(managed(polled(sessions, count(11, 10), count(1, 1)))),
+        at(1),
+    );
 
     let lines = TrayProjection::of(&list, at(1)).menu();
 
@@ -330,12 +339,14 @@ fn the_menu_lists_the_groups_then_the_ways_in() {
     );
 }
 
-/// With nothing to list there is no group at all, and while the daemon is
-/// unreachable nothing that would ask it for a runtime is offered.
+/// With nothing to list there is no group at all; New Session… is there
+/// exactly when the daemon's hello serves managed sessions — absent, not
+/// disabled, otherwise, as in the window — and never while the daemon is
+/// unreachable.
 #[test]
-fn an_empty_menu_has_no_groups_and_an_unreachable_one_offers_no_new_session() {
+fn new_session_is_offered_only_by_a_reachable_daemon_that_serves_managed_sessions() {
     let mut list = SessionList::default();
-    list.take(Ok(polled(vec![], count(0, 0), count(0, 0))), at(1));
+    list.take(Ok(managed(polled(vec![], count(0, 0), count(0, 0)))), at(1));
     assert_eq!(
         TrayProjection::of(&list, at(1)).menu(),
         vec![
@@ -343,6 +354,18 @@ fn an_empty_menu_has_no_groups_and_an_unreachable_one_offers_no_new_session() {
             MenuLine::Separator,
             item(TrayAction::OpenCorral, "Open Corral"),
             item(TrayAction::NewSession, "New Session…"),
+            MenuLine::Separator,
+            item(TrayAction::Quit, "Quit Corral"),
+        ]
+    );
+
+    list.take(Ok(polled(vec![], count(0, 0), count(0, 0))), at(2));
+    assert_eq!(
+        TrayProjection::of(&list, at(2)).menu(),
+        vec![
+            MenuLine::Note("Needs You 0 · Ready 0".to_owned()),
+            MenuLine::Separator,
+            item(TrayAction::OpenCorral, "Open Corral"),
             MenuLine::Separator,
             item(TrayAction::Quit, "Quit Corral"),
         ]
