@@ -233,7 +233,7 @@ async fn a_projection_over_a_live_generation_agrees_with_the_daemons_summary() {
 
     let session_id = start_shell(&bridge, &account, "sleep 30").await;
     let polled = answered(bridge.poll()).await.expect("a poll");
-    let summary = polled.summary.clone();
+    let summary = polled.summary;
     let mut list = SessionList::default();
     list.take(Ok(polled), SystemTime::now());
     assert!(list.rows().iter().any(|row| row.session_id == session_id));
