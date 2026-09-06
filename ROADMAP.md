@@ -11,9 +11,12 @@
 
 **M0 — foundation. The PR0–PR9 sequence has landed** (PR9, the GPUI
 Desktop, merged 2026-09-05). Nothing beyond that sequence was in scope;
-nothing in M2 or later is solved inside an M1 task. What remains before the
-M1 release is the completion work §3 names — tray, packaging, and the
-one-command install — plus the release gate in §5.
+nothing in M2 or later is solved inside an M1 task. The tray landed 2026-09-06
+(`docs/plans/done/2026-09-05-tray.md`). What remains before the M1 release
+is packaging and the one-command install, OS notifications, and the release
+gate in §5, in the order `docs/decisions/2026-09-06-m1-completion-grill.md`
+rules: dogfood readiness first so the evidence clock starts, packaging in
+parallel, notifications once a packaged `.app` exists.
 
 ## 2. What M1 must prove
 
@@ -157,7 +160,10 @@ one-command install delivering Desktop, CLI/TUI, and `corrald`; default
 Local Mode with no login service, no listener, no discovery broadcast.
 
 **Platform** — macOS and Linux; host-OS execution domain (`ARCHITECTURE.md`
-§9).
+§9). The M1 support claim is exactly what release infrastructure builds and
+tests (completion grill Q16): macOS on Apple Silicon, minimum version the
+lowest macOS major CI verifies; Linux on Ubuntu 24.04 x86_64 only, with
+aarch64 Linux unclaimed.
 
 After PR9, M1 completion work: tray, packaging, and one-command install.
 These are not part of PR0–PR9.
@@ -180,8 +186,24 @@ Systematic blind spots inside the supported version matrix are release
 blockers. Failing to discover sessions outside that matrix is not a contract
 violation.
 
+The counted unit behind "trusted Needs You transitions" is the **trusted
+Needs You item activation** (completion grill Q2, Q19): a journal transition
+whose `to` is Needs You, whose `born` names a new attention item, whose
+assurance is Deterministic or Attested, and whose evidence semantic is
+sealed for that provider/version/surface. Manual assurance never counts; a
+replaced item with a new id counts; the same item under a changed evidence
+source does not. The 100 is an aggregate across the declared provider set,
+and every provider claimed supported must show at least one trusted
+activation in the window — otherwise the claim narrows or the window
+extends. "Avoidable" and "systematic" are classifications the evidence
+review makes against the noise catalog; the journal only records false-item
+and missed-item disputes (Q3, Q4).
+
 Evidence windows count only after the storage epoch advances to `dogfood`,
 and restart if the data behind them is discarded (AGENTS.md §Durable state).
+The epoch advances only once schema 5 is a migration-supported baseline
+(Q6). Any INCOMPLETE journal day inside the 14-day attention window breaks
+its continuity; counting restarts from the next complete day (Q5).
 
 Three windows run apart, because they measure different claims: attention
 inference (the counts above); tray watchfulness — the macOS status item
