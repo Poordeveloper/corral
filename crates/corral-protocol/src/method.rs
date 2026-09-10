@@ -493,6 +493,15 @@ pub struct AttentionDayFacts {
     pub into_ready: u64,
     pub disputes: u64,
     pub incomplete: bool,
+    /// Trusted Needs You item activations (completion grill Q2, Q19). Absent
+    /// from a daemon that does not count them; absence is not zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_needs_you: Option<u64>,
+    /// `disputes` split by kind. Absent from a daemon that records no kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub false_disputes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missed_disputes: Option<u64>,
 }
 
 /// `attention.report`'s result. Diagnostics read back, never product state.
@@ -502,21 +511,72 @@ pub struct AttentionReportResult {
     pub days: Vec<AttentionDayFacts>,
 }
 
+/// What a dispute states (completion grill Q3, Q15): that the item it names
+/// was wrong, or that an item should have appeared and did not. An unknown
+/// word decodes as itself so the daemon can refuse it by name rather than
+/// record it as the default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DisputeKindWire {
+    FalseItem,
+    MissedItem,
+    Unrecognized(String),
+}
+
+impl DisputeKindWire {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::FalseItem => "false_item",
+            Self::MissedItem => "missed_item",
+            Self::Unrecognized(raw) => raw,
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "false_item" => Self::FalseItem,
+            "missed_item" => Self::MissedItem,
+            _ => Self::Unrecognized(value.to_owned()),
+        }
+    }
+}
+
+impl Serialize for DisputeKindWire {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DisputeKindWire {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_wire(&String::deserialize(deserializer)?))
+    }
+}
+
 /// `attention.dispute`'s parameters. The item is named when the client has
 /// one, so a dispute of the item that just resolved is not attributed to the
-/// one that replaced it (grill Q34).
+/// one that replaced it (grill Q34). An absent `kind` is a false-item
+/// dispute, the only kind older clients send.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AttentionDisputeParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention_item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<DisputeKindWire>,
+    /// A person's own words about what they saw. Diagnostic only: never read
+    /// by inference, never provider evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// `attention.dispute`'s result: whether the item named was already stale
-/// when the dispute arrived. Recorded either way; the journal is diagnostic.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// when the dispute arrived, and the kind the daemon recorded. Recorded
+/// either way; the journal is diagnostic.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttentionDisputeResult {
     pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<DisputeKindWire>,
 }
 
 /// One session in a listing.

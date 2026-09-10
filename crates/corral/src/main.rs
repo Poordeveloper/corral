@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 
 mod relay;
 use corral_client::{ActivationError, ClientActivationPolicy, Connection, RequestError, activate};
-use corral_protocol::method::{self, SessionListItem};
+use corral_protocol::method::{self, DisputeKindWire, SessionListItem};
 use corral_tui::LocalKeys;
 
 #[derive(Debug, Parser)]
@@ -111,10 +111,19 @@ enum AttentionAction {
         #[arg(long)]
         since: Option<String>,
     },
-    /// Record that a session's current attention item was wrong.
+    /// Record that a session's current attention item was wrong, or that
+    /// one should have appeared and did not.
     Dispute {
         /// The session's id, or enough of its start to be unambiguous.
         session: String,
+        /// Corral surfaced no item where one was due. Names no item: the
+        /// claim is that none exists.
+        #[arg(long)]
+        missed: bool,
+        /// Your own words about what you saw; kept for the evidence review,
+        /// read by nothing else.
+        #[arg(long)]
+        note: Option<String>,
     },
 }
 
@@ -240,11 +249,32 @@ async fn needs(connection: &mut Connection) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The session's current unacknowledged item, by the id this command saw.
-async fn current_item(
+/// The session's current unacknowledged item, by the id this command saw:
+/// what `ack` names.
+async fn current_unacknowledged_item(
     connection: &mut Connection,
     session: &str,
 ) -> Result<Option<String>, ExitCode> {
+    let presented = presented(connection, session).await?;
+    Ok(presented.and_then(|item| item.acknowledgeable().map(str::to_owned)))
+}
+
+/// The session's current item whether or not it was acknowledged: what a
+/// dispute names. Acknowledging clears the badge, not the item, and an
+/// acknowledged Needs You can still be the wrong one.
+async fn current_attention_item(
+    connection: &mut Connection,
+    session: &str,
+) -> Result<Option<String>, ExitCode> {
+    let presented = presented(connection, session).await?;
+    Ok(presented.and_then(|item| item.current_item().map(str::to_owned)))
+}
+
+/// One session as this client would present it now, from a fresh listing.
+async fn presented(
+    connection: &mut Connection,
+    session: &str,
+) -> Result<Option<corral_client::presentation::SessionPresentation>, ExitCode> {
     let listed = match connection.session_list().await {
         Ok(listed) => listed,
         Err(error) => return Err(report_request_failure(&error)),
@@ -254,11 +284,7 @@ async fn current_item(
         .iter()
         .filter_map(|value| serde_json::from_value::<SessionListItem>(value.clone()).ok())
         .find(|item| item.session_id == session)
-        .and_then(|item| {
-            corral_tui::present_at(&item, SystemTime::now())
-                .acknowledgeable()
-                .map(str::to_owned)
-        }))
+        .map(|item| corral_tui::present_at(&item, SystemTime::now())))
 }
 
 async fn acknowledge(connection: &mut Connection, session: &str) -> ExitCode {
@@ -266,7 +292,7 @@ async fn acknowledge(connection: &mut Connection, session: &str) -> ExitCode {
         Ok(resolved) => resolved,
         Err(code) => return code,
     };
-    let Some(item) = (match current_item(connection, &resolved).await {
+    let Some(item) = (match current_unacknowledged_item(connection, &resolved).await {
         Ok(item) => item,
         Err(code) => return code,
     }) else {
@@ -294,33 +320,69 @@ async fn attention(connection: &mut Connection, action: AttentionAction) -> Exit
                 return ExitCode::SUCCESS;
             }
             println!(
-                "{:<12}{:>12}{:>12}{:>8}{:>10}",
-                "day", "transitions", "needs you", "ready", "disputes"
+                "{:<12}{:>12}{:>16}{:>9}{:>7}{:>7}{:>8}",
+                "day", "transitions", "needs you (all)", "trusted", "ready", "false", "missed"
             );
             for day in &report.days {
+                // A column the daemon did not send is not a zero: an older
+                // daemon counts nothing it does not know how to count.
+                let counted = |count: Option<u64>| {
+                    count.map_or_else(|| "-".to_owned(), |count| count.to_string())
+                };
                 println!(
-                    "{:<12}{:>12}{:>12}{:>8}{:>10}  {}",
+                    "{:<12}{:>12}{:>16}{:>9}{:>7}{:>7}{:>8}  {}",
                     day.date,
                     day.transitions,
                     day.into_needs_you,
+                    counted(day.trusted_needs_you),
                     day.into_ready,
-                    day.disputes,
+                    counted(day.false_disputes),
+                    counted(day.missed_disputes),
                     if day.incomplete { "INCOMPLETE" } else { "" }
                 );
             }
             ExitCode::SUCCESS
         }
-        AttentionAction::Dispute { session } => {
+        AttentionAction::Dispute {
+            session,
+            missed,
+            note,
+        } => {
             let resolved = match resolve_session(connection, &session).await {
                 Ok(resolved) => resolved,
                 Err(code) => return code,
             };
-            let item = match current_item(connection, &resolved).await {
-                Ok(item) => item,
-                Err(code) => return code,
+            let (kind, item) = if missed {
+                // An older daemon would record this as a false-item dispute
+                // — a statement nobody made — so it is not sent there.
+                if !corral_client::launch::serves(
+                    connection,
+                    corral_protocol::capability::ATTENTION_DISPUTE_KINDS,
+                ) {
+                    eprintln!(
+                        "corral: this daemon is older and cannot record a missed item; nothing was recorded"
+                    );
+                    return ExitCode::FAILURE;
+                }
+                (DisputeKindWire::MissedItem, None)
+            } else {
+                let item = match current_attention_item(connection, &resolved).await {
+                    Ok(item) => item,
+                    Err(code) => return code,
+                };
+                // A false-item dispute is about one item; with none current
+                // there is nothing to bind it to, and guessing a recent one
+                // is what the completion grill (Q15) ruled out.
+                let Some(item) = item else {
+                    eprintln!(
+                        "No current attention item. If Corral failed to surface an item, use --missed."
+                    );
+                    return ExitCode::FAILURE;
+                };
+                (DisputeKindWire::FalseItem, Some(item))
             };
             match connection
-                .attention_dispute(&resolved, item.as_deref())
+                .attention_dispute(&resolved, kind, item.as_deref(), note.as_deref())
                 .await
             {
                 Ok(answer) if answer.stale => {

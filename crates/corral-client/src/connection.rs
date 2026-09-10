@@ -95,15 +95,21 @@ impl Connection {
         })
     }
 
-    /// Dispute the session's current item, naming it when this client has it.
+    /// Dispute an item by the id this client saw, or record that the session
+    /// should have had one. The kind is always sent: an absent kind is what
+    /// older clients say, and this one is not older.
     pub async fn attention_dispute(
         &mut self,
         session_id: &str,
+        kind: method::DisputeKindWire,
         attention_item_id: Option<&str>,
+        note: Option<&str>,
     ) -> Result<method::AttentionDisputeResult, RequestError> {
         let params = serde_json::to_value(method::AttentionDisputeParams {
             session_id: session_id.to_owned(),
             attention_item_id: attention_item_id.map(str::to_owned),
+            kind: Some(kind),
+            note: note.map(str::to_owned),
         })
         .map_err(|source| RequestError::Protocol {
             detail: format!("the dispute did not encode: {source}"),

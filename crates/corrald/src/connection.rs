@@ -202,6 +202,7 @@ async fn bootstrap(
             // discovering `method_not_found` in front of a person.
             let mut capabilities = BTreeSet::from([
                 capability::ATTENTION.to_owned(),
+                capability::ATTENTION_DISPUTE_KINDS.to_owned(),
                 // The terminal channel's snapshot prefix (ADR 0017): every
                 // snapshot is preceded by its geometry, and by a palette
                 // checkpoint when the connection needs one. Unconditional
@@ -760,6 +761,9 @@ async fn attention_report(request: &Request, state: &Arc<DaemonState>) -> Frame 
             into_ready: day.into_ready,
             disputes: day.disputes,
             incomplete: day.incomplete,
+            trusted_needs_you: Some(day.trusted_needs_you),
+            false_disputes: Some(day.false_disputes),
+            missed_disputes: Some(day.missed_disputes),
         })
         .collect();
     match serde_json::to_value(method::AttentionReportResult { days }) {
@@ -820,6 +824,47 @@ async fn attention_dispute(request: &Request, state: &Arc<DaemonState>) -> Frame
             );
         }
     };
+    // A kind this build lacks is refused by name, never recorded as the
+    // default: the journal would then hold a statement nobody made.
+    let kind = match params.kind {
+        None | Some(method::DisputeKindWire::FalseItem) => crate::attention::DisputeKind::FalseItem,
+        Some(method::DisputeKindWire::MissedItem) => crate::attention::DisputeKind::MissedItem,
+        Some(method::DisputeKindWire::Unrecognized(raw)) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(
+                    ErrorCode::InvalidParams,
+                    format!("a dispute kind this daemon cannot record: {raw}"),
+                ),
+            );
+        }
+    };
+    // A false-item dispute is about one item: recording one without an id
+    // would attribute it to whatever is current, the ambiguity the completion
+    // grill (Q15) ruled out of the journal. A missed item is the claim that
+    // no item existed, so one that names an item contradicts itself.
+    let named = match (kind, named) {
+        (crate::attention::DisputeKind::FalseItem, Some(named)) => Some(named),
+        (crate::attention::DisputeKind::FalseItem, None) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(
+                    ErrorCode::InvalidParams,
+                    "a false-item dispute names the item it is about; a missed item is its own kind",
+                ),
+            );
+        }
+        (crate::attention::DisputeKind::MissedItem, None) => None,
+        (crate::attention::DisputeKind::MissedItem, Some(_)) => {
+            return Frame::error(
+                id,
+                ProtocolError::new(
+                    ErrorCode::InvalidParams,
+                    "a missed-item dispute names no item; its claim is that none existed",
+                ),
+            );
+        }
+    };
     // Without the ledger there is no current item to compare the dispute
     // against, and recording one anyway would enter "not stale" as a fact
     // about an item nobody looked at.
@@ -838,27 +883,35 @@ async fn attention_dispute(request: &Request, state: &Arc<DaemonState>) -> Frame
     // What the disputed state rested on, for the person triaging the dispute
     // later: the journal record names the item, the log names the evidence.
     tracing::debug!(%session, ?claims, "an attention item was disputed");
-    let (item, stale) = match (named, current) {
-        (Some(named), Some(current)) => (Some(named), named != current),
-        (Some(named), None) => (Some(named), true),
-        (None, current) => (current, false),
+    // A missed item is never stale: it names nothing for the current item
+    // to confirm or contradict.
+    let (item, stale) = match named {
+        Some(named) => (Some(named), current != Some(named)),
+        None => (None, false),
     };
     let recording = Arc::clone(state);
     let now = std::time::SystemTime::now();
+    let note = params.note;
     let _ = tokio::task::spawn_blocking(move || {
         recording.journal_append(
             now,
             vec![crate::attention::Record::Dispute(
                 crate::attention::DisputeRecord {
                     session,
+                    kind,
                     item,
                     stale,
+                    note,
                 },
             )],
         );
     })
     .await;
-    match serde_json::to_value(method::AttentionDisputeResult { stale }) {
+    let kind = Some(match kind {
+        crate::attention::DisputeKind::FalseItem => method::DisputeKindWire::FalseItem,
+        crate::attention::DisputeKind::MissedItem => method::DisputeKindWire::MissedItem,
+    });
+    match serde_json::to_value(method::AttentionDisputeResult { stale, kind }) {
         Ok(value) => Frame::result(id, value),
         Err(source) => Frame::error(
             id,

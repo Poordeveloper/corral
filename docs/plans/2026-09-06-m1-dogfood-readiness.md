@@ -71,7 +71,8 @@ record discriminator) and `note`; a line without `dispute_kind` reads as
 unrecognized `to` does today. Daemon rules: `false_item` without
 `attention_item_id` → `InvalidParams`, nothing journaled; `missed_item` is
 journaled with `item: None`, `stale: false`. The daemon advertises capability
-`attention-dispute-kinds`. CLI: `dispute <session>` resolves the current item
+`attention.dispute-kinds.v1` (the wire's existing spelling, as
+`attention.v1` and `history-sessions.v1`). CLI: `dispute <session>` resolves the current item
 and, finding none, exits non-zero before sending with `No current attention
 item. If Corral failed to surface an item, use --missed.`; `--missed` is sent
 only to a daemon advertising the capability, otherwise the CLI reports the
