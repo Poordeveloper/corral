@@ -13,6 +13,8 @@ cd "$(dirname "$0")/.."
 echo "==> release-critical quarantines"
 ./scripts/check-quarantines --release
 
+# No migration gate: a registry schema change after the dogfood epoch is an
+# approved reset, not a migration (M1 completion grill, Q6 amended 2026-09-10).
 cat >&2 <<'MISSING'
 
 verify-release: INCOMPLETE — the following gates are not implemented yet:
@@ -20,7 +22,6 @@ verify-release: INCOMPLETE — the following gates are not implemented yet:
   supported provider/version matrix       (PR4-PR6)
   packaging / install / uninstall         (M1 completion, after PR8)
   multi-platform release checks           (macOS + Linux)
-  migration verification                  (PR2 onward)
   dogfood release-gate evidence           (ROADMAP.md §5)
 
 Implement the gate with the work it covers; do not make this script pass by

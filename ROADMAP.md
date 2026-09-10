@@ -201,9 +201,11 @@ and missed-item disputes (Q3, Q4).
 
 Evidence windows count only after the storage epoch advances to `dogfood`,
 and restart if the data behind them is discarded (AGENTS.md §Durable state).
-The epoch advances only once schema 5 is a migration-supported baseline
-(Q6). Any INCOMPLETE journal day inside the 14-day attention window breaks
-its continuity; counting restarts from the next complete day (Q5).
+No migration runner exists and none gates the advance: a registry schema
+change after it is a destructive reset the founder approves under that
+rule (Q6 as amended 2026-09-10). Any INCOMPLETE journal day inside the
+14-day attention window breaks its continuity; counting restarts from the
+next complete day (Q5).
 
 Three windows run apart, because they measure different claims: attention
 inference (the counts above); tray watchfulness — the macOS status item

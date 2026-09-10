@@ -13,10 +13,9 @@
 > matrix, the distribution channel, versioning and release authority, the
 > reading of "≥ 100 across Claude + Codex", tray-watchfulness evidence, and
 > how uninstall stops the daemon. What remains is evidence and execution,
-> not design. No ADR is accepted here; one is implied and is written with
-> the plan that implements it: the schema-5 migration baseline (Q6,
-> `AGENTS.md` §Architectural changes: durable storage semantics requiring
-> migration guarantees). Earlier rulings are not reopened: the dogfood
+> not design. No ADR is accepted here; one was implied by Q6's migration
+> baseline and is no longer needed — the founder withdrew that ruling on
+> 2026-09-10 (§Amendments). Earlier rulings are not reopened: the dogfood
 > start conditions (PR8 attention grill Q31), the notification product
 > policy (tray grill Q12), the Quit gate (tray grill Q11), and the five
 > gate conditions (M1 decision grill §1).
@@ -77,7 +76,7 @@ Digest of what round 1 froze:
 | Q3 | **Accepted with identity discipline.** `corral attention dispute <session>` → false-item; `--missed` → missed-item; optional `--note`. Wire/journal kind `false_item` / `missed_item`; a missing kind means `false_item`. A false-item dispute names the exact `AttentionItemId` whenever the item is available; when the CLI cannot establish which item is meant it refuses rather than attributing to whichever item is current. A missed-item dispute deliberately may carry no item id — its claim is that Corral failed to create one — and records at least session, timestamp, kind, optional note; no fake item is synthesized for the schema's sake. The journal records observations; the evidence review classifies them (avoidable, systematic, blocker): known noise an already-supported rule should have excluded → avoidable false; newly discovered → catalog entry plus deterministic fixture plus recorded disposition. Notes are diagnostic-only, never inference input, never provider evidence, never required for gate validity. |
 | Q4 | **Every unresolved release-relevant noise row needs an explicit ship-time disposition**, and dogfood missed-item evidence participates. For the three miss-shaped rows the disposition is one of: fixed; correctly suppressed or reclassified; capability narrowed so the state is no longer claimed supported; documented non-systematic limitation supported by dogfood evidence. "Probably not systematic" without measurement is not available. Stronger rule: a measured condition that causes a repeatable miss inside a capability Corral still claims is systematic by construction — fix it or narrow the claim; low absolute frequency does not make it non-systematic. Genuinely intermittent misses record opportunities where measurable, confirmed misses, affected provider/version/surface, and the human disposition. No numeric miss-rate threshold is introduced; the bar stays *no systematic missed states inside a claimed supported capability*. |
 | Q5 | **(a).** The journal stays diagnostic, deletable, non-authoritative, outside epoch migration protection; it is not promoted to durable truth because release evaluation reads it. Retention 30 → 90 days. At the end of each window the canonical report is generated immediately and frozen into `docs/evidence/`; the durable release claim is the reviewed evidence artifact, never the local journal's survival. Any INCOMPLETE day inside the 14-consecutive-day attention window breaks continuity; counting restarts from the next complete day; missing instrumentation is never read as "probably zero bad events", and the failure is itself reliability evidence. This does not silently redefine the cohort's 4-week rule, which owns its own calendar. Invariant: *diagnostic evidence may be bounded and deletable; release evidence may never be silently incomplete.* |
-| Q6 | **Accepted in three parts, with a non-vacuous migration gate.** (1) `corral-state` gains a versioned forward migration runner: inspect the stored version; current → open; older supported → apply contiguous forward migrations, all steps and the version update in one transaction, failure → full rollback; newer than this binary → refuse; downgrade never attempted; no destructive fallback to a fresh database. `DOGFOOD_BASELINE_SCHEMA = 5` is frozen: at the epoch's advance schema 5 becomes the first protected baseline; zero real migrations exist and that is fine. A permanent representative schema-5 registry fixture is opened by the current build under `verify-release`; when the current schema exceeds 5 the complete chain must apply and the expected Corral-owned facts must survive, so a schema 6 cannot release without a working 5 → 6. Runner tests: rollback on failure, missing step rejected, newer schema rejected, old-build/new-DB refusal. (2) The local schema-1 database is dev-era state a human removes before the advance — allowed only while the epoch is `dev`; never encoded as startup behaviour; unavailable after dogfood begins. (3) The advance `dev → dogfood` is a human-only, repository-visible change in a dedicated commit/PR; an agent never advances it. Invariant: *dogfood starts only after schema 5 has become a migration-supported baseline future releases are obligated to preserve.* |
+| Q6 | **Part 1 withdrawn 2026-09-10 (§Amendments): no migration runner, no fixture gate, no ADR; a schema change after the epoch advance is an approved reset. Parts 2 and 3 stand.** Original ruling: **Accepted in three parts, with a non-vacuous migration gate.** (1) `corral-state` gains a versioned forward migration runner: inspect the stored version; current → open; older supported → apply contiguous forward migrations, all steps and the version update in one transaction, failure → full rollback; newer than this binary → refuse; downgrade never attempted; no destructive fallback to a fresh database. `DOGFOOD_BASELINE_SCHEMA = 5` is frozen: at the epoch's advance schema 5 becomes the first protected baseline; zero real migrations exist and that is fine. A permanent representative schema-5 registry fixture is opened by the current build under `verify-release`; when the current schema exceeds 5 the complete chain must apply and the expected Corral-owned facts must survive, so a schema 6 cannot release without a working 5 → 6. Runner tests: rollback on failure, missing step rejected, newer schema rejected, old-build/new-DB refusal. (2) The local schema-1 database is dev-era state a human removes before the advance — allowed only while the epoch is `dev`; never encoded as startup behaviour; unavailable after dogfood begins. (3) The advance `dev → dogfood` is a human-only, repository-visible change in a dedicated commit/PR; an agent never advances it. Invariant: *dogfood starts only after schema 5 has become a migration-supported baseline future releases are obligated to preserve.* |
 | Q7 | **Bundle accepted; identifier frozen: `com.poordeveloper.corral`.** `Corral.app/Contents/{Info.plist, MacOS/{corral-desktop, corrald, corral}}`, `CFBundleExecutable` = `corral-desktop`, the three executables siblings so sibling-only daemon resolution holds for the Desktop and for the CLI symlink after canonicalization. Install to `~/Applications/Corral.app`; `~/.local/bin/corral` → `Corral.app/Contents/MacOS/corral`. Regular Dock app; no LSUIElement conversion. |
 | Q8 | **Install accepted; uninstall gains a safety gate.** Installer: identify OS/arch → resolve the exact release artifact → download → fetch and check the SHA-256 manifest → verify before extraction → place → CLI symlink → PATH action if needed → detect supported providers → disclose which integrations it intends to enable → `corral integration enable` per detected provider → per-provider status. An integration conflict never overwrites user-owned configuration, reports Limited awareness and the resolution path, and never rolls back an otherwise valid install. A checksum from the same release authority is integrity, not an independent trust root. **Uninstall preflight**: query runtime truth first; any managed runtime Running or Unknown → default uninstall refuses ("Corral is still managing N running sessions" / "could not verify whether U managed sessions have ended"); no destructive `--force` in M1. Successful uninstall: connect/activate → uninstall Corral-owned integrations → verify cleanup → request daemon shutdown → wait for ownership to end → remove symlink → remove `.app`/binaries; if cleanup cannot complete safely, fail before deleting binaries. Default preserves `~/.corral`; `--purge` removes state and diagnostics only after the preconditions succeed and is explicit destructive intent after `dogfood`. |
 | Q9 | **Modified: three build classes.** Ad-hoc signing serves local developer dogfood and proves packaging mechanics only. The external cohort requires Developer ID Application signing, Hardened Runtime as the distribution design requires, a secure timestamp, notarization, and a Gatekeeper launch test on a clean user environment — never right-click Open, quarantine removal, or a Security Settings bypass as the onboarding path. Public M1 macOS release: Developer ID + notarization is a release gate, not polish; the packaging PR may merge without credentials, the cohort and public release cannot pass without them. Architecture: universal only if Intel is claimed; if claimed, every shipped executable carries coherent x86_64 + arm64 slices and both are validated; never a universal Desktop beside an arm64-only daemon or CLI. |
@@ -1095,8 +1094,8 @@ Not agent work, recorded so nobody waits on them silently:
 
 - delete the local schema-1 `~/.corral/state/registry.sqlite3` before the
   epoch advances (dev-era state; Q6);
-- advance `STORAGE_EPOCH` to `dogfood` in a dedicated PR once the
-  migration baseline has merged and verified (Q6);
+- advance `STORAGE_EPOCH` to `dogfood` in a dedicated PR; nothing in the
+  store gates it any more (Q6 as amended);
 - decide on Apple Developer Program enrolment: an external dependency of
   the macOS distribution gate and of cohort recruiting, not a blocker of
   the packaging PR (Q9).
@@ -1108,6 +1107,27 @@ rulings and decide nothing new. Open evidence: the notification probe's
 result inside a real `.app` (Q12); the pinned CI runner's macOS version,
 which fills the minimum-version claim (Q16); whether normal dogfood yields
 100 trusted activations in 14 days (`ROADMAP.md` §9.7); the ship-time
-disposition of each unresolved noise row (Q4). The ADR the migration
-baseline requires is proposed with `m1-dogfood-readiness` and accepted on
-this record's Q6.
+disposition of each unresolved noise row (Q4). No ADR follows from this
+record: the one Q6 implied went with the withdrawn migration baseline.
+
+## Amendments
+
+### 2026-09-10 — Q6 part 1 withdrawn: reset, not migration
+
+Founder, on being shown the runner with its empty chain: 「为什么要迁移，
+我们还没发布，有啥都可以直接改，不需要写迁移」, then 「重置，别搞迁移」.
+
+What changes: `corral-state` gets no migration runner, no
+`DOGFOOD_BASELINE_SCHEMA`, no schema-5 fixture, and `verify-release` has no
+migration gate (this also drops the migration input from Q13 and Q14). ADR
+0018 is not written. The store keeps refusing every version but its own by
+name. When the registry schema changes after the epoch advance, the change
+is a destructive reset the founder approves under `AGENTS.md` §Durable
+state, and the evidence windows that depended on the discarded data
+restart; nothing is silently reinterpreted. Q6 parts 2 and 3 stand: the
+founder deletes the schema-1 store by hand, startup never deletes a
+database, and the advance is a human-only dedicated PR. Why: the epoch is
+`dev`, the chain is empty, and the remaining M1 plans do not touch the
+registry schema; a runner with nothing to run is speculative
+infrastructure. If a migration is ever wanted, the change that needs one
+writes the first, as `corral-state::schema` already says.

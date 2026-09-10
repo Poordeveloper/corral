@@ -1,6 +1,6 @@
 ---
-status: active   # rulings in docs/decisions/2026-09-06-m1-completion-grill.md Q2–Q6, Q15, Q19
-class: C         # D4 crosses AGENTS.md §Architectural changes: durable storage semantics requiring migration guarantees; accepted on the grill's Q6, recorded as ADR 0018
+status: done     # D1–D3 merged in PR #61; D4 and D5's ADR withdrawn 2026-09-10 (grill Q6 amendment); rulings in docs/decisions/2026-09-06-m1-completion-grill.md Q2–Q6, Q15, Q19
+class: C         # claimed for D4 (AGENTS.md §Architectural changes: durable storage semantics requiring migration guarantees); D4 was withdrawn and nothing durable landed
 writes: [crates/corrald/src/attention, crates/corral-protocol, crates/corral/src, crates/corral-state, scripts/verify-release, docs/adr/0018-migration-baseline.md, ARCHITECTURE.md]
 reads: [crates/corral-core, docs/decisions/2026-09-06-m1-completion-grill.md, docs/adr/0015-attention-derivation.md, docs/decisions/2026-09-02-pr8-attention-grill.md]
 ---
@@ -15,6 +15,13 @@ Q15 and Q19 and decides nothing new. It ends where a human can advance
 windows. Two PRs: A carries D1–D3 and the glossary (no durable surface);
 B carries D4 with ADR 0018 and the `verify-release` step, and its body needs
 the founder's `DURABLE-APPROVED-BY` marker (schema gate).
+
+**Done 2026-09-10.** PR A merged as #61. PR B was never opened: the founder
+withdrew the migration baseline (grill Q6 amendment, 2026-09-10) — a
+registry schema change after the epoch advance is an approved reset, not a
+migration. The runner, fixture, ADR 0018 and the `verify-release` step
+below were not built; the store still refuses every version but its own.
+Nothing in this plan gates the epoch advance any more.
 
 ## Goal
 
@@ -84,7 +91,10 @@ never read by inference.
 `Budget::default().retention` becomes 90 days. Nothing else about the
 journal changes: still diagnostic, still deletable, still not migrated.
 
-### D4 — Schema 5 becomes the migration baseline (Q6; ADR 0018)
+### D4 — Schema 5 becomes the migration baseline (Q6; ADR 0018) — withdrawn
+
+Not built; see Status. The design is kept as the record of what was ruled
+and withdrawn.
 
 `corral-state::schema` gains `DOGFOOD_BASELINE_SCHEMA: u32 = 5` and a
 runner: `Migration { from: u32, to: u32, apply: fn(&Transaction) ->
@@ -108,7 +118,7 @@ committed. `verify-release` replaces its "migration verification" line with
 the step `cargo test -p corral-state migration_baseline` and keeps exiting 1
 for the gates still missing.
 
-### D5 — Records
+### D5 — Records (ADR 0018 not written; the glossary entries landed in PR A)
 
 ADR 0018 *Migration baseline and forward-migration guarantee* (status
 accepted, acceptance evidence: the completion grill Q6): schema 5 is the
@@ -162,9 +172,8 @@ it is never skipped.
 ## Definition of done
 
 - PR A merged: D1–D3, glossary; `./scripts/verify` green on the final tree.
-- PR B merged with `DURABLE-APPROVED-BY`: D4, ADR 0018, `verify-release`
-  step; `./scripts/verify` green; `./scripts/verify-release` reaches and
-  passes the migration step before its designed exit 1.
+- ~~PR B merged with `DURABLE-APPROVED-BY`: D4, ADR 0018, `verify-release`
+  step~~ — withdrawn 2026-09-10.
 - `corral attention report` on a real daemon shows the new columns;
   `corral attention dispute --missed` on a session without an item records
   a `missed_item` line; without `--missed` it refuses.
