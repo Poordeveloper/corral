@@ -119,7 +119,7 @@ release profile (`[profile.release] strip = true`, nothing else) and
 from `packaging/macos/Info.plist.in` with the version substituted; signs
 each executable and then the bundle ad hoc (`codesign -s -`); with
 `CORRAL_SIGNING_IDENTITY` set signs with hardened runtime and a secure
-timestamp, and with `CORRAL_NOTARY_PROFILE` set submits through
+timestamp, and with an App Store Connect API key present submits through
 `notarytool --wait` and staples; archives with `ditto -c -k --keepParent`
 to `Corral-<version>-macos-arm64.zip`. On Linux:
 `corral-<version>-linux-x86_64.tar.gz` with the three executables under
@@ -232,7 +232,7 @@ install command, the support claim (macOS arm64, Ubuntu 24.04 x86_64), and
 Wire, additive: `ServerHello.pid`. Durable: nothing. Provider files: the
 existing `integration.enable/disable` paths only. New user-facing paths:
 D2. New environment: `CORRAL_VERSION`, `CORRAL_INSTALL_FROM` (installer);
-`CORRAL_SIGNING_IDENTITY`, `CORRAL_NOTARY_PROFILE` (packaging). No new
+`CORRAL_SIGNING_IDENTITY`, `CORRAL_NOTARY_API_KEY` (packaging). No new
 crate dependency: `rustix` with `process` is already in the workspace.
 
 ## Failure / unknown states
