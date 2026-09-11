@@ -16,7 +16,9 @@ place a ruling met an accepted invariant — the package smoke against ADR
 `CORRAL_HOME`, ADR 0001 D1 unchanged, local smoke on the install surface
 only, runtime smoke on a disposable release-runner account. The founder
 also confirmed: no metadata file, install is not upgrade, `strip = true`
-only, no icon. Four PRs, in order: 1 `hello.pid`;
+only, no icon. Two rulings were amended during implementation — Q16, the
+macOS minimum, and Q7, the bundle identifier — and the grill's
+§Amendments is the authority for both. Four PRs, in order: 1 `hello.pid`;
 2 `corral uninstall`; 3 `scripts/package`, `install.sh`, the package smoke
 and its `verify-release` step; 4 the release workflow, README, glossary.
 It ends where a tag produces a draft release a human can publish, and where
@@ -99,13 +101,15 @@ the user's home as Corral sees it (the account database, or the test
 namespace's `provider-home`) and is named only for its first consumer;
 it is renamed `user_home()` with the same body and a doc comment naming
 both tenants — provider dotfiles and the CLI symlink. Corral's home is
-Corral's, not a provider's; the corral root keeps its own resolution. `Info.plist`: `CFBundleIdentifier com.poordeveloper.corral`,
-`CFBundleExecutable corral-desktop`, `CFBundleName Corral`,
+Corral's, not a provider's; the corral root keeps its own resolution.
+`Info.plist`: `CFBundleIdentifier com.carriez.corral` (Q7 as amended
+2026-09-11), `CFBundleExecutable corral-desktop`, `CFBundleName Corral`,
 `CFBundleVersion` and `CFBundleShortVersionString` = the workspace version,
 `CFBundlePackageType APPL`, `NSHighResolutionCapable`,
-`LSMinimumSystemVersion` from one constant in `scripts/package` (Q16: the
-lowest macOS major the release workflow verifies; PR 4 sets the number when
-it pins the runner). No `LSUIElement`; no icon asset in this plan.
+`LSMinimumSystemVersion` from one constant in `scripts/package`: the
+deployment target the release build compiles against, not the pinned
+runner's major (Q16 as amended 2026-09-11). No `LSUIElement`; no icon
+asset in this plan.
 
 ### D3 — `scripts/package` (Q9, Q11, Q16)
 
