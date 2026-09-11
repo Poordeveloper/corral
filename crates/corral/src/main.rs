@@ -11,7 +11,9 @@ use std::time::SystemTime;
 
 use clap::{Parser, Subcommand};
 
+mod installation;
 mod relay;
+mod uninstall;
 use corral_client::{ActivationError, ClientActivationPolicy, Connection, RequestError, activate};
 use corral_protocol::method::{self, DisputeKindWire, SessionListItem};
 use corral_tui::LocalKeys;
@@ -100,6 +102,19 @@ enum Command {
     Integration {
         #[command(subcommand)]
         action: IntegrationAction,
+    },
+    /// Remove this installation of Corral.
+    ///
+    /// Refuses while a session Corral started is still running or cannot be
+    /// verified. Then corrald takes Corral's entries out of your agents'
+    /// configuration, corrald is stopped, and the installation is removed.
+    /// Your `~/.corral` — every session Corral recorded, and what you chose
+    /// — is kept unless you say otherwise.
+    Uninstall {
+        /// Also remove `~/.corral`: every session Corral recorded, every
+        /// acknowledgement, every integration choice. There is no undo.
+        #[arg(long)]
+        purge: bool,
     },
 }
 
@@ -195,6 +210,12 @@ fn main() -> ExitCode {
 async fn serve(cli: Cli) -> ExitCode {
     let policy = ClientActivationPolicy::resolve();
 
+    // Before activation: an executable that is not an installation is
+    // refused by name, not after a daemon has been started beside it.
+    if let Command::Uninstall { purge } = &cli.command {
+        return uninstall::run(&policy, *purge).await;
+    }
+
     let mut connection = match activate(&policy).await {
         Ok(connection) => connection,
         Err(error) => return report_activation_failure(&error),
@@ -213,6 +234,8 @@ async fn serve(cli: Cli) -> ExitCode {
         Command::Attention { action } => attention(&mut connection, action).await,
         Command::Tui => session_list(&policy, connection).await,
         Command::Integration { action } => integration(&mut connection, action).await,
+        // Answered above, before a daemon was activated.
+        Command::Uninstall { .. } => ExitCode::FAILURE,
     }
 }
 

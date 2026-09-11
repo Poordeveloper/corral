@@ -194,6 +194,17 @@ pub enum FakeBehaviour {
     /// observe whether a polling surface waits for its answer or queues
     /// another question behind it.
     AnswerSlowly { delay: Duration },
+    /// Answer the hello with exactly `hello` as its result, and every request
+    /// after it with the outcome listed for its method — a method not listed
+    /// is answered the way a daemon that never heard of it answers.
+    ///
+    /// For the daemon a real one cannot be made into: one that lists a
+    /// session in a state nothing in this build produces on demand, or one
+    /// from before a field existed.
+    Scripted {
+        hello: Value,
+        answers: Vec<(String, Value)>,
+    },
 }
 
 /// A stand-in daemon that answers however a test needs.
@@ -286,6 +297,9 @@ pub fn spawn_fake_daemon(socket: &Path, behaviour: FakeBehaviour) -> FakeDaemon 
                         FakeBehaviour::AnswerSlowly { delay } => {
                             answer_slowly(stream, *delay, &asked, &queued);
                         }
+                        FakeBehaviour::Scripted { hello, answers } => {
+                            answer_from_script(stream, hello, answers, &logged);
+                        }
                     }
                 }
                 Err(source) if source.kind() == std::io::ErrorKind::WouldBlock => {
@@ -363,6 +377,75 @@ fn answer_as_an_older_daemon(
             return;
         }
     }
+}
+
+/// Serve one connection from a script of outcomes by method.
+fn answer_from_script(
+    mut stream: UnixStream,
+    hello: &Value,
+    answers: &[(String, Value)],
+    methods: &Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        let Ok(request) = serde_json::from_str::<Value>(&line) else {
+            return;
+        };
+        let id = request.get("id").cloned().unwrap_or_else(|| json!(0));
+        let method = request
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+
+        let outcome = if method == "hello" {
+            json!({ "result": hello })
+        } else {
+            methods
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(method.clone());
+            answers
+                .iter()
+                .find(|(named, _)| *named == method)
+                .map_or_else(
+                    || {
+                        json!({"error": {
+                            "code": "method_not_found",
+                            "message": format!("this daemon does not serve {method}"),
+                        }})
+                    },
+                    |(_, outcome)| outcome.clone(),
+                )
+        };
+
+        let mut reply =
+            serde_json::to_vec(&json!({"type": "response", "id": id, "outcome": outcome}))
+                .expect("encode");
+        reply.push(b'\n');
+        if stream.write_all(&reply).is_err() || stream.flush().is_err() {
+            return;
+        }
+    }
+}
+
+/// A compatible hello result, with or without the daemon's pid.
+pub fn hello_result(pid: Option<u32>) -> Value {
+    let mut hello = json!({
+        "protocol_version": corral_protocol::PROTOCOL_VERSION,
+        "min_compatible_peer_version": corral_protocol::MIN_COMPATIBLE_PEER_VERSION,
+        "capabilities": [],
+        "compatibility_result": "compatible",
+    });
+    if let Some(pid) = pid {
+        hello["pid"] = json!(pid);
+    }
+    hello
 }
 
 /// Serve one connection slowly, and notice anything sent before an answer.

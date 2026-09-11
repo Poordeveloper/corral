@@ -20,6 +20,7 @@ compile_error!(
 );
 
 pub mod corpus;
+pub mod installation;
 pub mod provider;
 pub mod pty;
 pub mod wire;
@@ -105,11 +106,11 @@ impl TestAccount {
     /// A session file in the provider's own store, as the provider files it.
     /// Content is never read (ADR 0016 D1), so the bytes are a marker.
     ///
-    /// Under the provider home, which is the one home Corral reads and writes
-    /// a provider's own files in — the same place the hook installer works —
+    /// Under the user home, which is the one home Corral reads and writes a
+    /// provider's own files in — the same place the hook installer works —
     /// so a test's layout is the layout production has.
     pub fn with_claude_history(self, label: &str, session_id: &str) -> Self {
-        let directory = self.provider_home().join(".claude/projects").join(label);
+        let directory = self.user_home().join(".claude/projects").join(label);
         create_private_dir_all(&directory);
         std::fs::write(
             directory.join(format!("{session_id}.jsonl")),

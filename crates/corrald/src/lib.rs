@@ -135,7 +135,7 @@ fn start() -> Result<ExitCode, StartupError> {
     // The providers' own home, resolved the way the hook installer resolves
     // it. A daemon that cannot resolve one enumerates nothing rather than
     // reading a directory it guessed at.
-    match corral_rendezvous::provider_home() {
+    match corral_rendezvous::user_home() {
         Ok(home) => state.attach_provider_home(home),
         Err(source) => tracing::warn!(%source, "the provider home could not be resolved"),
     }

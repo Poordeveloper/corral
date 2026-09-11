@@ -59,6 +59,18 @@ impl Connection {
         self.peer.pid
     }
 
+    /// If this activation started the daemon, reap it once it has exited.
+    ///
+    /// For a surface that asked the daemon to stop and is watching its pid:
+    /// an unreaped child is a zombie whose pid still looks alive, so the
+    /// watcher would wait out its whole budget on a daemon that is gone.
+    /// Nothing happens for a daemon somebody else started.
+    pub fn reap_daemon_if_exited(&mut self) {
+        if let Some(daemon) = self._daemon.as_mut() {
+            daemon.reap_if_exited();
+        }
+    }
+
     pub fn local_versions(&self) -> PeerVersions {
         local_versions()
     }
