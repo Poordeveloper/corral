@@ -1,5 +1,5 @@
 ---
-status: active   # rulings in docs/decisions/2026-09-06-m1-completion-grill.md Q7–Q11, Q16–Q18, Q21; one decision requested (§Decision requested)
+status: active   # rulings in docs/decisions/2026-09-06-m1-completion-grill.md Q7–Q11, Q16–Q18, Q21; D6 ruled 2026-09-11 (§Decision)
 class: B         # implements accepted architecture; PR 1 trips the risk-surface detector (protocol schema) and is human-reviewed
 writes: [crates/corral-protocol, crates/corrald, crates/corral-client, crates/corral-rendezvous, crates/corral, packaging, scripts/package, scripts/package-smoke, scripts/verify-release, install.sh, .github/workflows/release.yml, .gitignore, Cargo.toml, README.md, ARCHITECTURE.md]
 reads: [crates/corral-desktop, docs/decisions/2026-09-06-m1-completion-grill.md, docs/adr/0001-corrald-activation.md, docs/adr/0006-provider-hook-integration-policy.md, docs/adr/0013-global-hook-integration.md, ROADMAP.md]
@@ -10,9 +10,13 @@ reads: [crates/corral-desktop, docs/decisions/2026-09-06-m1-completion-grill.md,
 ## Status
 
 **Accepted 2026-09-06** by the completion grill (Q7–Q11, Q16–Q18, Q21);
-this plan materializes those rulings and decides nothing new, except that
-one ruling collides with an accepted invariant and needs the founder's
-call before PR 3 (§Decision requested). Four PRs, in order: 1 `hello.pid`;
+this plan materializes those rulings and decides nothing new. The one
+place a ruling met an accepted invariant — the package smoke against ADR
+0001 D1 — was ruled by the founder on 2026-09-11 (§Decision): no
+`CORRAL_HOME`, ADR 0001 D1 unchanged, local smoke on the install surface
+only, runtime smoke on a disposable release-runner account. The founder
+also confirmed: no metadata file, install is not upgrade, `strip = true`
+only, no icon. Four PRs, in order: 1 `hello.pid`;
 2 `corral uninstall`; 3 `scripts/package`, `install.sh`, the package smoke
 and its `verify-release` step; 4 the release workflow, README, glossary.
 It ends where a tag produces a draft release a human can publish, and where
@@ -34,8 +38,9 @@ plan unblocks). `docs/references/supported-matrix.md`,
 `check-provider-matrix`, the dogfood evidence gates (`m1-release-gate`).
 Obtaining Developer ID credentials (external, Q9); universal binaries and
 Intel (Q9, Q16); aarch64 Linux, a `.desktop` file, a Linux tray (Q10).
-Upgrading an installation whose daemon is live — the installer refuses it
-(D4); making that safe is later work. A frozen installer asset (Q17). The
+Upgrading: install is not upgrade. The installer refuses an existing
+installation (D4); in-place upgrade, with the daemon and state migration,
+rollback and interruption questions it carries, is its own later design. A frozen installer asset (Q17). The
 `0.0.0 → 0.1.0` bump, which is the release-time PR (Q18). Auto-update.
 Any change to how integrations are written: the daemon stays the only
 mutator (ADR 0013 D1).
@@ -88,10 +93,13 @@ both   ~/.local/bin/corral -> the installed corral
 ```
 
 An executable anywhere else (a `target/` build, a copied binary) is not an
-installation and `uninstall` refuses by name. `corral-rendezvous` exposes
-the home these paths hang off as `user_home()` — the function
-`provider_home()` already is, renamed to say so; the test namespace keeps
-redirecting it. `Info.plist`: `CFBundleIdentifier com.poordeveloper.corral`,
+installation and `uninstall` refuses by name. The home these paths hang
+off is `corral-rendezvous::provider_home()`, whose body already resolves
+the user's home as Corral sees it (the account database, or the test
+namespace's `provider-home`) and is named only for its first consumer;
+it is renamed `user_home()` with the same body and a doc comment naming
+both tenants — provider dotfiles and the CLI symlink. Corral's home is
+Corral's, not a provider's; the corral root keeps its own resolution. `Info.plist`: `CFBundleIdentifier com.poordeveloper.corral`,
 `CFBundleExecutable corral-desktop`, `CFBundleName Corral`,
 `CFBundleVersion` and `CFBundleShortVersionString` = the workspace version,
 `CFBundlePackageType APPL`, `NSHighResolutionCapable`,
@@ -123,10 +131,10 @@ POSIX `sh`, served from `main`, `curl -fsSL … | sh`. In order: OS/arch
 (refuse anything but macOS arm64 and Linux x86_64 by name); resolve the
 release — latest non-draft non-prerelease via the GitHub API, or
 `CORRAL_VERSION=vX.Y.Z`; download the archive and `SHA256SUMS`; verify the
-sum before extraction; refuse when the existing installation's daemon
-answers a non-activating probe (`CORRAL_ENDPOINT` at the canonical socket,
-"quit Corral and end its sessions, then rerun"); place atomically (extract
-beside, move old aside, move new in, remove old); link `~/.local/bin/corral`;
+sum before extraction; refuse when an installation already exists at the
+target ("Corral is already installed at …; run `corral uninstall` first —
+upgrading in place is not part of M1"); extract into place; link
+`~/.local/bin/corral`;
 say the PATH line to add when `~/.local/bin` is not on PATH; detect
 providers by `~/.claude` / `~/.codex` or `claude` / `codex` on PATH; print
 which integrations it will enable; `corral integration enable <provider>`
@@ -155,7 +163,8 @@ with nothing later attempted:
    predates uninstall; upgrade first"); SIGTERM through
    `rustix::process::kill_process`; poll liveness for 10 s; still alive →
    "corrald did not exit; the installation is kept", never SIGKILL; a
-   permission error is reported as such;
+   permission error is reported as such; no such process (it exited on
+   its own between `hello` and the signal) → continue;
 5. remove `~/.local/bin/corral` only if it resolves into this installation;
 6. remove the installation directory;
 7. `--purge` only now removes the corral root, and its help text says it is
@@ -165,23 +174,31 @@ Q21's "daemon not running → continue" is moot here: step 1 makes it live,
 and an activation failure is an install-integrity error, not a reason to
 guess about integrations.
 
-### D6 — Package smoke and the release-gate step (Q11)
+### D6 — Package smoke and the release-gate step (Q11; ruled §Decision)
 
-`scripts/package-smoke` takes a `dist/` and proves, at its default level:
-the archive unpacks to the D2 shape; the plist carries the keys above with
-the workspace version; `codesign --verify --deep --strict` passes (macOS);
-`install.sh` with `CORRAL_INSTALL_FROM` into `HOME=<temp>` places the
-bundle and the symlink; `corral --version` through the symlink prints the
-version; `readlink -f` lands inside the installation. No daemon is started
-and no provider file is touched, because the production binaries would
-reach the real account home (§Decision requested). `--disposable-account`
-adds Q11's remainder — activation through the symlink, handshake,
-`corral uninstall`, binaries and symlink gone, corral root kept — and is
-run only where the account is throwaway (the release runner). The
-daemon-dependent behaviour is proven locally by the e2e tests in §Tests.
-`verify-release` replaces "packaging / install / uninstall" with
-`scripts/package && scripts/package-smoke` and keeps exiting 1 for the
-gates still missing.
+Local packaging smoke validates the artifact installation surface. Runtime
+lifecycle smoke validates the production binary on an isolated release-
+runner account. Two environments, one script: `scripts/package-smoke`
+takes a `dist/`.
+
+Default level (local, `verify-release`, PR CI): the archive unpacks to the
+D2 shape; the plist carries the keys above with the workspace version;
+`codesign --verify --deep --strict` passes (macOS); `install.sh` with
+`CORRAL_INSTALL_FROM` into `HOME=<temp>` places the bundle and the
+symlink; `corral --version` through the symlink prints the version;
+`readlink -f` lands inside the installation. It proves the package installs
+correctly. No daemon starts and no provider file is touched: the production
+binaries resolve the real account home and must (ADR 0001 D1).
+
+`--disposable-account` (the release runner only, a throwaway user with its
+real `~/.corral`): install from the built artifact → activation through
+the symlink → `hello` → a CLI interaction (`corral list`) →
+`corral uninstall` → SIGTERM observed → binaries and symlink gone, corral
+root kept. This is closer to a real user than any namespace would be. The
+same lifecycle is proven locally by the e2e tests in §Tests against
+test-support builds in the D2 layout. `verify-release` replaces "packaging
+/ install / uninstall" with `scripts/package && scripts/package-smoke` and
+keeps exiting 1 for the gates still missing.
 
 ### D7 — Release workflow (Q13, Q16, Q18)
 
@@ -254,7 +271,7 @@ a failure; a failed notarization is. Smoke: any step failing fails
 
 - PR 1 merged: D1 with protocol fixtures and the daemon e2e.
 - PR 2 merged: D2, D5, `user_home()`, uninstall e2e and unit tests.
-- PR 3 merged (after the §Decision requested is ruled): D3, D4, D6;
+- PR 3 merged: D3, D4, D6;
   `./scripts/verify-release` reaches and passes the package smoke before its
   designed exit 1, on macOS and on Ubuntu.
 - PR 4 merged: D7, D8; a dry-run tag on a fork or branch produces a draft
@@ -267,22 +284,47 @@ a failure; a failed notarization is. Smoke: any step failing fails
   `docs/references/2026-09-XX-packaging-walk.md`.
 - `./scripts/verify` green on every final tree.
 
-## Decision requested
+## Decision
 
-Q11 requires the package smoke to run install → activation → handshake →
-uninstall isolated from the real `~/.corral` and provider configs. The
-packaged binaries are production builds: they resolve the account home from
-the account database and honour no override, by ADR 0001 D1 (a shell
-variable must not give one account two daemons), and the test namespace is
-kept out of them by `check-test-support-boundary`. So the full sequence
-cannot run against release artifacts on a developer machine without either
-touching the real home or breaking one of those two rules. D6 proposes:
-the default smoke stops before anything reaches the account home; the
-daemon-dependent half runs on the throwaway release runner against the
-exact artifact, and locally through the e2e harness against test-support
-builds arranged in the same layout. The alternative is a production
-override such as `CORRAL_HOME`, which reopens ADR 0001 D1. Recommended:
-D6 as written.
+Asked 2026-09-11: Q11 requires the package smoke to run install →
+activation → handshake → uninstall isolated from the real `~/.corral` and
+provider configs, but release-build binaries resolve the account home from
+the account database with no override (ADR 0001 D1) and carry no test
+namespace (`check-test-support-boundary`). Options: D6 as written, or a
+production override such as `CORRAL_HOME`.
+
+Ruled by the founder the same day, verbatim:
+
+```text
+D6: ACCEPT
+
+Do not add CORRAL_HOME.
+Keep ADR 0001 D1 unchanged.
+
+Local smoke:
+artifact/install surface only.
+
+Release smoke:
+real production binary on disposable runner account,
+using real ~/.corral resolution.
+```
+
+Reasoning recorded with it: the account-database resolution is a security
+boundary, not a path convenience; an override would give the daemon a
+second namespace, make user machines and CI behave differently, and set
+the precedent for `CORRAL_PROVIDER_CONFIG`, `CORRAL_DAEMON_STATE`,
+`CORRAL_SOCKET_PATH` until the canonical rendezvous is eroded. The daemon
+is not untested; artifact validation and runtime validation are split
+across two environments. Also ruled in the same message: no metadata
+file (the workspace version reaches the binary, the plist, the tag and the
+file name — one truth source); install is not upgrade, M1 is fresh install
+only; `strip = true` and no other release-profile change (LTO, panic
+strategy, codegen units and compression change reproducibility); no icon;
+PR 2 must show the SIGTERM permission-failure, daemon-absent and
+daemon-does-not-exit behaviours, with no SIGKILL fallback; rename
+`provider_home()` only because its body is the user's home, so that
+"provider" does not leak from the integration layer into filesystem
+identity.
 
 ## Plan Size Justification
 
