@@ -51,10 +51,11 @@ jobs:
         include:
           - platform: linux-x86_64
             runner: ubuntu-24.04
-          # Pinned, never macos-latest: this image's major is the lowest
-          # macOS the release verifies, and MACOS_MINIMUM in scripts/package
-          # — LSMinimumSystemVersion and the deployment target — is that
-          # number (Q16). Moving the pin moves the constant, in one change.
+          # Pinned, never macos-latest: this image is where the release
+          # verifies. The oldest macOS the binaries run on is MACOS_MINIMUM
+          # in scripts/package, the deployment target they compile against
+          # on this image (Q16 as amended 2026-09-11); the pin can move
+          # without moving that number.
           - platform: macos-arm64
             runner: macos-15
     runs-on: ${{ matrix.runner }}

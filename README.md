@@ -15,7 +15,7 @@ what the current phase includes and what it must prove before it ships.
 
 ## Install
 
-macOS on Apple Silicon, and Ubuntu 24.04 on x86_64:
+macOS 14 or later on Apple Silicon, and Ubuntu 24.04 on x86_64:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Poordeveloper/corral/main/install.sh | sh

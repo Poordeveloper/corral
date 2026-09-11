@@ -872,7 +872,7 @@ Digest of what round 2 froze:
 | Q | Ruling |
 |---|---|
 | Q15 | **(a), semantics pinned.** A false-item dispute binds only the current active attention item. No current item → non-zero exit, no journal record, message `No current attention item. If Corral failed to surface an item, use --missed.` `--missed` is a distinct statement of fact — "should have appeared, did not" — not a dispute without an id. A false positive that has already ended is never attributed by guessing the most recent item; the evidence review matches it by session and wall-clock time against `born` / `ended`. Item ids stay out of the normal product UI; a diagnostics surface, if ever needed, is its own task. |
-| Q16 | **Accepted with a narrowed Linux claim.** macOS: Apple Silicon only; minimum version = the lowest macOS major M1 CI actually verifies, filled into `LSMinimumSystemVersion` after the runner image is pinned. Linux: **Ubuntu 24.04 x86_64 only** for M1 — `ubuntu-latest` plus the PRoot host prove nothing about Debian, Fedora, Arch, or older Ubuntu; a glibc baseline may replace the distro claim only if the build actually establishes one. aarch64 Linux is explicitly unsupported and unclaimed. |
+| Q16 | **Amended 2026-09-11 (§Amendments): the minimum macOS is the deployment target the build compiles against, not the runner's major.** Accepted with a narrowed Linux claim. macOS: Apple Silicon only; minimum version = the lowest macOS major M1 CI actually verifies, filled into `LSMinimumSystemVersion` after the runner image is pinned. Linux: **Ubuntu 24.04 x86_64 only** for M1 — `ubuntu-latest` plus the PRoot host prove nothing about Debian, Fedora, Arch, or older Ubuntu; a glibc baseline may replace the distro claim only if the build actually establishes one. aarch64 Linux is explicitly unsupported and unclaimed. |
 | Q17 | **Accepted, artifact pin distinguished from installer pin.** GitHub Releases is the canonical distribution; the root `install.sh` is a bootstrap served from `main`; default = latest published, non-draft, non-prerelease; `CORRAL_VERSION=vX.Y.Z` pins the release artifact, **not** the revision of `install.sh`, which is a moving target. No installer release asset in M1 and no claim of a fully reproducible pinned installation; freezing `install.sh` at the tag arrives with a later supply-chain task. |
 | Q18 | **Accepted with two invariants.** (1) tag `vX.Y.Z` must mechanically equal `workspace.package.version = X.Y.Z`, else the workflow fails before any draft release. (2) draft → publish is the only human release authority: human pushes tag → CI verifies the exact tagged commit → package → smoke → checksums → draft release → release-gate evidence accepted → human publishes. "CI ran" leaves the human evidence document; the machine proves it. `0.0.0 → 0.1.0` for M1. |
 | Q19 | **(a), count unit pinned.** ≥ 100 trusted activations in aggregate across the declared provider set — not journal transitions, sessions, attention items, or daemon runs. Trusted activation = `to == needs_you && born.is_some() && assurance ∈ {deterministic, attested} && sealed == true`. Coverage: Claude + Codex total ≥ 100 **and** each declared-supported provider ≥ 1 trusted activation; one is not maturity, it prevents claiming a provider the window never exercised. No second per-provider threshold; missing coverage narrows the claim or extends the window (Q4). |
@@ -1131,3 +1131,19 @@ database, and the advance is a human-only dedicated PR. Why: the epoch is
 registry schema; a runner with nothing to run is speculative
 infrastructure. If a migration is ever wanted, the change that needs one
 writes the first, as `corral-state::schema` already says.
+
+### 2026-09-11 — Q16: the minimum macOS is the deployment target, not the runner's major
+
+Founder, on being told the release runner would be pinned to `macos-15`
+because `macos-14` is marked deprecated, and that Q16 would then make the
+claim 15.0: 「runner是15，不影响编译支持14」.
+
+What changes: `MACOS_MINIMUM` in `scripts/package` — `MACOSX_DEPLOYMENT_TARGET`
+and `LSMinimumSystemVersion` — is 14.0, the deployment target the release
+build compiles against; the release workflow verifies on the pinned
+`macos-15` image. The two numbers are no longer one: the runner pin says
+where the tests ran, the constant says the oldest macOS the binaries are
+built to run on. What stays: nothing runs the suite on macOS 14, so the
+14.0 claim rests on the deployment target and on the founder's own
+dogfood, not on CI; a macOS-14 failure report is a bug, not a contract
+violation. Q16's Linux claim and its Intel exclusion are unchanged.

@@ -16,11 +16,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# One constant: the lowest macOS major the release workflow verifies, as
-# LSMinimumSystemVersion and as the deployment target of the build (grill
-# Q16). .github/workflows/release.yml pins that runner — macos-15 — and the
-# pin and this number move together, in one change.
-MACOS_MINIMUM="15.0"
+# One constant: the oldest macOS the binaries are built to run on, as the
+# deployment target of the build and as LSMinimumSystemVersion. Not the
+# release runner's major — .github/workflows/release.yml verifies on
+# macos-15 and compiles against this (grill Q16 as amended 2026-09-11).
+MACOS_MINIMUM="14.0"
 
 # cargo's own answer, so a version edited in Cargo.toml cannot disagree with
 # the one the binaries report. The id reads `…/crates/corral#0.0.0`, or
