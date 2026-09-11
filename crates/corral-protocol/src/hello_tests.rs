@@ -68,6 +68,43 @@ fn unknown_hello_fields_are_ignored() {
     assert_eq!(hello.protocol_version, 1);
 }
 
+#[test]
+fn a_server_hello_without_a_pid_names_no_process() {
+    let hello: ServerHello = serde_json::from_str(
+        r#"{"protocol_version":1,"min_compatible_peer_version":1,"compatibility_result":"compatible"}"#,
+    )
+    .expect("an older daemon's hello decodes");
+
+    assert_eq!(hello.pid, None);
+}
+
+#[test]
+fn a_server_hello_carries_its_pid_beside_fields_this_build_does_not_know() {
+    let hello: ServerHello = serde_json::from_str(
+        r#"{"protocol_version":1,"min_compatible_peer_version":1,"compatibility_result":"compatible","pid":4242,"uptime":"future"}"#,
+    )
+    .expect("decode");
+
+    assert_eq!(hello.pid, Some(4242));
+}
+
+/// An older client tolerates the key either way; omitting it keeps the wire
+/// honest about what the sender knows rather than spelling `null`.
+#[test]
+fn a_pid_the_daemon_does_not_know_is_omitted_not_null() {
+    let hello = ServerHello {
+        protocol_version: 1,
+        min_compatible_peer_version: 1,
+        capabilities: Default::default(),
+        compatibility_result: Compatibility::Compatible,
+        pid: None,
+    };
+
+    let encoded = serde_json::to_string(&hello).expect("encode");
+
+    assert!(!encoded.contains("pid"), "{encoded}");
+}
+
 /// The field is `compatibility_result`, as ADR 0001 and S3(a) name it. A peer
 /// spelling it otherwise states no verdict, and a verdict may not be assumed
 /// from an absent field.

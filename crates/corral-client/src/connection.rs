@@ -53,6 +53,12 @@ impl Connection {
         &self.peer
     }
 
+    /// The daemon's process id, or `None` for a daemon too old to say —
+    /// never a guess from a lock or a pidfile.
+    pub fn daemon_pid(&self) -> Option<u32> {
+        self.peer.pid
+    }
+
     pub fn local_versions(&self) -> PeerVersions {
         local_versions()
     }
