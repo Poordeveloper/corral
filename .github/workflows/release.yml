@@ -91,8 +91,9 @@ jobs:
 
       # Ad hoc until the signing secrets exist (Q9): the packaging PR merges
       # without credentials, a public macOS release does not ship without
-      # them. When they are added, export CORRAL_SIGNING_IDENTITY and
-      # CORRAL_NOTARY_PROFILE here from repository secrets.
+      # them. When they are added: import the Developer ID identity into a
+      # runner keychain and export CORRAL_SIGNING_IDENTITY, and write the App
+      # Store Connect API key JSON to a file CORRAL_NOTARY_API_KEY names.
       - run: ./scripts/package
 
       - run: ./scripts/package-smoke dist

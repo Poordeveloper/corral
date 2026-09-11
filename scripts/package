@@ -11,10 +11,29 @@
 # D3). Signing class follows the credentials present: none → ad hoc, which
 # proves the packaging mechanics and nothing about Gatekeeper (grill Q9);
 # CORRAL_SIGNING_IDENTITY → Developer ID with hardened runtime and a secure
-# timestamp; CORRAL_NOTARY_PROFILE on top → notarized and stapled. Missing
-# credentials are not a failure; a failed notarization is.
+# timestamp; an App Store Connect API key beside it → notarized and stapled.
+# Missing credentials are not a failure; a failed notarization is.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# The App Store Connect API key notarization authenticates with: JSON
+# carrying `issuer_id`, `key_id`, and `private_key` — the .p8 body, with or
+# without PEM armor. Defaulted to the maintainer's release-machine location
+# so a signed build notarizes without being told; CI points it at a file it
+# writes from a secret. Only ever read beside a Developer ID identity: an
+# ad-hoc bundle cannot be notarized, so an ad-hoc run ignores it entirely.
+NOTARY_API_KEY="${CORRAL_NOTARY_API_KEY:-$HOME/.p12/api-key.json}"
+
+# The rebuilt private key lives in one 0700 directory for the length of the
+# submission and goes away with the script however it ends. It is never
+# written into dist/, which is uploaded.
+NOTARY_WORKDIR=""
+cleanup() {
+    if [ -n "$NOTARY_WORKDIR" ]; then
+        rm -rf "$NOTARY_WORKDIR"
+    fi
+}
+trap cleanup EXIT
 
 # One constant: the oldest macOS the binaries are built to run on, as the
 # deployment target of the build and as LSMinimumSystemVersion. Not the
@@ -54,6 +73,48 @@ done
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
+# Submit the bundle and staple the ticket Apple issues.
+#
+# The key file is the one input: `notarytool` wants the private key as a
+# file, so the JSON's `private_key` is rebuilt into one. Stapling is what
+# makes the ticket travel with the archive — without it a machine that
+# cannot reach Apple's service sees an unnotarized app.
+notarize() {
+    local app="$1"
+    NOTARY_WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}"/corral-notary.XXXXXX)"
+    local key="$NOTARY_WORKDIR/AuthKey.p8"
+    local issuer key_id
+
+    key_id="$(plutil -extract key_id raw -o - "$NOTARY_API_KEY")"
+    issuer="$(plutil -extract issuer_id raw -o - "$NOTARY_API_KEY")"
+    [ -n "$key_id" ] && [ -n "$issuer" ] || {
+        echo "package: $NOTARY_API_KEY does not carry key_id and issuer_id" >&2
+        exit 1
+    }
+
+    # Tolerant of both shapes the field is found in: armored PEM, or the bare
+    # base64 body that has to be folded and wrapped before a parser accepts it.
+    if plutil -extract private_key raw -o - "$NOTARY_API_KEY" | grep -q 'BEGIN PRIVATE KEY'; then
+        plutil -extract private_key raw -o - "$NOTARY_API_KEY" > "$key"
+    else
+        {
+            echo "-----BEGIN PRIVATE KEY-----"
+            plutil -extract private_key raw -o - "$NOTARY_API_KEY" | tr -d '\n' | fold -w 64
+            echo ""
+            echo "-----END PRIVATE KEY-----"
+        } > "$key"
+    fi
+
+    echo "==> notarize (key $key_id)"
+    local submission="$NOTARY_WORKDIR/notarize.zip"
+    ditto -c -k --keepParent "$app" "$submission"
+    xcrun notarytool submit "$submission" \
+        --key "$key" --key-id "$key_id" --issuer "$issuer" --wait
+    xcrun stapler staple "$app"
+    # Proof the ticket is attached rather than merely issued.
+    xcrun stapler validate "$app"
+}
+
 package_macos() {
     local app="$DIST/Corral.app"
     local archive="Corral-$VERSION-macos-arm64.zip"
@@ -74,10 +135,6 @@ package_macos() {
             codesign --force --sign "$CORRAL_SIGNING_IDENTITY" --options runtime --timestamp "$@"
         }
     else
-        if [ -n "${CORRAL_NOTARY_PROFILE:-}" ]; then
-            echo "package: CORRAL_NOTARY_PROFILE is set without CORRAL_SIGNING_IDENTITY; an ad-hoc bundle cannot be notarized" >&2
-            exit 1
-        fi
         class="ad-hoc"
         sign() {
             codesign --force --sign - "$@"
@@ -92,14 +149,15 @@ package_macos() {
     sign "$app"
     codesign --verify --deep --strict "$app"
 
-    if [ -n "${CORRAL_NOTARY_PROFILE:-}" ]; then
-        echo "==> notarize"
-        local submission="$DIST/notarize.zip"
-        ditto -c -k --keepParent "$app" "$submission"
-        xcrun notarytool submit "$submission" --keychain-profile "$CORRAL_NOTARY_PROFILE" --wait
-        rm -f "$submission"
-        xcrun stapler staple "$app"
-        class="$class, notarized"
+    # Only a Developer ID bundle is submittable; an ad-hoc one is rejected by
+    # Apple, so the key is not even read on that path.
+    if [ "$class" = "Developer ID" ]; then
+        if [ -f "$NOTARY_API_KEY" ]; then
+            notarize "$app"
+            class="$class, notarized"
+        else
+            echo "package: $NOTARY_API_KEY not found — signed but not notarized; a download from a browser will still be refused by Gatekeeper"
+        fi
     fi
 
     echo "==> archive $DIST/$archive"
@@ -107,7 +165,7 @@ package_macos() {
     (cd "$DIST" && shasum -a 256 "$archive" > SHA256SUMS)
     echo "package: $DIST/$archive ($class)"
     if [ "$class" = "ad-hoc" ]; then
-        echo "package: ad-hoc signed — proves packaging, not Gatekeeper; set CORRAL_SIGNING_IDENTITY (and CORRAL_NOTARY_PROFILE) for a distributable build"
+        echo "package: ad-hoc signed — proves packaging, not Gatekeeper; set CORRAL_SIGNING_IDENTITY for a distributable build, notarized from $NOTARY_API_KEY"
     fi
 }
 
