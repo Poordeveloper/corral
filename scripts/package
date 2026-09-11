@@ -18,8 +18,9 @@ cd "$(dirname "$0")/.."
 
 # One constant: the lowest macOS major the release workflow verifies, as
 # LSMinimumSystemVersion and as the deployment target of the build (grill
-# Q16). The release workflow pins the runner image that fixes this number.
-MACOS_MINIMUM="14.0"
+# Q16). .github/workflows/release.yml pins that runner — macos-15 — and the
+# pin and this number move together, in one change.
+MACOS_MINIMUM="15.0"
 
 # cargo's own answer, so a version edited in Cargo.toml cannot disagree with
 # the one the binaries report. The id reads `…/crates/corral#0.0.0`, or

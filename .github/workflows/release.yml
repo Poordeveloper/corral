@@ -1,0 +1,148 @@
+# A tag becomes a draft release a human publishes (M1 completion grill Q18).
+#
+# Everything here is exact-commit: the tag must name the workspace version;
+# Ubuntu and macOS both run ./scripts/verify on the tagged commit — a green
+# scheduled run of another commit is never release evidence (Q11, Q13) —
+# then package, then the install-surface smoke, then the production
+# lifecycle on the runner's throwaway account. The release job only
+# collects what those produced, re-checks the checksums, and creates the
+# draft. CI calls the scripts; it never re-implements what they decide
+# (AGENTS.md §Verification).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Keep in lockstep with ci.yml so every platform verifies with the same tool.
+env:
+  CARGO_DENY_VERSION: 0.20.2
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: tag names the workspace version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # cargo's answer, the same one scripts/package bakes into the asset
+      # names and the plist: a tag that disagrees with it would publish an
+      # archive whose contents say another version.
+      - name: The tag equals v<workspace version>
+        run: |
+          workspace="$(cargo pkgid -p corral)"
+          workspace="${workspace##*#}"
+          workspace="${workspace##*@}"
+          if [ "$GITHUB_REF_NAME" != "v$workspace" ]; then
+            echo "release: tag $GITHUB_REF_NAME does not name the workspace version $workspace; bump Cargo.toml or retag" >&2
+            exit 1
+          fi
+          echo "release: $GITHUB_REF_NAME names workspace version $workspace"
+
+  build:
+    name: verify, package, smoke (${{ matrix.platform }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+          # Pinned, never macos-latest: this image's major is the lowest
+          # macOS the release verifies, and MACOS_MINIMUM in scripts/package
+          # — LSMinimumSystemVersion and the deployment target — is that
+          # number (Q16). Moving the pin moves the constant, in one change.
+          - platform: macos-arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # gpui's Linux backends link against these at build time. Environment
+      # setup only, the same list ci.yml installs.
+      - name: Desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig1-dev
+
+      - name: Install cargo-deny
+        run: |
+          cargo deny --version 2>/dev/null | grep -qF "cargo-deny $CARGO_DENY_VERSION" \
+            || cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
+
+      - run: ./scripts/verify
+
+      # Ad hoc until the signing secrets exist (Q9): the packaging PR merges
+      # without credentials, a public macOS release does not ship without
+      # them. When they are added, export CORRAL_SIGNING_IDENTITY and
+      # CORRAL_NOTARY_PROFILE here from repository secrets.
+      - run: ./scripts/package
+
+      - run: ./scripts/package-smoke dist
+
+      # The runner's account is the throwaway the disposable level exists
+      # for: install into its real home, activate the real daemon under its
+      # real ~/.corral, list, uninstall, and see the daemon leave.
+      - run: ./scripts/package-smoke --disposable-account dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.platform }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  release:
+    name: draft release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: assets
+
+      # One manifest over both platforms' archives, which is what install.sh
+      # downloads beside the archive it picks. Each platform's package run
+      # wrote a manifest naming only its own archive, so concatenation is the
+      # whole merge — and every line is re-checked against the bytes that
+      # actually arrived here before anything is attached.
+      - name: Assemble dist and re-check SHA256SUMS
+        run: |
+          mkdir dist
+          cp assets/dist-*/*.zip assets/dist-*/*.tar.gz dist/
+          cat assets/dist-*/SHA256SUMS > dist/SHA256SUMS
+          (cd dist && sha256sum -c SHA256SUMS)
+          ls -l dist
+
+      - name: Create the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --draft --verify-tag \
+            --title "Corral $GITHUB_REF_NAME" \
+            --notes "$(printf 'Built from %s by the release workflow. A human publishes this draft.\n\nInstall (macOS on Apple Silicon, Ubuntu 24.04 on x86_64):\n\n    curl -fsSL https://raw.githubusercontent.com/%s/main/install.sh | sh\n' "$GITHUB_SHA" "$GITHUB_REPOSITORY")" \
+            dist/*.zip dist/*.tar.gz dist/SHA256SUMS

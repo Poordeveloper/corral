@@ -30,8 +30,11 @@ cat >&2 <<'MISSING'
 verify-release: INCOMPLETE — the following gates are not implemented yet:
 
   supported provider/version matrix       (PR4-PR6)
-  multi-platform release checks           (macOS + Linux)
   dogfood release-gate evidence           (ROADMAP.md §5)
+
+Multi-platform release checks cannot run here: one machine is one OS. They
+are .github/workflows/release.yml, which runs this tree's verify, package
+and smoke on Ubuntu 24.04 and macOS 15 on the exact tagged commit.
 
 Implement the gate with the work it covers; do not make this script pass by
 removing the check.
