@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# Does what scripts/package produced install the way a user gets it?
+#
+#   scripts/package-smoke [dist]                 the install surface (default)
+#   scripts/package-smoke --disposable-account [dist]
+#
+# Default level, for verify-release and PR CI on any machine: the archive
+# unpacks to the installation shape, the plist says what the workspace says,
+# the signature verifies, and install.sh from the local artifact into a
+# substitute HOME places the installation and the link, through which the
+# production `corral --version` answers. No daemon starts and no provider
+# file is touched: a production binary resolves the real account home and
+# must (ADR 0001 D1), so this level never runs anything that activates.
+#
+# --disposable-account, for the release workflow's throwaway user only: the
+# production lifecycle on this account's real home — install, activation
+# through the link, a CLI interaction, `corral uninstall`, the daemon seen
+# leaving, the files gone and the Corral root kept (M1 packaging plan D6).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+LEVEL="install-surface"
+if [ "${1:-}" = "--disposable-account" ]; then
+    LEVEL="disposable-account"
+    shift
+fi
+DIST="${1:-dist}"
+[ -d "$DIST" ] || { echo "package-smoke: $DIST is not a directory; run scripts/package first" >&2; exit 1; }
+DIST="$(cd "$DIST" && pwd)"
+
+fail() { echo "package-smoke: $*" >&2; exit 1; }
+step() { echo "==> $*"; }
+
+VERSION="$(cargo pkgid -p corral)"
+VERSION="${VERSION##*#}"
+VERSION="${VERSION##*@}"
+
+case "$(uname -s)/$(uname -m)" in
+    Darwin/arm64) PLATFORM="macos-arm64" ;;
+    Linux/x86_64) PLATFORM="linux-x86_64" ;;
+    *) fail "unsupported platform $(uname -s) $(uname -m)" ;;
+esac
+case "$PLATFORM" in
+    macos-arm64) ARCHIVE="Corral-$VERSION-macos-arm64.zip" ;;
+    linux-x86_64) ARCHIVE="corral-$VERSION-linux-x86_64.tar.gz" ;;
+esac
+[ -f "$DIST/$ARCHIVE" ] || fail "$DIST/$ARCHIVE not found: the artifact does not carry the workspace version $VERSION"
+grep -q "[ *]$ARCHIVE\$" "$DIST/SHA256SUMS" || fail "$DIST/SHA256SUMS does not name $ARCHIVE"
+
+TMP="${TMPDIR:-/tmp}"
+SCRATCH="$(mktemp -d "${TMP%/}/corral-smoke.XXXXXX")"
+trap 'rm -rf "$SCRATCH"' EXIT
+
+# --- the archive's shape ----------------------------------------------------
+
+step "unpack $ARCHIVE"
+mkdir "$SCRATCH/unpacked"
+case "$PLATFORM" in
+    macos-arm64)
+        ditto -x -k "$DIST/$ARCHIVE" "$SCRATCH/unpacked"
+        APP="$SCRATCH/unpacked/Corral.app"
+        for exe in corral-desktop corrald corral; do
+            [ -x "$APP/Contents/MacOS/$exe" ] || fail "$ARCHIVE lacks Contents/MacOS/$exe"
+        done
+        [ -f "$APP/Contents/Info.plist" ] || fail "$ARCHIVE lacks Contents/Info.plist"
+
+        step "plist"
+        plist_key() { plutil -extract "$1" raw -o - "$APP/Contents/Info.plist"; }
+        expect_key() {
+            local actual
+            actual="$(plist_key "$1")"
+            [ "$actual" = "$2" ] || fail "Info.plist $1 is '$actual', expected '$2'"
+        }
+        expect_key CFBundleIdentifier com.poordeveloper.corral
+        expect_key CFBundleExecutable corral-desktop
+        expect_key CFBundleName Corral
+        expect_key CFBundlePackageType APPL
+        expect_key CFBundleVersion "$VERSION"
+        expect_key CFBundleShortVersionString "$VERSION"
+        expect_key NSHighResolutionCapable true
+        [ -n "$(plist_key LSMinimumSystemVersion)" ] || fail "Info.plist has no LSMinimumSystemVersion"
+
+        step "signature"
+        codesign --verify --deep --strict "$APP"
+        ;;
+    linux-x86_64)
+        tar -xzf "$DIST/$ARCHIVE" -C "$SCRATCH/unpacked"
+        TREE="$SCRATCH/unpacked/corral-$VERSION-linux-x86_64"
+        [ -d "$TREE" ] || fail "$ARCHIVE does not unpack to corral-$VERSION-linux-x86_64/"
+        for exe in corral corrald corral-desktop; do
+            [ -x "$TREE/$exe" ] || fail "$ARCHIVE lacks $exe"
+        done
+        ;;
+esac
+
+# --- the install surface ----------------------------------------------------
+
+# A home of its own and a PATH with no agent on it, so the installer finds no
+# provider to enable and nothing here activates a daemon against the real
+# account. Nothing the installer runs reads $HOME for anything but placement.
+if [ "$LEVEL" = "install-surface" ]; then
+    step "install.sh into a substitute HOME"
+    SMOKE_HOME="$SCRATCH/home"
+    mkdir "$SMOKE_HOME"
+    env -i HOME="$SMOKE_HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" TMPDIR="$SCRATCH" \
+        CORRAL_INSTALL_FROM="$DIST" sh ./install.sh
+    case "$PLATFORM" in
+        macos-arm64) INSTALLED="$SMOKE_HOME/Applications/Corral.app"; CLI="$INSTALLED/Contents/MacOS/corral" ;;
+        linux-x86_64) INSTALLED="$SMOKE_HOME/.local/share/corral"; CLI="$INSTALLED/bin/corral" ;;
+    esac
+    LINK="$SMOKE_HOME/.local/bin/corral"
+    [ -x "$CLI" ] || fail "install.sh did not place $CLI"
+    [ -L "$LINK" ] || fail "install.sh did not link $LINK"
+
+    step "corral --version through the link"
+    REPORTED="$("$LINK" --version)"
+    [ "$REPORTED" = "corral $VERSION" ] || fail "the installed corral reports '$REPORTED', expected 'corral $VERSION'"
+
+    step "the link resolves into the installation"
+    RESOLVED="$(readlink -f "$LINK")"
+    case "$RESOLVED" in
+        "$(readlink -f "$INSTALLED")"/*) ;;
+        *) fail "$LINK resolves to $RESOLVED, outside $INSTALLED" ;;
+    esac
+
+    step "a second install is refused"
+    if env -i HOME="$SMOKE_HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" TMPDIR="$SCRATCH" \
+        CORRAL_INSTALL_FROM="$DIST" sh ./install.sh >/dev/null 2>"$SCRATCH/refusal"; then
+        fail "install.sh installed over an existing installation"
+    fi
+    grep -q "already installed" "$SCRATCH/refusal" || fail "the refusal did not say why: $(cat "$SCRATCH/refusal")"
+
+    echo "package-smoke: OK ($LEVEL, $ARCHIVE)"
+    exit 0
+fi
+
+# --- the production lifecycle, on a throwaway account -----------------------
+
+# This level installs into the real home, starts the real daemon under the
+# real ~/.corral, and removes the installation again. An account that already
+# has Corral state is somebody's, not a throwaway.
+[ ! -e "$HOME/.corral" ] || fail "$HOME/.corral exists: this account has Corral state, and the disposable level is for a throwaway account"
+
+step "install.sh into $HOME"
+CORRAL_INSTALL_FROM="$DIST" sh ./install.sh
+case "$PLATFORM" in
+    macos-arm64) INSTALLED="$HOME/Applications/Corral.app" ;;
+    linux-x86_64) INSTALLED="$HOME/.local/share/corral" ;;
+esac
+LINK="$HOME/.local/bin/corral"
+[ -L "$LINK" ] || fail "install.sh did not link $LINK"
+
+step "activation and a listing through the link"
+"$LINK" ping
+"$LINK" list
+
+step "corral uninstall"
+"$LINK" uninstall | tee "$SCRATCH/uninstall.out"
+grep -q "stopped corrald (pid " "$SCRATCH/uninstall.out" || fail "uninstall did not report the daemon leaving on SIGTERM"
+[ ! -e "$INSTALLED" ] || fail "$INSTALLED survived uninstall"
+[ ! -L "$LINK" ] || fail "$LINK survived uninstall"
+[ -d "$HOME/.corral" ] || fail "uninstall removed $HOME/.corral without --purge"
+
+echo "package-smoke: OK ($LEVEL, $ARCHIVE)"

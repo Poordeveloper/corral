@@ -1,5 +1,7 @@
 # Build output
 /target/
+# What scripts/package produces
+/dist/
 /fuzz/target/
 /fuzz/Cargo.lock
 

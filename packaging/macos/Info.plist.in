@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Corral.app's Info.plist, filled in by scripts/package: @VERSION@ is the
+  workspace version and @MACOS_MINIMUM@ the one deployment constant that
+  script owns. The bundle is a regular Dock app (no LSUIElement) whose main
+  executable is the Desktop; corrald and corral sit beside it so sibling
+  resolution holds for both (M1 completion grill Q7).
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>corral-desktop</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.poordeveloper.corral</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Corral</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>@MACOS_MINIMUM@</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>

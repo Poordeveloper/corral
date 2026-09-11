@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# The one packaging entry point: the release-profile executables of this
+# tree, assembled into what a user installs, on the machine this runs on.
+#
+#   macOS arm64    dist/Corral.app, signed, zipped as Corral-<version>-macos-arm64.zip
+#   Linux x86_64   dist/corral-<version>-linux-x86_64.tar.gz
+#   both           dist/SHA256SUMS over the archives this run produced
+#
+# The version is the workspace's and travels in the asset names, the plist and
+# `corral --version`; there is no separate metadata file (M1 packaging plan
+# D3). Signing class follows the credentials present: none → ad hoc, which
+# proves the packaging mechanics and nothing about Gatekeeper (grill Q9);
+# CORRAL_SIGNING_IDENTITY → Developer ID with hardened runtime and a secure
+# timestamp; CORRAL_NOTARY_PROFILE on top → notarized and stapled. Missing
+# credentials are not a failure; a failed notarization is.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# One constant: the lowest macOS major the release workflow verifies, as
+# LSMinimumSystemVersion and as the deployment target of the build (grill
+# Q16). The release workflow pins the runner image that fixes this number.
+MACOS_MINIMUM="14.0"
+
+# cargo's own answer, so a version edited in Cargo.toml cannot disagree with
+# the one the binaries report. The id reads `…/crates/corral#0.0.0`, or
+# `…#corral@0.0.0` when the package name and directory differ.
+VERSION="$(cargo pkgid -p corral)"
+VERSION="${VERSION##*#}"
+VERSION="${VERSION##*@}"
+[ -n "$VERSION" ] || { echo "package: the workspace version could not be read" >&2; exit 1; }
+
+case "$(uname -s)/$(uname -m)" in
+    Darwin/arm64) PLATFORM="macos-arm64" ;;
+    Linux/x86_64) PLATFORM="linux-x86_64" ;;
+    *)
+        echo "package: unsupported platform $(uname -s) $(uname -m); Corral packages macOS arm64 and Linux x86_64" >&2
+        exit 1
+        ;;
+esac
+
+EXECUTABLES=(corral corrald corral-desktop)
+DIST="dist"
+
+echo "==> release build ($PLATFORM, version $VERSION)"
+if [ "$PLATFORM" = "macos-arm64" ]; then
+    export MACOSX_DEPLOYMENT_TARGET="$MACOS_MINIMUM"
+fi
+cargo build --release -p corral -p corrald -p corral-desktop
+for exe in "${EXECUTABLES[@]}"; do
+    [ -x "target/release/$exe" ] || { echo "package: target/release/$exe was not built" >&2; exit 1; }
+done
+
+rm -rf "$DIST"
+mkdir -p "$DIST"
+
+package_macos() {
+    local app="$DIST/Corral.app"
+    local archive="Corral-$VERSION-macos-arm64.zip"
+
+    echo "==> bundle $app"
+    mkdir -p "$app/Contents/MacOS"
+    sed -e "s/@VERSION@/$VERSION/g" -e "s/@MACOS_MINIMUM@/$MACOS_MINIMUM/g" \
+        packaging/macos/Info.plist.in > "$app/Contents/Info.plist"
+    plutil -lint -s "$app/Contents/Info.plist"
+    for exe in "${EXECUTABLES[@]}"; do
+        cp "target/release/$exe" "$app/Contents/MacOS/$exe"
+    done
+
+    local class
+    if [ -n "${CORRAL_SIGNING_IDENTITY:-}" ]; then
+        class="Developer ID"
+        sign() {
+            codesign --force --sign "$CORRAL_SIGNING_IDENTITY" --options runtime --timestamp "$@"
+        }
+    else
+        if [ -n "${CORRAL_NOTARY_PROFILE:-}" ]; then
+            echo "package: CORRAL_NOTARY_PROFILE is set without CORRAL_SIGNING_IDENTITY; an ad-hoc bundle cannot be notarized" >&2
+            exit 1
+        fi
+        class="ad-hoc"
+        sign() {
+            codesign --force --sign - "$@"
+        }
+    fi
+
+    # Nested code first, then the bundle whose seal covers it.
+    echo "==> sign ($class)"
+    for exe in "${EXECUTABLES[@]}"; do
+        sign "$app/Contents/MacOS/$exe"
+    done
+    sign "$app"
+    codesign --verify --deep --strict "$app"
+
+    if [ -n "${CORRAL_NOTARY_PROFILE:-}" ]; then
+        echo "==> notarize"
+        local submission="$DIST/notarize.zip"
+        ditto -c -k --keepParent "$app" "$submission"
+        xcrun notarytool submit "$submission" --keychain-profile "$CORRAL_NOTARY_PROFILE" --wait
+        rm -f "$submission"
+        xcrun stapler staple "$app"
+        class="$class, notarized"
+    fi
+
+    echo "==> archive $DIST/$archive"
+    ditto -c -k --keepParent "$app" "$DIST/$archive"
+    (cd "$DIST" && shasum -a 256 "$archive" > SHA256SUMS)
+    echo "package: $DIST/$archive ($class)"
+    if [ "$class" = "ad-hoc" ]; then
+        echo "package: ad-hoc signed — proves packaging, not Gatekeeper; set CORRAL_SIGNING_IDENTITY (and CORRAL_NOTARY_PROFILE) for a distributable build"
+    fi
+}
+
+package_linux() {
+    local name="corral-$VERSION-linux-x86_64"
+    local archive="$name.tar.gz"
+
+    echo "==> tree $DIST/$name"
+    mkdir -p "$DIST/$name"
+    for exe in "${EXECUTABLES[@]}"; do
+        cp "target/release/$exe" "$DIST/$name/$exe"
+    done
+    echo "==> archive $DIST/$archive"
+    tar -C "$DIST" -czf "$DIST/$archive" "$name"
+    rm -rf "${DIST:?}/$name"
+    (cd "$DIST" && sha256sum "$archive" > SHA256SUMS)
+    echo "package: $DIST/$archive (unsigned; Linux artifacts carry no signature in M1)"
+}
+
+case "$PLATFORM" in
+    macos-arm64) package_macos ;;
+    linux-x86_64) package_linux ;;
+esac
+
+echo "==> $DIST/SHA256SUMS"
+cat "$DIST/SHA256SUMS"
