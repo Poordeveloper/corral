@@ -71,7 +71,7 @@ case "$PLATFORM" in
             actual="$(plist_key "$1")"
             [ "$actual" = "$2" ] || fail "Info.plist $1 is '$actual', expected '$2'"
         }
-        expect_key CFBundleIdentifier com.poordeveloper.corral
+        expect_key CFBundleIdentifier com.carriez.corral
         expect_key CFBundleExecutable corral-desktop
         expect_key CFBundleName Corral
         expect_key CFBundlePackageType APPL

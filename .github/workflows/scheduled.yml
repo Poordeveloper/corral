@@ -1,8 +1,10 @@
 # macOS coverage and scheduled evidence amplification.
 #
-# Per-PR CI runs on Linux; macOS runs after merge and on a schedule, and is
-# required by scripts/verify-release. Local development already verifies on
-# macOS, and a private repository bills macOS runners at ten times the rate.
+# Per-PR CI runs on Linux; macOS runs after merge and on a schedule as
+# regression evidence. Release evidence is release.yml, which verifies both
+# platforms on the exact tagged commit: a green run here of another commit
+# never stands in for that. Local development already verifies on macOS,
+# and a private repository bills macOS runners at ten times the rate.
 #
 # A failure here never retroactively invalidates merged history. It produces a
 # finding, may freeze the affected owner's autonomous merge pending triage, and
