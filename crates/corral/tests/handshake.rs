@@ -147,6 +147,19 @@ fn the_daemon_advertises_the_contracts_it_serves() {
     );
 }
 
+/// The pid is the one `corral uninstall` will signal (plan m1-packaging D5),
+/// so it must name this daemon's own process, not the activator's.
+#[test]
+fn the_daemon_names_its_own_process() {
+    let account = TestAccount::new("hello-pid");
+    let daemon = account.start_daemon();
+    let mut client = RawClient::connect(&account.socket());
+
+    let response = client.establish();
+
+    assert_eq!(response["outcome"]["result"]["pid"], json!(daemon.pid()));
+}
+
 #[test]
 fn an_unknown_method_leaves_the_connection_usable() {
     let account = TestAccount::new("unknown-method");

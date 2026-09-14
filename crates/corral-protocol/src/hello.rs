@@ -163,6 +163,13 @@ pub struct ServerHello {
     /// Required: absence would be unknown, and neither verdict may be assumed
     /// from unknown.
     pub compatibility_result: Compatibility,
+    /// The daemon's own process id, so that `corral uninstall` can send the
+    /// SIGTERM the daemon already honours instead of gaining a shutdown RPC —
+    /// possession of the local endpoint stays short of privileged control
+    /// (completion grill Q21). Additive: absent from an older daemon, and then
+    /// unknown, never a pid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

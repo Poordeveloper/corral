@@ -222,6 +222,10 @@ async fn bootstrap(
             capabilities
         },
         compatibility_result: verdict,
+        // Stated even on an incompatible verdict: the pid is a fact about
+        // this process, and an uninstall talking to a daemon too old or too
+        // new to serve it still needs to stop that daemon.
+        pid: Some(std::process::id()),
     };
 
     if verdict == Compatibility::Incompatible {

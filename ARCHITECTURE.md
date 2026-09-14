@@ -285,6 +285,7 @@ handshake carries, both ways, from PR1:
 ```text
 PROTOCOL_VERSION · MIN_COMPATIBLE_PEER_VERSION ·
 capabilities   # flat string set
+pid            # daemon → client only; additive, absent from an older daemon
 ```
 
 - Compatibility is one symmetric predicate, evaluated independently by
