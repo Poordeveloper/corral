@@ -230,7 +230,7 @@ impl DaemonState {
     /// Tell this daemon where the providers keep their own files.
     ///
     /// The same home the hook installer works in (`corral_rendezvous::
-    /// provider_home`, ADR 0013): a provider's settings and its session store
+    /// user_home`, ADR 0013): a provider's settings and its session store
     /// are two files in one place, and reading them out of two different
     /// notions of "home" is how a test comes to prove a layout no
     /// installation has.

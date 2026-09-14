@@ -31,6 +31,9 @@ corral-rendezvous = { workspace = true }
 # The terminal surfaces this binary drives: the session list, and the
 # attachment `attach` and `new` hand the terminal over to.
 corral-tui = { workspace = true }
+# `uninstall` stops the daemon with SIGTERM and watches its pid; the same
+# crate the daemon and the tests already send signals through.
+rustix = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 

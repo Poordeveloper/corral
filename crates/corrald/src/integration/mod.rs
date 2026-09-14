@@ -110,7 +110,7 @@ impl Target {
     /// the one mutator must not be pointable at another account's files by a
     /// shell variable.
     pub fn resolve(provider: KnownProvider) -> Result<Self, corral_rendezvous::RendezvousError> {
-        let home = corral_rendezvous::provider_home()?;
+        let home = corral_rendezvous::user_home()?;
         let (target, path) = match provider {
             KnownProvider::Claude => (
                 ConfigTarget::ClaudeUserSettings,

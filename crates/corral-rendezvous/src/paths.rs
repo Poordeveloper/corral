@@ -99,6 +99,11 @@ impl RendezvousPaths {
         Self::for_corral_root(home.as_ref().join(CORRAL_DIR))
     }
 
+    /// The Corral root itself: what `uninstall --purge` removes, last.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn socket(&self) -> &Path {
         &self.socket
     }
@@ -296,24 +301,29 @@ fn corral_root() -> Result<PathBuf, RendezvousError> {
     Ok(account_home()?.join(CORRAL_DIR))
 }
 
-/// The home directory whose provider dotfiles Corral's integration reads and
-/// writes — `~/.claude/settings.json`, `~/.codex/config.toml` (ADR 0013).
+/// The user's home directory as Corral sees it: where the providers keep the
+/// dotfiles Corral's integration reads and writes — `~/.claude/settings.json`,
+/// `~/.codex/config.toml` (ADR 0013) — and where an installation hangs its
+/// own user-level paths, `~/.local/bin/corral` and the installation itself.
+/// Corral's home is Corral's, not a provider's: the Corral root is resolved
+/// on its own (`corral_root`), never from this function's answer.
 ///
 /// Resolved through the account database for the same reason the rendezvous
 /// is (ADR 0001 D1): a shell variable must not be able to point Corral's one
 /// mutator at a different account's configuration. It follows the test
 /// namespace for a blunter reason — a test that resolved the real home would
 /// write into the developer's own provider configuration.
-pub fn provider_home() -> Result<PathBuf, RendezvousError> {
+pub fn user_home() -> Result<PathBuf, RendezvousError> {
     if let Some(root) = test_namespace::root()? {
-        return Ok(root.join(TEST_PROVIDER_HOME));
+        return Ok(root.join(TEST_USER_HOME));
     }
     account_home()
 }
 
-/// Where provider dotfiles live under a substituted namespace. Inside the
-/// test root, so one scratch directory still holds everything a test creates.
-const TEST_PROVIDER_HOME: &str = "provider-home";
+/// The user home under a substituted namespace. Inside the test root, so one
+/// scratch directory still holds everything a test creates. The directory
+/// keeps the name its first tenant gave it; the harness names it the same.
+const TEST_USER_HOME: &str = "provider-home";
 
 /// The home directory of the effective OS user, from the account database.
 ///

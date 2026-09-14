@@ -14,11 +14,12 @@ use crate::binaries;
 /// How long a test waits for a condition it expects to become true.
 pub const SETTLE: Duration = Duration::from_secs(10);
 
-/// Where a test namespace puts the home whose provider dotfiles Corral reads
-/// and writes: under the Corral root, because that is the directory the
-/// namespace seam is set to. A real account keeps them beside `.corral`
-/// instead, which is the one layout difference a test namespace has.
-const PROVIDER_HOME: &str = "provider-home";
+/// Where a test namespace puts the user's home — the provider dotfiles Corral
+/// reads and writes, and an installation's own user-level paths: under the
+/// Corral root, because that is the directory the namespace seam is set to. A
+/// real account keeps `.corral` under the home instead, which is the one
+/// layout difference a test namespace has.
+const USER_HOME: &str = "provider-home";
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -99,11 +100,11 @@ impl TestAccount {
         &self.base
     }
 
-    /// The home this account's daemon reads and writes provider files in,
-    /// as `corral_rendezvous::provider_home` resolves it under the test
-    /// namespace.
-    pub fn provider_home(&self) -> PathBuf {
-        self.corral_root.join(PROVIDER_HOME)
+    /// The user's home as this account's processes see it — provider files,
+    /// `.local/bin`, an installation — as `corral_rendezvous::user_home`
+    /// resolves it under the test namespace.
+    pub fn user_home(&self) -> PathBuf {
+        self.corral_root.join(USER_HOME)
     }
 
     pub fn socket(&self) -> PathBuf {

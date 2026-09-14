@@ -25,6 +25,16 @@ pub struct SpawnedDaemon {
 }
 
 impl SpawnedDaemon {
+    /// Reap the child if it has exited.
+    ///
+    /// A daemon this surface started is this process's child, and a child
+    /// that exited stays a zombie — its pid still answers a liveness probe —
+    /// until it is waited for. Anything that watches this daemon's pid for
+    /// death has to wait for it, not merely signal it.
+    pub fn reap_if_exited(&mut self) {
+        let _ = self.child.try_wait();
+    }
+
     pub fn outcome(&mut self) -> SpawnOutcome {
         let exit_code = match self.child.try_wait() {
             Ok(Some(status)) => Some(status.code().unwrap_or(-1)),
