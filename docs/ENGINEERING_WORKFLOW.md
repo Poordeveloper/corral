@@ -372,12 +372,20 @@ Three entry points with distinct jobs (AGENTS.md §Verification):
                           disallowed-methods boundary lints
 
 ./scripts/verify-release  release gate, strict superset of verify:
-                          supported provider/version matrix
-                          packaging / install / uninstall
-                          multi-platform release checks
-                          migration verification
                           zero release-critical quarantines
+                          packaging / install / uninstall
+                          supported provider/version matrix
+                            (not yet implemented)
+                          dogfood release-gate evidence
+                            (not yet implemented)
 ```
+
+Multi-platform release evidence is absent from that list because one machine
+is one OS: `.github/workflows/release.yml` runs `verify`, `package` and the
+package smoke on Ubuntu and macOS against the exact tagged commit. A gate
+marked not yet implemented arrives with the work it covers; until every gate
+exists, `verify-release` exits non-zero rather than reporting a tree it has
+not verified.
 
 `verify` is merge-ready; `verify-release` answers "can we release" and is
 never a second definition of done. Repository scripts own verification
@@ -386,8 +394,10 @@ test selection, quarantine rules, compatibility logic, or release logic — it
 calls the scripts.
 
 Per-PR CI runs `./scripts/verify` on Linux plus the declared PR-metadata
-checks (Appendix A). macOS coverage runs post-merge and on schedule, and is
-required by `verify-release`; local development already verifies on macOS.
+checks (Appendix A). macOS runs post-merge and weekly as regression evidence,
+and local development already verifies on macOS. Neither is release evidence:
+that is the release workflow on the tagged commit, and a green scheduled run
+of some other commit never stands in for it.
 
 Scheduled jobs may only amplify evidence — stress, fuzz, soak, repeated flake
 probes, compatibility breadth too expensive per PR. No merge-critical
@@ -898,7 +908,9 @@ permitted CI additions and are closed-listed here.
 | protocol additive evolution | future-input fixture tests | verify |
 | malformed terminal input degrades rather than panics | deterministic corpus suite over `crates/corrald/tests/corpus/terminal` | verify |
 | full test truth | workspace test suite | verify |
-| release breadth (provider matrix, packaging, migrations, no release-critical quarantine) | verify-release | release |
+| release breadth (packaging, install, uninstall, no release-critical quarantine) | verify-release | release |
+| release breadth (provider matrix, dogfood evidence) | verify-release | release (not yet implemented — lands with `m1-release-gate`) |
+| both platforms verified on the exact tagged commit | `.github/workflows/release.yml` calling verify, package and the smoke per runner | release |
 | conventional commits | commit lint | CI PR check |
 | change-size thresholds | LOC advisory comment (production vs test split; flags >500 complex / >800 total) | CI PR check (advisory) |
 | schema/durable-event human gate | diff guard (`scripts/check-schema-gate`) on schema/migration/durable-event paths requiring the `DURABLE-APPROVED-BY:` marker in the PR body | CI PR check |
