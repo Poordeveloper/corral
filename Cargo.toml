@@ -145,3 +145,10 @@ unwrap_used = "deny"
 expect_used = "deny"
 await_holding_lock = "deny"
 undocumented_unsafe_blocks = "deny"
+
+# What ships: symbols stripped and nothing else. No LTO, no panic=abort, no
+# codegen tuning, no compression — a release binary that behaves like the
+# debug one under a different profile is worth more than a smaller file
+# (M1 packaging plan D3, ruled 2026-09-11).
+[profile.release]
+strip = true

@@ -13,6 +13,16 @@ cd "$(dirname "$0")/.."
 echo "==> release-critical quarantines"
 ./scripts/check-quarantines --release
 
+# The package gate: this tree's release build, assembled and installed the
+# way a user gets it, on this machine (M1 packaging plan D3/D6). The
+# disposable-account level — a real daemon lifecycle on a throwaway user —
+# runs only in the release workflow; locally the same lifecycle is proven by
+# the uninstall e2e suite against test-support builds.
+echo "==> package"
+./scripts/package
+echo "==> package smoke"
+./scripts/package-smoke dist
+
 # No migration gate: a registry schema change after the dogfood epoch is an
 # approved reset, not a migration (M1 completion grill, Q6 amended 2026-09-10).
 cat >&2 <<'MISSING'
@@ -20,7 +30,6 @@ cat >&2 <<'MISSING'
 verify-release: INCOMPLETE — the following gates are not implemented yet:
 
   supported provider/version matrix       (PR4-PR6)
-  packaging / install / uninstall         (M1 completion, after PR8)
   multi-platform release checks           (macOS + Linux)
   dogfood release-gate evidence           (ROADMAP.md §5)
 
